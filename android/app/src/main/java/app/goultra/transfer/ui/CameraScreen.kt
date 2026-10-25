@@ -1,5 +1,16 @@
 package app.goultra.transfer.ui
 
+import android.app.Activity
+import android.os.SystemClock
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.platform.LocalContext
@@ -107,6 +118,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.viewinterop.AndroidView
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CamSettings
+import app.goultra.transfer.camera.CardInfo
 import app.goultra.transfer.camera.SettingCodes
 
 private val RecordRed = Color(0xFFE53935)
@@ -445,7 +457,9 @@ fun CameraTab(vm: CameraController, onConnect: () -> Unit, onRecord: () -> Unit)
                 if (linked && settings != null) ModeRow(vm, settings, enabled = !recording && vm.settingBusy == null)
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.width(88.dp), contentAlignment = Alignment.Center) { ZoomButton(vm, settings, conf) }
+                    Box(Modifier.width(88.dp), contentAlignment = Alignment.Center) {
+                        if (vm.timeShiftNormal != null) SpeedButton(vm) else ZoomButton(vm, settings, conf)
+                    }
                     RecordButton(
                         recording = recording,
                         picture = picture,
@@ -512,18 +526,19 @@ private fun PreviewBox(
             )
         }
         vm.liveError?.let {
-            Text(it, color = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp))
-        }
-        if (recording) {
+            // Above the REC badge, which takes the bottom edge while recording.
             Text(
-                "● REC ${formatDuration(vm.capture?.seconds ?: 0)}",
+                it,
                 color = Color.White,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
-                    .background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(start = 8.dp, end = 8.dp, bottom = if (recording) 44.dp else 8.dp),
             )
         }
-        if (settings?.batteryPercent != null || settings?.podBatteryPercent != null) {
+        // Readings only for a live link: after a disconnect the last values would be stale.
+        val live = conn == ConnState.Connected || conn == ConnState.Remote
+        // Card and battery on top, the recording time at the bottom (they don't fit one row in TimeShift).
+        if (live) settings?.card?.let { CardChip(it, Modifier.align(Alignment.TopStart).padding(10.dp)) }
+        if (recording) RecBadge(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp))
+        if (live && (settings?.batteryPercent != null || settings?.podBatteryPercent != null)) {
             Row(
                 Modifier.align(Alignment.TopEnd).padding(10.dp)
                     .background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
@@ -575,6 +590,53 @@ private fun ModeRow(vm: CameraController, settings: CamSettings, enabled: Boolea
         }
     }
 }
+
+/**
+ * Recording time; in TimeShift also the speed. Not the video length: Auto picks its speed itself and doesn't
+ * report it, so the length is shown after the stop, from the file.
+ */
+@Composable
+private fun RecBadge(vm: CameraController, modifier: Modifier = Modifier) {
+    // Ticks from the phone clock (smooth), not from the camera's replies (every 1–2 s).
+    val now by produceState(SystemClock.elapsedRealtime()) {
+        while (true) {
+            delay(200)
+            value = SystemClock.elapsedRealtime()
+        }
+    }
+    val real = formatDuration(vm.recordSeconds(now))
+    val text = when (vm.timeShiftNormal) {
+        true -> "● REC $real · " + tr("Обычная", "Normal")
+        false -> "● REC $real · " + tr("Авто", "Auto")
+        null -> "● REC $real"
+    }
+    Text(
+        text,
+        color = Color.White,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
+    )
+}
+
+/** TimeShift recording: Auto (sped up, the camera picks how much) ↔ normal speed (1×). */
+@Composable
+private fun SpeedButton(vm: CameraController) {
+    val fast = vm.timeShiftNormal?.not() ?: return
+    Box(
+        Modifier.size(52.dp).clip(CircleShape)
+            .background(if (fast) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(enabled = !vm.speedBusy) { vm.toggleTimeShiftSpeed() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            if (fast) tr("Авто", "Auto") else "1×",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (fast) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 @Composable
 private fun ZoomButton(vm: CameraController, settings: CamSettings?, conf: CameraConf?) {
     val mode = settings?.mode ?: return
@@ -847,6 +909,25 @@ private fun BatteryLabel(name: String, percent: Int, charging: Boolean) {
     Text("$name $percent%", color = Color.White, fontSize = 12.sp)
 }
 
+/** «SD 46 мин · 19 ГБ» (video) or «SD 1630 фото · 19 ГБ» (photo): what still fits on the card. */
+@Composable
+private fun CardChip(card: CardInfo, modifier: Modifier = Modifier) {
+    val left = when {
+        card.photosLeft != null -> "${card.photosLeft} " + tr("фото", "photos")
+        card.videoSecondsLeft != null -> {
+            val m = card.videoSecondsLeft / 60
+            if (m >= 60) "${m / 60} " + tr("ч", "h") + " ${m % 60} " + tr("мин", "min") else "$m " + tr("мин", "min")
+        }
+        else -> null
+    }
+    Text(
+        listOfNotNull("SD", left, formatSize(card.freeBytes)).joinToString(" · ").replaceFirst("SD · ", "SD "),
+        color = if (card.freeBytes < card.totalBytes / 20) Color(0xFFFFB4A9) else Color.White, // < 5 % free: warn
+        fontSize = 12.sp,
+        modifier = modifier.background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+    )
+}
+
 /** Red dot — record, red square — stop, white disc — take a picture (photo / burst). */
 @Composable
 private fun RecordButton(
@@ -969,10 +1050,21 @@ internal fun rememberSidewaysRotation(): Int {
 internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> Unit) {
     val recording = vm.capture?.recording == true
     val picture = vm.settings?.mode?.let { SettingCodes.modes[it] }?.takesPicture == true
+    // Full screen: the status and navigation bars hidden while the phone is sideways (back on leaving).
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (view.context as? Activity)?.window
+        val bars = window?.let { WindowCompat.getInsetsController(it, view) }
+        bars?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        bars?.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose { bars?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
     Box(Modifier.fillMaxSize().background(Color.Black).clickable(remember { MutableInteractionSource() }, null) {}) {
-        // Lay the content out landscape (swapped constraints), then turn it to match the phone.
+        // Lay the content out landscape (swapped constraints), then turn it to match the phone; kept clear of the
+        // front camera cutout (and of the bars if the user swipes them in).
         Box(
             Modifier.align(Alignment.Center)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .layout { measurable, c ->
                     val p = measurable.measure(Constraints.fixed(c.maxHeight, c.maxWidth))
                     layout(c.maxWidth, c.maxHeight) { p.place((c.maxWidth - p.width) / 2, (c.maxHeight - p.height) / 2) }
@@ -989,16 +1081,10 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                         modifier = Modifier.align(Alignment.Center),
                     )
                 }
+                if (recording) RecBadge(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp))
                 Column(Modifier.align(Alignment.TopStart).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (recording) {
-                        Text(
-                            "● REC ${formatDuration(vm.capture?.seconds ?: 0)}",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
-                        )
-                    }
                     val s = vm.settings
+                    s?.card?.let { CardChip(it) }
                     if (s?.batteryPercent != null || s?.podBatteryPercent != null) {
                         Row(
                             Modifier.background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
@@ -1011,7 +1097,13 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     }
                 }
             }
-            Box(Modifier.align(Alignment.CenterEnd).padding(end = 10.dp)) {
+            // The shutter centred at the side; the TimeShift speed above it (an equal gap below keeps it centred).
+            Column(
+                Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Box(Modifier.size(52.dp)) { SpeedButton(vm) }
                 RecordButton(
                     recording = recording,
                     picture = picture,
@@ -1019,6 +1111,7 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     countdown = vm.countdown,
                     light = true,
                 ) { if (recording) vm.stopRecording() else onRecord() }
+                Spacer(Modifier.size(52.dp))
             }
         }
     }

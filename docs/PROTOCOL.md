@@ -90,7 +90,7 @@ connect with `WifiNetworkSpecifier` and bind sockets to that network. A VPN app 
 | 11 | GET_FILE_EXTRA | `{1: uri, 2: 2 (thumbnail)}` | raw NV12, see below |
 | 12 | DELETE_FILES | `{1: repeated uri}` → `{1: repeated fail_uri}` | *verified*; GO 3 tools send something else here |
 | 13 | GET_FILE_LIST | `{1: 2 (all), 2: start, 3: limit}` → `{1: repeated uri, 2: total}` | max **100** per page, page by `total` |
-| 15 | GET_CURRENT_CAPTURE_STATUS | → `{1: {1 state, 2 seconds}}` | |
+| 15 | GET_CURRENT_CAPTURE_STATUS | → `{1: {1 state, 2 seconds}}` | state 0 idle, 13 TimeShift, other non-zero = recording; seconds = real time |
 | 17 / 18 | GET / SET_TIMELAPSE_OPTIONS | `{1: TimelapseMode}` / `{1: {2 lapseTime ms}, 2: mode}` | interval & timelapse step |
 | 38 | GET_FILEINFO_LIST | empty → per-file metadata | 9 size, 10 duration s, 19 {w,h}, 20 fps |
 | 39 | CHECK_AUTHORIZATION | see BLE | |
@@ -222,10 +222,36 @@ and reads it back (≈1700 writes, ~25 min). On firmware v1.9.29 everything is t
 (ignored by the camera, so the app disables it there) and portrait mode, which may take more than a second to show up
 in the read-back.
 
+### Card space
+
+| What | Where |
+|---|---|
+| total / free bytes | Options 158 `{1 total, 2 free, 3 reserve}` |
+| recording time left (s), current mode and resolution | Options 9 (not always answered) or PhotographyOptions 41 (answered in every mode) |
+| photos left | Options 10 (photo modes) |
+
+Ask for each Options type in its own request: a type the camera doesn't answer makes the whole request fail.
+
+### TimeShift (*verified*)
+
+- During a recording the speed is **PhotographyOptions 37 of function mode 12**: 0 = Auto (sped up), 1 = Normal.
+  Every recording starts in Auto. SET_PHOTOGRAPHY_OPTIONS `{1: [37], 2: {37: v}, 3: 12}` switches it (answer
+  `{1: 37}`); switching on the camera changes the same field. CONF calls it `accelerate_frequency`.
+- **Auto picks its speed itself** and doesn't report it: lying still the camera ran at 15× (60 s → 4 s), handled
+  next to a changing laptop screen at 5×. Options 165 reads `{2: 5}` during any TimeShift recording either way.
+  The compressed length shown on the camera is not available over the protocol (capture status, notifications and
+  all options/PhotographyOptions were watched during recordings); the file list has the real length after the stop
+  (the file is often 1–2 s shorter than the camera's on-screen counter).
+
 ## Sleep
 
 After the BLE and Wi-Fi links drop, the camera counts down (second byte of its advertising data) and sleeps within
 ~3 minutes. **CLOSE_CAMERA_WIFI (34) prevents that** — the camera then stays awake and drains; don't send it.
+
+**During a recording the camera turns its Wi-Fi access point off once the phone leaves it**, and OPEN_CAMERA_WIFI
+(33, answers 200) doesn't bring it back until the recording stops (then the phone rejoins in ~20 s). A client that
+wants to stay in control while in the background should stop the live view (the main extra drain) but keep Wi-Fi;
+BLE alone is enough to stop the recording.
 
 ## Safety
 

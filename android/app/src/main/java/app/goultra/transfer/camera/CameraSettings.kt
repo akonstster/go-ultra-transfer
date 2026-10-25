@@ -93,6 +93,7 @@ object SettingCodes {
     const val FOV = 33
     const val WHITE_BALANCE = 39
     const val PHOTO_RESOLUTION = 40
+    const val REMAINING_TIME = 41 // recording seconds left on the card (same value as Options 9)
     const val DARK_EIS = 42 // blur reduction, written together with option 134
     const val BURST_COUNT = 44
     const val BURST_CACHE_FRAMES = 45
@@ -107,6 +108,7 @@ object SettingCodes {
     const val HDR = 63
     const val HORIZON_LOCK = 70
     const val I_LOG = 72
+    const val TIMESHIFT_NORMAL = 37 // TimeShift (fm 12) while recording: 1 normal speed, 0 sped up
     const val LIVE_PHOTO = 85 // {1: 0, 2: 1 off / 2 on}
     const val BEAUTY = 90 // portrait mode {1: «Осветить» float 0/1, 2: «Сгладить» float 0/1}; the camera adds 89 itself
 
@@ -124,6 +126,9 @@ object SettingCodes {
     const val OPT_VIDEO_SUB_MODE = 41
     const val OPT_CHARGE_BOX = 85 // {1: Pod attached, 2: {1: charging, 2: %}}
     const val OPT_BLUR_REDUCTION = 134
+    const val OPT_VIDEO_SECONDS_LEFT = 9 // recording time left on the card in the current mode, s
+    const val OPT_PHOTOS_LEFT = 10 // photos left (photo modes only)
+    const val OPT_CARD = 158 // {1: total bytes, 2: free bytes, 3: reserve}
     /** GO Ultra quirk: Options field 134 is requested (and set) as type 133, and type 134 answers with field 133. */
     const val OPT_BLUR_REDUCTION_TYPE = 133
     /** Sub-mode value meaning «the other kind is active» (video_sub_mode = 100 while in a photo mode and vice versa). */
@@ -237,6 +242,24 @@ object SettingCodes {
     fun unzigzag(n: Long): Int = ((n ushr 1) xor -(n and 1)).toInt()
 }
 
+/** Memory card: bytes, plus what the camera estimates for the current mode (null when it doesn't say). */
+data class CardInfo(val totalBytes: Long, val freeBytes: Long, val videoSecondsLeft: Int?, val photosLeft: Int?) {
+    companion object {
+        /** From separate GET_OPTIONS replies (body field 2 = Options); missing parts are null. */
+        fun parse(card: ByteArray?, videoLeft: ByteArray?, photosLeft: ByteArray?): CardInfo? {
+            fun opts(b: ByteArray?) = b?.pbFields()?.field(2)?.data?.pbFields()
+            val c = opts(card)?.field(SettingCodes.OPT_CARD)?.data?.pbFields() ?: return null
+            val total = c.field(1)?.varint ?: return null
+            return CardInfo(
+                totalBytes = total,
+                freeBytes = c.field(2)?.varint ?: 0,
+                videoSecondsLeft = opts(videoLeft)?.field(SettingCodes.OPT_VIDEO_SECONDS_LEFT)?.varint?.toInt(),
+                photosLeft = opts(photosLeft)?.field(SettingCodes.OPT_PHOTOS_LEFT)?.varint?.toInt(),
+            )
+        }
+    }
+}
+
 /** Current shooting settings as CONF names (what the UI and CONF lookups work with). */
 data class CamSettings(
     val mode: String?,
@@ -247,6 +270,7 @@ data class CamSettings(
     val podBatteryPercent: Int?,
     val charging: Boolean = false,
     val podCharging: Boolean = false,
+    val card: CardInfo? = null,
 ) {
     companion object {
         fun modeOf(optionsBody: ByteArray?): String? {

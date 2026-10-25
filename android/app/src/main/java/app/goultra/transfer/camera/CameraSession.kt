@@ -251,6 +251,23 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             ?.takeIf { it.code == 200 }
             ?.let { CaptureStatus.parse(it.body) }
 
+    /** TimeShift recording: normal speed now? (PhotographyOptions 37 of its function mode). */
+    suspend fun timeShiftNormal(): Boolean? {
+        val fm = SettingCodes.modes.getValue("VIDEO_TIMESHIFT").functionMode
+        val po = ble.request(
+            Proto.CMD_GET_PHOTOGRAPHY_OPTIONS,
+            PbWriter().packed(1, listOf(SettingCodes.TIMESHIFT_NORMAL.toLong())).varint(2, fm.toLong()).toByteArray(),
+            timeoutMs = 3_000, quiet = true,
+        )?.takeIf { it.code == 200 } ?: return null
+        return po.body.pbFields().field(2)?.data?.pbFields()?.field(SettingCodes.TIMESHIFT_NORMAL)?.varint == 1L
+    }
+
+    /** TimeShift speed during a recording (the camera's Auto ↔ Normal). */
+    suspend fun setTimeShiftNormal(normal: Boolean): Boolean = writePhotoOptions(
+        SettingCodes.modes.getValue("VIDEO_TIMESHIFT").functionMode,
+        mapOf(SettingCodes.TIMESHIFT_NORMAL to PbWriter().varint(SettingCodes.TIMESHIFT_NORMAL, if (normal) 1 else 0).toByteArray()),
+    )
+
     // ---------- shooting settings (BLE) ----------
 
     /** Current mode, settings and battery levels; [functionMode] null = the mode the camera reports. */
@@ -262,11 +279,12 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             ?.takeIf { it.code == 200 } ?: return null
         val mode = CamSettings.modeOf(opt.body)?.let { SettingCodes.modes[it] }
         val fm = functionMode ?: mode?.functionMode ?: return CamSettings.parse(opt.body, null)
-        // Every type listed here is answered by GO Ultra (an unknown one would make the whole request fail with 400).
+        // Every type listed here is answered by GO Ultra in every mode (an unknown one would make the whole request fail
+        // with 400); REMAINING_TIME checked in all 12 function modes.
         val poTypes = with(SettingCodes) {
             listOf(SHARPNESS, EXPOSURE_BIAS, FILTER, STILL_EXPOSURE, VIDEO_EXPOSURE, ISO_TOP_LIMIT, RAW_CAPTURE, SELF_TIMER,
                 DURATION, RESOLUTION, FOV, WHITE_BALANCE, PHOTO_RESOLUTION, DARK_EIS, BURST_COUNT, BURST_CACHE_FRAMES, METERING, BURST_SECONDS, BURST_CACHE, ZOOM_SCALE,
-                DURATION_2, FLOWSTATE, EXPORT_TYPE, DAMAGE_ZOOM, HDR, HORIZON_LOCK, I_LOG, LIVE_PHOTO, BEAUTY).map { it.toLong() }
+                DURATION_2, FLOWSTATE, EXPORT_TYPE, DAMAGE_ZOOM, HDR, HORIZON_LOCK, I_LOG, LIVE_PHOTO, BEAUTY, REMAINING_TIME).map { it.toLong() }
         }
         val po = ble.request(
             Proto.CMD_GET_PHOTOGRAPHY_OPTIONS,
@@ -278,8 +296,37 @@ class CameraSession(private val context: Context, private val log: (String) -> U
                 ?.takeIf { it.code == 200 }
                 ?.body?.pbFields()?.field(1)?.data?.pbFields()?.field(2)?.varint ?: 0L
         }
-        return CamSettings.parse(opt.body, po?.body, lapse)
+        val parsed = CamSettings.parse(opt.body, po?.body, lapse)
+        // Recording time left: Options 9 (not always answered) or the same value in PhotographyOptions 41.
+        val remaining = po?.body?.pbFields()?.field(2)?.data?.pbFields()?.field(SettingCodes.REMAINING_TIME)?.varint?.toInt()
+        val card = readCard(mode?.photo == true)?.let { c -> if (c.videoSecondsLeft == null && mode?.photo != true) c.copy(videoSecondsLeft = remaining) else c }
+        return parsed.copy(card = card)
     }
+
+    /**
+     * Card space: one request per type — a type the camera doesn't answer in this mode must not break the others.
+     * Short timeouts: this runs with every settings read, and a silent type must not hold up the screen.
+     */
+    private suspend fun readCard(photo: Boolean): CardInfo? {
+        suspend fun opt(type: Int) = ble.request(
+            Proto.CMD_GET_OPTIONS, PbWriter().packed(1, listOf(type.toLong())).toByteArray(), timeoutMs = 1_500, quiet = true,
+        )?.takeIf { it.code == 200 }?.body
+        return CardInfo.parse(
+            opt(SettingCodes.OPT_CARD),
+            if (photo) null else opt(SettingCodes.OPT_VIDEO_SECONDS_LEFT),
+            if (photo) opt(SettingCodes.OPT_PHOTOS_LEFT) else null,
+        )
+    }
+
+    /** Debug: raw reply (hex) of a read-only command with an empty body (only capture status is allowed). */
+    suspend fun rawCommand(code: Int): String {
+        require(code == Proto.CMD_GET_CURRENT_CAPTURE_STATUS) { "only read-only commands" }
+        val r = ble.request(code, ByteArray(0), timeoutMs = 3_000, quiet = true)
+        return "${r?.code} ${r?.body?.hex(120)}"
+    }
+
+    /** Debug: log every nearby advertiser (camera module, Action Pod…). */
+    suspend fun scanAll() = ble.scanAll()
 
     /** Debug: raw GET_OPTIONS reply (hex) for exactly these type numbers. */
     suspend fun rawOptions(types: List<Int>): String {

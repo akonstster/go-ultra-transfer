@@ -3,8 +3,9 @@
 **English summary:** a small open-source Android app for the **Insta360 GO Ultra** — no account, no ads, no cloud.
 It wakes the camera over Bluetooth, joins its Wi-Fi, lists files with previews, plays or opens them straight from
 the camera, downloads them to the phone gallery (in the background, with resume), deletes them from the card,
-shows a live preview (full screen when the phone is turned sideways), records and takes photos, and exposes all of
-the camera's shooting settings for its 12 modes. The interface is in Russian and English, light or dark.
+shows a live preview (full screen when the phone is turned sideways), records and takes photos (and keeps control
+of a recording with the phone's screen off, with Stop in the notification), switches the TimeShift speed while
+recording, shows the card space left, and exposes all of the camera's shooting settings for its 12 modes. The interface is in Russian and English, light or dark.
 The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). Not affiliated with Insta360.
 
 ---
@@ -31,6 +32,10 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
   2.35:1); во FreeFrame — разметка будущих вырезов 16:9 и 9:16, как на камере.
 - Телефон боком — трансляция на весь экран, с кнопкой записи.
 - Запись и фото с телефона, таймер с обратным отсчётом, «разбудить и сразу снимать» — ярлык на рабочем столе.
+- Запись при выключенном экране телефона: трансляция останавливается (бережёт батарею камеры), связь остаётся,
+  в уведомлении (и на экране блокировки) — кнопка «Остановить запись».
+- TimeShift: переключение «Авто / Обычная» прямо во время записи; после остановки — длина получившегося ролика.
+- Остаток на карте памяти: минуты записи (или число фото) и свободное место.
 - Все 12 режимов: видео, PureVideo, замедление, таймлапс, TimeShift, петля, FreeFrame, «глазами ребёнка»,
   фото, серия, интервал, Starlapse.
 - Настройки по группам, как в меню камеры: разрешение и частота кадров, угол обзора, FlowState, горизонт,
@@ -68,6 +73,8 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
   кнопками камеры, перейдите на вкладку «Файлы».
 - Таймер на фото отсчитывает приложение: камера применяет свой таймер только к своей кнопке.
 - Интернет на телефоне при подключении к камере не пропадает: Wi-Fi камеры используется только приложением.
+- TimeShift в режиме «Авто» сам выбирает ускорение (от 5× до 15× и больше, по происходящему в кадре) и не
+  сообщает его, поэтому сжатое время во время записи приложение не показывает — только после остановки.
 
 ## Сборка из исходников
 

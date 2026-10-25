@@ -5,11 +5,12 @@ class CamMessage(val code: Int, val seq: Int, val body: ByteArray) {
     val isResponse: Boolean get() = code < 1000
 }
 
-/** GET_CURRENT_CAPTURE_STATUS → {1: {1: state (0 idle, 1 recording …), 2: seconds}}. */
+/** GET_CURRENT_CAPTURE_STATUS → {1: {1: state (0 idle, 1 recording, 13 TimeShift …), 2: seconds}}. */
 data class CaptureStatus(val state: Int, val seconds: Int) {
     val recording: Boolean get() = state != 0
 
     companion object {
+        const val TIMESHIFT = 13
         fun parse(body: ByteArray): CaptureStatus {
             val status = body.pbFields().field(1)?.data?.pbFields() ?: emptyList()
             return CaptureStatus(

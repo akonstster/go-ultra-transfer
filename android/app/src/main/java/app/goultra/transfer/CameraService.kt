@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import app.goultra.transfer.ui.ConnState
 import app.goultra.transfer.ui.DownloadProgress
 import app.goultra.transfer.ui.details
 import kotlinx.coroutines.CoroutineScope
@@ -37,10 +38,13 @@ import kotlinx.coroutines.launch
 class CameraService : Service() {
     companion object {
         private const val CHANNEL = "camera"
+        /** Normal importance (silent): EMUI hides low-importance ones from the lock screen and the top of the shade. */
+        private const val CHANNEL_RECORDING = "recording"
         private const val ID_ONGOING = 1
         private const val ID_DONE = 2
         private const val ACTION_CANCEL = "app.goultra.transfer.CANCEL"
         private const val ACTION_DISCONNECT = "app.goultra.transfer.DISCONNECT"
+        private const val ACTION_STOP_RECORDING = "app.goultra.transfer.STOP_RECORDING"
 
         /** Call while the app is in the foreground (Android 12+ forbids starting it from the background). */
         fun start(context: Context) {
@@ -61,8 +65,16 @@ class CameraService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
             NotificationChannel(CHANNEL, tr("Подключение к камере", "Camera connection"), NotificationManager.IMPORTANCE_LOW),
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_RECORDING, tr("Запись", "Recording"), NotificationManager.IMPORTANCE_DEFAULT).apply {
+                setSound(null, null)
+                enableVibration(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            },
         )
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "goultra:camera")
@@ -78,6 +90,7 @@ class CameraService : Service() {
         when (intent?.action) {
             ACTION_CANCEL -> controller.cancelDownload()
             ACTION_DISCONNECT -> controller.disconnect()
+            ACTION_STOP_RECORDING -> controller.stopRecording()
         }
         ServiceCompat.startForeground(
             this,
@@ -94,8 +107,12 @@ class CameraService : Service() {
                         if (controller.download == null) refresh(force = true)
                     }
                 }
-                snapshotFlow { Triple(controller.download, controller.conn, controller.inBackground) }.collect {
-                    if (controller.download == null && !controller.isLinked && !controller.isDownloading) {
+                snapshotFlow {
+                    listOf(controller.download, controller.conn, controller.inBackground, controller.capture?.recording)
+                }.collect {
+                    // Kept through a reconnect (the recording notification must not blink away meanwhile).
+                    val idle = !controller.isLinked && controller.conn !is ConnState.Working
+                    if (controller.download == null && idle && !controller.isDownloading) {
                         finish(controller.takeDownloadResult())
                     } else {
                         refresh(force = false)
@@ -108,7 +125,7 @@ class CameraService : Service() {
 
     private fun refresh(force: Boolean) {
         val p = cameraController.download
-        val key = p?.name ?: "connected:${cameraController.inBackground}"
+        val key = p?.name ?: "connected:${cameraController.inBackground}:${cameraController.capture?.recording}"
         val now = System.currentTimeMillis()
         if (!force && now - lastUpdate < 700 && key == lastKey) return
         lastUpdate = now
@@ -136,7 +153,8 @@ class CameraService : Service() {
     private fun buildNotification(): Notification {
         val controller = cameraController
         val p: DownloadProgress? = controller.download
-        val builder = NotificationCompat.Builder(this, CHANNEL)
+        val recording = p == null && !controller.isDownloading && controller.capture?.recording == true
+        val builder = NotificationCompat.Builder(this, if (recording) CHANNEL_RECORDING else CHANNEL)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp())
@@ -147,6 +165,17 @@ class CameraService : Service() {
                 .setContentText(p?.let { "${it.name} · ${it.details()}" })
                 .setProgress(100, percent, p == null || p.total <= 0)
                 .addAction(0, tr("Стоп", "Stop"), serviceIntent(ACTION_CANCEL, 1))
+        } else if (controller.capture?.recording == true) {
+            // The chronometer counts by itself from the recording's start; Stop works from the lock screen.
+            val started = controller.recordStartedWallClock()
+            builder.setSmallIcon(android.R.drawable.presence_video_online)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // Stop right from the lock screen
+                .setContentTitle(tr("Идёт запись", "Recording"))
+                .setUsesChronometer(true)
+                .setWhen(started)
+                .setShowWhen(true)
+                .setContentText(tr("Камера пишет видео", "The camera is recording"))
+                .addAction(0, tr("Остановить запись", "Stop recording"), serviceIntent(ACTION_STOP_RECORDING, 3))
         } else {
             val left = controller.backgroundSecondsLeft()
             builder.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)

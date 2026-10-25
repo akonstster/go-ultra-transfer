@@ -22,6 +22,7 @@ import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
 import app.goultra.transfer.camera.PbWriter
+import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.LiveDecoder
@@ -161,6 +162,35 @@ class CameraController(private val app: Application) {
     /** Recording state, polled over BLE once a second while the camera tab is visible. */
     var capture by mutableStateOf<CaptureStatus?>(null)
         private set
+
+    /**
+     * Phone-clock moment (elapsedRealtime) the running recording started: the time on screen ticks from it every
+     * second, the camera's whole seconds (polled every 1–2 s) only correct it.
+     */
+    private var recordStartedAt by mutableStateOf<Long?>(null)
+
+    /** Wall-clock start of the running recording (the notification's chronometer), stable between polls. */
+    fun recordStartedWallClock(): Long {
+        val started = recordStartedAt ?: return System.currentTimeMillis() - (capture?.seconds ?: 0) * 1000L
+        return System.currentTimeMillis() - (SystemClock.elapsedRealtime() - started)
+    }
+
+    /** Seconds recorded by [now] (elapsedRealtime). */
+    fun recordSeconds(now: Long): Int = recordStartedAt?.let { ((now - it) / 1000).toInt().coerceAtLeast(0) } ?: capture?.seconds ?: 0
+
+    /**
+     * A TimeShift recording: true = normal speed, false = Auto (sped up), null = no TimeShift recording. Auto picks
+     * its speed itself (5× … 15×+ by what happens in the frame) and doesn't report it, so the video length is
+     * known only after the stop, from the file list ([reportTimeShift]).
+     */
+    var timeShiftNormal by mutableStateOf<Boolean?>(null)
+        private set
+    var speedBusy by mutableStateOf(false)
+        private set
+    /** A poll sent before a speed switch may answer with the old speed: polls this soon after it are ignored. */
+    private var speedSwitchedAt = 0L
+    /** A TimeShift recording just ended: the next file list tells its video length. */
+    private var reportTimeShift = false
     var recordBusy by mutableStateOf(false)
         private set
     var liveError by mutableStateOf<String?>(null)
@@ -220,13 +250,17 @@ class CameraController(private val app: Application) {
             var tick = 0
             while (true) {
                 delay(1_000)
+                tick++
                 val linked = conn == ConnState.Connected || conn == ConnState.Remote
-                if (linked && uiShown && tab == Tab.CAMERA && !recordBusy && session.hasControl) {
-                    runCatching { session.captureStatus() }.getOrNull()?.let { capture = it }
-                    // Battery / charging and settings changed on the camera itself: re-read every 30 s.
-                    if (++tick % 30 == 0 && settingBusy == null) {
-                        runCatching { session.readSettings() }.getOrNull()?.let(::showSettings)
-                    }
+                if (linked && !recordBusy && !session.hasControl) onControlLost()
+                if (!linked || recordBusy || !session.hasControl) continue
+                // A running recording is followed on any tab, and in the background every 5 s: the notification
+                // shows it and its end restarts the release timer.
+                val recording = capture?.recording == true
+                if (if (uiShown) tab == Tab.CAMERA || recording else recording && tick % 5 == 0) followCapture()
+                // Battery / charging and settings changed on the camera itself: re-read every 30 s.
+                if (uiShown && tab == Tab.CAMERA && tick % 30 == 0 && settingBusy == null) {
+                    runCatching { session.readSettings() }.getOrNull()?.let(::showSettings)
                 }
             }
         }
@@ -320,8 +354,18 @@ class CameraController(private val app: Application) {
                 tr("Ошибка: ", "Error: ") + e.message
             }
             if (error != null) {
-                session.disconnect()
-                conn = ConnState.Failed(error)
+                // Only Wi-Fi failed during a recording: keep Bluetooth, the recording stays under control (the camera
+                // keeps its access point off mid-recording). Otherwise the error stays on screen (VPN hint…).
+                val recording = session.hasControl && runCatching { session.captureStatus() }.getOrNull()?.recording == true
+                if (recording) {
+                    session.closeWifi()
+                    conn = ConnState.Remote
+                    message = error
+                    followCapture()
+                } else {
+                    session.disconnect()
+                    conn = ConnState.Failed(error)
+                }
                 return@launch
             }
             conn = ConnState.Connected
@@ -355,6 +399,26 @@ class CameraController(private val app: Application) {
     private var snapshotJob: Job? = null
 
     val isDebugBuild: Boolean get() = debuggable
+
+    /** Debug: raw GET_CURRENT_CAPTURE_STATUS (15) reply every second for [seconds] — to map recording fields. */
+    fun debugCaptureStatus(seconds: Int) {
+        if (!debuggable || !session.hasControl) return
+        scope.launch {
+            var last = ""
+            repeat(seconds) {
+                val raw = session.rawCommand(Proto.CMD_GET_CURRENT_CAPTURE_STATUS)
+                if (raw != last) log("DEBUG статус записи: $raw")
+                last = raw
+                delay(1_000)
+            }
+            log("DEBUG статус записи: конец")
+        }
+    }
+
+    /** Debug: unfiltered BLE scan into the log (works without a connection). */
+    fun debugScan() {
+        if (debuggable) scope.launch { runCatching { session.scanAll() }.onFailure { log("скан: ${it.message}") } }
+    }
 
     /** Debug: GET_OPTIONS for exactly [types], one request each, raw reply logged. */
     fun debugOptions(types: List<Int>) {
@@ -523,6 +587,13 @@ class CameraController(private val app: Application) {
             return
         }
         files = list
+        if (reportTimeShift) {
+            reportTimeShift = false
+            // The new TimeShift file: its real length (sped-up parts are as short as Auto chose to make them).
+            list.filter { it.kind == MediaKind.VIDEO }.maxByOrNull { it.name }?.durationSec?.let {
+                message = tr("TimeShift: видео ", "TimeShift: video ") + formatDuration(it)
+            }
+        }
         selected.keys.retainAll(list.map { it.name }.toSet())
         fillMissingSizes(list)
     }
@@ -572,6 +643,10 @@ class CameraController(private val app: Application) {
         files = emptyList()
         selected.clear()
         capture = null
+        recordStartedAt = null
+        timeShiftNormal = null
+        reportTimeShift = false
+        settings = null // battery, card, mode: re-read on the next connection, never shown stale
         conn = ConnState.Idle
         if (setup is ConnState.Working) setup = ConnState.Idle
     }
@@ -590,6 +665,78 @@ class CameraController(private val app: Application) {
         autoConnected = true
         tab = Tab.CAMERA
         startRecording()
+    }
+
+    /** New capture status; the end of a recording counts as activity, so the release timer starts from there. */
+    private fun updateCapture(status: CaptureStatus) {
+        if (capture?.recording == true && !status.recording) {
+            touch()
+            // The new file's length needs the file list (Wi-Fi); stopped on the camera, the list is loaded here
+            // (a stop from the app loads it itself).
+            if (capture?.state == CaptureStatus.TIMESHIFT && conn == ConnState.Connected) {
+                reportTimeShift = true
+                if (!recordBusy) scope.launch { loadFiles() }
+            }
+        }
+        capture = status
+        val now = SystemClock.elapsedRealtime()
+        if (!status.recording) {
+            recordStartedAt = null
+        } else {
+            // The camera's seconds are whole (true time is s…s+1): re-anchor only when the phone clock drifts out.
+            val shown = recordStartedAt?.let { (now - it) / 1000.0 }
+            if (shown == null || shown < status.seconds - 0.2 || shown > status.seconds + 1.5) {
+                recordStartedAt = now - status.seconds * 1000L - 500
+            }
+        }
+        if (status.state != CaptureStatus.TIMESHIFT) timeShiftNormal = null
+    }
+
+    /**
+     * Bluetooth dropped (camera out of range, battery empty…): the recording state can't be followed any more, so it
+     * is dropped — a stale «recording» would keep the notification, the locks and the link forever.
+     */
+    private fun onControlLost() {
+        if (conn == ConnState.Remote) {
+            log("Bluetooth-связь с камерой потеряна")
+            disconnect()
+            conn = ConnState.Failed(tr("Связь с камерой потеряна", "Lost the link to the camera"))
+        } else if (capture != null) {
+            capture = null
+            recordStartedAt = null
+            timeShiftNormal = null
+        }
+    }
+
+    /** Capture status and, in a TimeShift recording, its speed (switchable on the camera too). */
+    private suspend fun followCapture() {
+        val status = runCatching { session.captureStatus() }.getOrNull() ?: return
+        updateCapture(status)
+        if (status.state != CaptureStatus.TIMESHIFT) return
+        val normal = runCatching { session.timeShiftNormal() }.getOrNull() ?: return
+        if (capture?.state == CaptureStatus.TIMESHIFT && SystemClock.elapsedRealtime() - speedSwitchedAt >= 2_000) {
+            timeShiftNormal = normal
+        }
+    }
+
+    /** TimeShift during a recording: Auto (sped up) ↔ normal speed, like the camera's own switch. */
+    fun toggleTimeShiftSpeed() {
+        val current = timeShiftNormal ?: return
+        if (speedBusy) return
+        touch()
+        speedBusy = true
+        scope.launch {
+            try {
+                if (session.setTimeShiftNormal(!current)) {
+                    speedSwitchedAt = SystemClock.elapsedRealtime()
+                    timeShiftNormal = !current
+                } else {
+                    message = tr("Камера не переключила скорость", "The camera didn't switch the speed")
+                }
+            } finally {
+                speedBusy = false
+            }
+        }
     }
 
     /** Self-timer seconds left before a photo (the camera applies its timer only to its own button). */
@@ -644,7 +791,7 @@ class CameraController(private val app: Application) {
                 } else if (picture) {
                     message = tr("Снято", "Taken")
                 }
-                capture = session.captureStatus() ?: capture
+                session.captureStatus()?.let(::updateCapture)
                 // The new file shows up in the list.
                 if ((picture || !start) && ok && conn == ConnState.Connected) loadFiles()
             } catch (e: CancellationException) {
@@ -956,10 +1103,20 @@ class CameraController(private val app: Application) {
 
     fun detachLive() {
         liveSurfaces.clear()
+        pauseLive()
+    }
+
+    /** Stops the stream but keeps the screen's surface: [resumeLive] restarts it there. */
+    private fun pauseLive() {
         val decoder = liveDecoder ?: return
         liveDecoder = null
         scope.launch { runCatching { session.stopLive() } }
         scope.launch(Dispatchers.IO) { decoder.release() }
+    }
+
+    /** Back from the background with the preview still on screen: restart its stream. */
+    private fun resumeLive() {
+        if (liveDecoder == null && conn == ConnState.Connected) liveSurfaces.lastOrNull()?.let(::attachLive)
     }
 
     /** Any user action (tap, scroll, refresh…) postpones the idle disconnect. */
@@ -980,7 +1137,7 @@ class CameraController(private val app: Application) {
 
     /** Seconds left before the background disconnect, or null when the app is visible / nothing to release. */
     fun backgroundSecondsLeft(): Int? {
-        if (uiShown || !isLinked || isDownloading) return null
+        if (uiShown || !isLinked || isDownloading || capture?.recording == true) return null
         val since = maxOf(backgroundSince, lastActivity)
         return ((BACKGROUND_GRACE_MS - (SystemClock.elapsedRealtime() - since)) / 1000).toInt().coerceAtLeast(0)
     }
@@ -990,6 +1147,7 @@ class CameraController(private val app: Application) {
         uiShown = true
         radios = PhoneRadios.check(app)
         touch()
+        resumeLive()
         if (resumeOnForeground && onboarded) {
             resumeOnForeground = false
             if (resumeControlOnly) reconnectControl() else connect()
@@ -1015,14 +1173,24 @@ class CameraController(private val app: Application) {
                 conn = ConnState.Failed(error)
             } else {
                 conn = ConnState.Remote
-                capture = runCatching { session.captureStatus() }.getOrNull()
+                // The old state is kept: a recording that ended meanwhile shows up as an end (release timer…).
+                followCapture()
             }
         }
     }
 
     private fun disconnectIfIdle() {
-        // A recording carries on by itself on the camera; stopping it later just reconnects over BLE.
         if (!isLinked || isDownloading || keepConnected || recordBusy || (viewing != null && uiShown)) return
+        if (capture?.recording == true) {
+            // Recording: stay connected (the notification's Stop needs it), but in the background stop the live
+            // view — the camera's biggest extra drain. Wi-Fi is kept: mid-recording the camera turns its access
+            // point off once the phone leaves, and OPEN_CAMERA_WIFI doesn't bring it back until the stop.
+            if (!uiShown && liveDecoder != null && SystemClock.elapsedRealtime() - backgroundSince > 30_000) {
+                log("запись идёт, приложение в фоне: трансляция остановлена, связь остаётся")
+                pauseLive()
+            }
+            return
+        }
         if (!uiShown) {
             // In the background: grace period from leaving the app or from the end of the last download.
             if (backgroundSecondsLeft() != 0) return

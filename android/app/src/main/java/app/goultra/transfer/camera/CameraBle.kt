@@ -99,6 +99,37 @@ class CameraBle(private val context: Context, private val log: (String) -> Unit)
         }
     }
 
+    /**
+     * Debug: every advertiser for [ms], unfiltered — to find out whether the Action Pod advertises on its own
+     * (and with what) next to the camera module. Logs each address once: name, services, manufacturer data, bond.
+     */
+    suspend fun scanAll(ms: Long = 12_000) {
+        val scanner = adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner ?: run { log("Bluetooth выключен"); return }
+        val seen = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, r: ScanResult) {
+                if (seen.putIfAbsent(r.device.address, true) != null) return
+                val rec = r.scanRecord
+                val uuids = rec?.serviceUuids?.joinToString { it.uuid.toString().substring(4, 8) } ?: ""
+                val name = rec?.deviceName ?: ""
+                // Only what can be ours: the camera service, a bonded device, or an Insta360-like name.
+                if ("be80" !in uuids && r.device.bondState != BluetoothDevice.BOND_BONDED &&
+                    !name.contains("GO", true) && !name.contains("insta", true) && !name.contains("pod", true)
+                ) return
+                log("СКАН ${r.device.address} «$name» rssi=${r.rssi} services=[$uuids] " +
+                    "manuf=[${manufacturerData(rec?.bytes)?.hex()}] bond=${bondName(r.device.bondState)}")
+            }
+        }
+        log("скан всех устройств ${ms / 1000} с…")
+        scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), callback)
+        try {
+            kotlinx.coroutines.delay(ms)
+        } finally {
+            scanner.stopScan(callback)
+        }
+        log("скан окончен, устройств всего: ${seen.size}")
+    }
+
     /** Raw manufacturer-specific AD structure (type 0xFF), company id included: 01 00 22 [on] [counter] 00. */
     private fun manufacturerData(record: ByteArray?): ByteArray? {
         if (record == null) return null

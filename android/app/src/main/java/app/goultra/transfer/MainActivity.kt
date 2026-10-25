@@ -49,6 +49,10 @@ class MainActivity : ComponentActivity() {
         intent.getStringExtra("opts")?.let { list ->
             cameraController.debugOptions(list.split(',').mapNotNull { it.trim().toIntOrNull() })
         }
+        // Debug: `--ez scan true` logs every nearby BLE advertiser (is the Action Pod a separate device?).
+        if (intent.getBooleanExtra("scan", false)) cameraController.debugScan()
+        // Debug: `--ei status 120` logs the raw capture status every second (mapping recording fields).
+        intent.getIntExtra("status", 0).takeIf { it > 0 }?.let(cameraController::debugCaptureStatus)
         // Debug: `--ez selftest true` runs the settings self-test (same as menu ⋮ → «Самопроверка настроек»).
         if (intent.getBooleanExtra("selftest", false)) cameraController.selfTest()
         // `--es fms 0-40` widens the function modes read (finding an unknown mode's number).
