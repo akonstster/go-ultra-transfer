@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -23,12 +24,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
-private val STEPS = listOf(
-    "Включите камеру кнопкой и положите рядом с телефоном.",
-    "Нажмите «Найти камеру».",
-    "Появится запрос на сопряжение — он приходит в шторку уведомлений. " +
-        "Откройте шторку и нажмите на него (на это есть 30 секунд).",
-    "Подтвердите подключение на экране камеры.",
+private fun steps() = listOf(
+    tr("Включите камеру кнопкой и положите рядом с телефоном.", "Switch the camera on with its button and put it next to the phone."),
+    tr("Нажмите «Найти камеру».", "Tap «Find camera»."),
+    tr(
+        "Появится запрос на сопряжение — он приходит в шторку уведомлений. " +
+            "Откройте шторку и нажмите на него (на это есть 30 секунд).",
+        "A pairing request appears — it comes as a notification. " +
+            "Open the notification shade and tap it (you have 30 seconds).",
+    ),
+    tr("Подтвердите подключение на экране камеры.", "Confirm the connection on the camera's screen."),
 )
 
 /** First run: bond with the camera and authorize this phone, so later it can be woken up over Bluetooth. */
@@ -45,7 +50,9 @@ fun OnboardingScreen(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("Подключение камеры", style = MaterialTheme.typography.headlineSmall)
+            CameraArt(Modifier.fillMaxWidth(0.55f).widthIn(max = 300.dp), withPod = true, blinking = controller.setup is ConnState.Working)
+            Spacer(Modifier.height(24.dp))
+            Text(tr("Подключение камеры", "Connect the camera"), style = MaterialTheme.typography.headlineSmall)
             PhoneRadiosBanner(controller)
             Spacer(Modifier.height(24.dp))
             when (val state = controller.setup) {
@@ -60,17 +67,21 @@ fun OnboardingScreen(
                 }
                 ConnState.Connected -> {
                     Text(
-                        "Готово! Камера запомнила этот телефон.\n\n" +
-                            "Дальше включать её не нужно: приложение само разбудит камеру по Bluetooth.",
+                        tr(
+                            "Готово! Камера запомнила этот телефон.\n\n" +
+                                "Дальше включать её не нужно: приложение само разбудит камеру по Bluetooth.",
+                            "Done! The camera remembers this phone.\n\n" +
+                                "From now on there is no need to switch it on: the app wakes it over Bluetooth.",
+                        ),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.widthIn(max = 400.dp),
                     )
                     Spacer(Modifier.height(24.dp))
-                    Button(controller::finishOnboarding) { Text("К файлам") }
+                    Button(controller::finishOnboarding) { Text(tr("К файлам", "To files")) }
                 }
                 else -> {
                     Column(Modifier.widthIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        STEPS.forEachIndexed { i, text ->
+                        steps().forEachIndexed { i, text ->
                             Row {
                                 Text("${i + 1}.", fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.width(8.dp))
@@ -86,14 +97,14 @@ fun OnboardingScreen(
                     Button(onStart) {
                         Text(
                             when {
-                                !hasPermissions -> "Разрешить доступ и найти камеру"
-                                state is ConnState.Failed -> "Повторить"
-                                else -> "Найти камеру"
+                                !hasPermissions -> tr("Разрешить доступ и найти камеру", "Allow access and find the camera")
+                                state is ConnState.Failed -> tr("Повторить", "Try again")
+                                else -> tr("Найти камеру", "Find camera")
                             },
                         )
                     }
                     if (state is ConnState.Failed) {
-                        TextButton(onShareLog) { Text("Отправить журнал") }
+                        TextButton(onShareLog) { Text(tr("Отправить журнал", "Send log")) }
                     }
                 }
             }

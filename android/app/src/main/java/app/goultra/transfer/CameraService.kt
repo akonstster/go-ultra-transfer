@@ -1,5 +1,6 @@
 package app.goultra.transfer
 
+import app.goultra.transfer.ui.tr
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -61,7 +62,7 @@ class CameraService : Service() {
     override fun onCreate() {
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "Подключение к камере", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(CHANNEL, tr("Подключение к камере", "Camera connection"), NotificationManager.IMPORTANCE_LOW),
         )
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "goultra:camera")
@@ -142,19 +143,19 @@ class CameraService : Service() {
         if (p != null || controller.isDownloading) {
             val percent = if (p != null && p.total > 0) (p.done * 100 / p.total).toInt() else 0
             builder.setSmallIcon(android.R.drawable.stat_sys_download)
-                .setContentTitle(if (p == null) "Подготовка к скачиванию…" else "Скачивание ${p.index} из ${p.count}")
+                .setContentTitle(if (p == null) tr("Подготовка к скачиванию…", "Preparing download…") else tr("Скачивание ${p.index} из ${p.count}", "Downloading ${p.index} of ${p.count}"))
                 .setContentText(p?.let { "${it.name} · ${it.details()}" })
                 .setProgress(100, percent, p == null || p.total <= 0)
-                .addAction(0, "Стоп", serviceIntent(ACTION_CANCEL, 1))
+                .addAction(0, tr("Стоп", "Stop"), serviceIntent(ACTION_CANCEL, 1))
         } else {
             val left = controller.backgroundSecondsLeft()
             builder.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-                .setContentTitle("Камера подключена")
+                .setContentTitle(tr("Камера подключена", "Camera connected"))
                 .setContentText(
-                    if (left != null) "Отключится через ${(left + 59) / 60} мин, если не вернуться в приложение"
+                    if (left != null) tr("Отключится через ${(left + 59) / 60} мин, если не вернуться в приложение", "Disconnects in ${(left + 59) / 60} min unless you return to the app")
                     else "GO Ultra Transfer",
                 )
-                .addAction(0, "Отключить", serviceIntent(ACTION_DISCONNECT, 2))
+                .addAction(0, tr("Отключить", "Disconnect"), serviceIntent(ACTION_DISCONNECT, 2))
         }
         return builder.build()
     }

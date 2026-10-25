@@ -81,7 +81,7 @@ connect with `WifiNetworkSpecifier` and bind sockets to that network. A VPN app 
 | Code | Name | Request → response | Notes |
 |---|---|---|---|
 | 1 / 2 | START / STOP_LIVE_STREAM | empty | 1280×720@30 H.265, notification 8234 with params |
-| 3 | TAKE_PICTURE | empty → `{1: {1 uri, …}}` | only in a photo mode (*verified*) |
+| 3 | TAKE_PICTURE | empty → `{1: {1 uri, …}}` | only in a photo mode (*verified*); fires at once — the self-timer (field 26) applies only to the camera's own button |
 | 4 / 5 | START / STOP_CAPTURE | **empty** | `{1: mode}` is ignored by GO Ultra |
 | 7 | SET_OPTIONS | `{1: [field], 2: Options}` | |
 | 8 | GET_OPTIONS | `{1: [fields packed]}` → `{2: Options}` | an unknown field makes the whole request 400 |
@@ -104,6 +104,15 @@ from the first ~64 KB over HTTP instead; for live-photo videos and RAW `.dng` us
 split into **3 slices** in separate packets whose timestamps may differ by 1 ms — assemble access units by
 `first_slice_segment_in_pic_flag`, not by timestamp. Configure the decoder with VPS/SPS/PPS from the first key frame
 (`csd-0`). Hisilicon decoders reject `KEY_LOW_LATENCY`. While the stream runs, the camera's own menu is locked.
+
+**Stream shape follows the recording** (*verified*): 16:9 modes → 1280×720, FreeFrame / 4:3 → 1280×960,
+2.35:1 → 1280×544. The camera changes it **only when the stream is (re)started** — after switching mode or aspect
+ratio, send STOP_LIVE_STREAM and then START_LIVE_STREAM strictly one after the other (sent in parallel they may
+arrive swapped and the stream does not start). Reading the decoder's output format tells the real size.
+FreeFrame records the whole 4:3 sensor; the camera marks a full-width 16:9 band and a full-height 9:16 column.
+
+**Toddler Titan** (`VIDEO_BABYVIEW`, «глазами ребёнка»): video_sub_mode 16, function_mode **65** (outside 0…40,
+found by scanning 41…80); field of view fixed to `SUPER_NEW` = 15 («Titan»), `SUPER_MICRO` with the macro lens.
 
 ## HTTP (port 80)
 
@@ -145,13 +154,14 @@ Select a mode with SET_OPTIONS 41 (video) or 40 (photo); the other one then read
 | Interval | 100 | 2 | 3 |
 | Burst | 100 | 3 | 5 |
 | Starlapse | 100 | 7 | 18 |
+| Toddler Titan (BABYVIEW) | 16 | 100 | 65 |
 
 ### PhotographyOptions fields (*verified* by changing one setting on the camera and diffing)
 
 | CONF name | Field | Values |
 |---|---|---|
 | record_resolution | 31 | see resolution codes below |
-| fov_type | 33 | LINEAR 1, ULTRAWIDE 2, ACTION_VIEW 4, LINEARHORIZON_45 6, LINEARHORIZON_360 11, DEWARP 13, MEGA_VIEW 14 |
+| fov_type | 33 | LINEAR 1, ULTRAWIDE 2, ACTION_VIEW 4, LINEARHORIZON_45 6, LINEARHORIZON_360 11, DEWARP 13, MEGA_VIEW 14, SUPER_NEW 15 (Titan, fixed in Toddler Titan) |
 | flowstate_level | 55 | off 0, slight 1, standard 2, high 3 |
 | horizon_lock | 70 | bool |
 | hdr_switch | 63 | bool — only at resolutions listed in CONF `hdr_support` |

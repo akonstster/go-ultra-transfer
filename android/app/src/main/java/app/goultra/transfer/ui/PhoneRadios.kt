@@ -106,22 +106,29 @@ fun PhoneRadiosBanner(vm: CameraController) {
         if (waiting && !radios.bluetooth) {
             RadioCard(
                 icon = Icons.Filled.BluetoothDisabled,
-                text = "Bluetooth выключен — без него камеру не найти и не разбудить.",
-                action = "Включить",
+                text = tr("Bluetooth выключен — без него камеру не найти и не разбудить.", "Bluetooth is off — without it the camera can't be found or woken up."),
+                action = tr("Включить", "Turn on"),
             ) { open(PhoneRadios.bluetoothIntent()) }
         }
         if (waiting && !radios.wifi) {
             RadioCard(
                 icon = Icons.Filled.WifiOff,
-                text = "Wi-Fi выключен — он нужен для файлов и трансляции (интернет при этом не пропадёт).",
-                action = "Включить",
+                text = tr(
+                    "Wi-Fi выключен — он нужен для файлов и трансляции (интернет при этом не пропадёт).",
+                    "Wi-Fi is off — it's needed for files and the live view (your internet keeps working).",
+                ),
+                action = tr("Включить", "Turn on"),
             ) { open(PhoneRadios.wifiIntent(), PhoneRadios.wifiSettingsIntent()) }
         }
         if (vpn) {
             RadioCard(
                 icon = Icons.Filled.VpnLock,
-                text = "Включён VPN. Если камера не подключается по Wi-Fi — отключите его на время работы " +
-                    "с камерой или добавьте это приложение в исключения VPN.",
+                text = tr(
+                    "Включён VPN. Если камера не подключается по Wi-Fi — отключите его на время работы " +
+                        "с камерой или добавьте это приложение в исключения VPN.",
+                    "A VPN is on. If the camera doesn't connect over Wi-Fi, turn the VPN off while using the camera " +
+                        "or exclude this app in the VPN settings.",
+                ),
                 action = "VPN",
             ) { open(PhoneRadios.vpnIntent(), Intent(Settings.ACTION_WIRELESS_SETTINGS)) }
         }

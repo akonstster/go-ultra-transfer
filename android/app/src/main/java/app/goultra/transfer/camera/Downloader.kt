@@ -263,6 +263,12 @@ object Downloader {
         MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
     }
 
+    /** The finished gallery item for a camera file name (for opening it in the phone's player), or null. */
+    fun galleryUri(context: Context, name: String): Uri? {
+        val video = mimeType(name).startsWith("video/")
+        return findExisting(context.contentResolver, collection(video), name)?.takeIf { !it.pending }?.uri
+    }
+
     private class Existing(val uri: Uri, val pending: Boolean)
 
     /** Our item with this name, pending (partial) ones included. */

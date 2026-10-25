@@ -17,6 +17,8 @@ import app.goultra.transfer.CameraService
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CameraFile
+import app.goultra.transfer.camera.CameraHttpDataSource
+import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
 import app.goultra.transfer.camera.PbWriter
@@ -163,6 +165,9 @@ class CameraController(private val app: Application) {
         private set
     var liveError by mutableStateOf<String?>(null)
         private set
+    /** Width / height of the live picture (16:9 normally, 4:3 in FreeFrame, 2.35:1…). */
+    var liveAspect by mutableStateOf(16f / 9f)
+        private set
     private var liveDecoder: LiveDecoder? = null
 
     /** Shooting mode, settings and battery levels read from the camera (camera tab). */
@@ -241,7 +246,7 @@ class CameraController(private val app: Application) {
                     // Drop the dead TCP link and the camera network request (else keepalives / 10 s waits go on).
                     session.closeWifi()
                     // Wi-Fi gone but Bluetooth still there: recording control keeps working.
-                    conn = if (session.hasControl) ConnState.Remote else ConnState.Failed("Связь с камерой потеряна")
+                    conn = if (session.hasControl) ConnState.Remote else ConnState.Failed(tr("Связь с камерой потеряна", "Lost the link to the camera"))
                 }
             }
         }
@@ -263,14 +268,14 @@ class CameraController(private val app: Application) {
         if (!radiosReady(needWifi = false, retry = ::runSetup)) return
         disconnect()
         linkJob = scope.launch {
-            setup = ConnState.Working("Подготовка…")
+            setup = ConnState.Working(tr("Подготовка…", "Preparing…"))
             val error = try {
                 session.setup { step -> scope.launch { setup = ConnState.Working(step) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("setup failed: ${e.message}")
-                "Ошибка: ${e.message}"
+                tr("Ошибка: ", "Error: ") + e.message
             }
             setup = if (error == null) ConnState.Connected else ConnState.Failed(error)
         }
@@ -305,14 +310,14 @@ class CameraController(private val app: Application) {
         if (conn is ConnState.Working || conn == ConnState.Connected || setup is ConnState.Working) return
         if (!radiosReady(needWifi = true, retry = ::connect)) return
         linkJob = scope.launch {
-            conn = ConnState.Working("Подключение…")
+            conn = ConnState.Working(tr("Подключение…", "Connecting…"))
             val error = try {
                 session.connect { step -> scope.launch { conn = ConnState.Working(step) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("connect failed: ${e.message}")
-                "Ошибка: ${e.message}"
+                tr("Ошибка: ", "Error: ") + e.message
             }
             if (error != null) {
                 session.disconnect()
@@ -341,6 +346,7 @@ class CameraController(private val app: Application) {
     private val DEPENDENT_PARAMS = listOf(
         "flowstate_level", "fov_type", "horizon_lock", "hdr_switch", "i_log_switch", "filter_mode",
         "damage_zoom", "undamage_zoom", "metering_mode", "sharpness_level",
+        "self_portrait_switch_2", // portrait mode only up to 30 fps — switched off before 4K60 & co.
     )
 
     private val debuggable = app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
@@ -513,7 +519,7 @@ class CameraController(private val app: Application) {
             null
         }
         if (list == null) {
-            message = "Не удалось получить список файлов"
+            message = tr("Не удалось получить список файлов", "Couldn't get the file list")
             return
         }
         files = list
@@ -586,15 +592,26 @@ class CameraController(private val app: Application) {
         startRecording()
     }
 
+    /** Self-timer seconds left before a photo (the camera applies its timer only to its own button). */
+    var countdown by mutableStateOf<Int?>(null)
+        private set
+    private var recordJob: Job? = null
+
     private fun recordAction(start: Boolean) {
+        // The shutter during a countdown cancels it.
+        if (countdown != null) {
+            recordJob?.cancel()
+            message = tr("Таймер отменён", "Timer cancelled")
+            return
+        }
         if (recordBusy || conn is ConnState.Working || setup is ConnState.Working) return
         if (!session.hasControl && !radiosReady(needWifi = false) { recordAction(start) }) return
         touch()
         recordBusy = true
-        scope.launch {
+        recordJob = scope.launch {
             try {
                 if (!session.hasControl) {
-                    conn = ConnState.Working("Подключение…")
+                    conn = ConnState.Working(tr("Подключение…", "Connecting…"))
                     val error = session.connectControl { step -> scope.launch { conn = ConnState.Working(step) } }
                     if (error != null) {
                         session.disconnect()
@@ -606,6 +623,13 @@ class CameraController(private val app: Application) {
                 // Photo / burst: the shutter takes a picture; other modes (incl. interval, starlapse) record.
                 if (start && settings == null) session.readSettings()?.let(::showSettings)
                 val picture = start && settings?.mode?.let { SettingCodes.modes[it] }?.takesPicture == true
+                // TAKE_PICTURE fires at once even with the camera's self-timer set: count down here instead.
+                val timer = if (picture) settings?.values?.get("photography_self_timer")?.toIntOrNull() ?: 0 else 0
+                for (left in timer downTo 1) {
+                    countdown = left
+                    delay(1_000)
+                }
+                countdown = null
                 val ok = when {
                     picture -> session.takePicture()
                     start -> session.startRecording()
@@ -613,12 +637,12 @@ class CameraController(private val app: Application) {
                 }
                 if (!ok) {
                     message = when {
-                        picture -> "Камера не сделала снимок"
-                        start -> "Камера не начала запись"
-                        else -> "Камера не остановила запись"
+                        picture -> tr("Камера не сделала снимок", "The camera didn't take the photo")
+                        start -> tr("Камера не начала запись", "The camera didn't start recording")
+                        else -> tr("Камера не остановила запись", "The camera didn't stop recording")
                     }
                 } else if (picture) {
-                    message = "Снято"
+                    message = tr("Снято", "Taken")
                 }
                 capture = session.captureStatus() ?: capture
                 // The new file shows up in the list.
@@ -627,8 +651,9 @@ class CameraController(private val app: Application) {
                 throw e
             } catch (e: Exception) {
                 log("record failed: ${e.message}")
-                message = "Ошибка: ${e.message}"
+                message = tr("Ошибка: ", "Error: ") + e.message
             } finally {
+                countdown = null
                 recordBusy = false
             }
         }
@@ -656,6 +681,28 @@ class CameraController(private val app: Application) {
     private fun showSettings(s: CamSettings) {
         if (s != settings) log("настройки: ${s.mode} ${s.values} батарея ${s.batteryPercent}/${s.podBatteryPercent}")
         settings = s
+        restartLiveIfShapeChanged(s)
+    }
+
+    private var liveRestartAt = 0L
+
+    /**
+     * The camera keeps the stream's frame size until the stream is restarted: after switching to FreeFrame (4:3) or
+     * 2.35:1 the picture would stay 16:9. When the recording's shape and the stream's differ, restart the stream.
+     */
+    private fun restartLiveIfShapeChanged(s: CamSettings) {
+        if (liveDecoder == null || conn != ConnState.Connected || !liveSizeKnown) return
+        val res = (if (s.mode?.let { SettingCodes.modes[it]?.photo } == true) s.values["photo_resolution"] else s.values["record_resolution"])
+            ?.split('_')?.mapNotNull { it.toIntOrNull() } ?: return
+        if (res.size < 2 || res[1] == 0) return
+        val want = res[0].toFloat() / res[1]
+        if (kotlin.math.abs(want - liveAspect) / want < 0.04f) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - liveRestartAt < 5_000) return // the stream may simply not support that shape: don't loop
+        liveRestartAt = now
+        val surface = liveSurfaces.lastOrNull() ?: return
+        log("трансляция: перезапуск под кадр %.2f (сейчас %.2f)".format(want, liveAspect))
+        restartLive(surface)
     }
 
     fun refreshSettings() {
@@ -688,7 +735,7 @@ class CameraController(private val app: Application) {
     fun setSetting(param: String, value: String) {
         val current = settings ?: return
         applyChange(param) {
-            writeSetting(param, value, current) ?: true.also { message = "Это значение приложение пока не умеет выставлять" }
+            writeSetting(param, value, current) ?: true.also { message = tr("Это значение приложение пока не умеет выставлять", "The app can't set this value yet") }
         }
     }
 
@@ -833,14 +880,14 @@ class CameraController(private val app: Application) {
         settingBusy = what
         scope.launch {
             try {
-                if (!write()) message = "Камера не приняла настройку"
+                if (!write()) message = tr("Камера не приняла настройку", "The camera didn't accept the setting")
                 delay(300)
                 session.readSettings()?.let(::showSettings)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("setting $what failed: ${e.message}")
-                message = "Ошибка: ${e.message}"
+                message = tr("Ошибка: ", "Error: ") + e.message
             } finally {
                 settingBusy = null
             }
@@ -849,22 +896,66 @@ class CameraController(private val app: Application) {
 
     // ---------- live view ----------
 
-    /** The preview surface appeared (camera tab, full connection): start the stream into it. */
+    /** Preview surfaces on screen, latest last (portrait box, full-screen landscape view). */
+    private val liveSurfaces = mutableListOf<android.view.Surface>()
+
+    /**
+     * A preview surface appeared (camera tab, full connection): show the stream there. With the stream already
+     * running (another view is up) the decoder just moves to this surface — no restart, no black pause.
+     */
     fun attachLive(surface: android.view.Surface) {
-        detachLive()
+        liveSurfaces.remove(surface)
+        liveSurfaces.add(surface)
+        liveDecoder?.let { it.setSurface(surface); return }
         if (conn != ConnState.Connected) return
         // Debug builds keep the first 5 MB of the stream (live.h265, length-prefixed packets) for analysis.
         val debuggable = app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
         val dump = if (debuggable) app.getExternalFilesDir(null)?.let { File(it, "live.h265") } else null
-        val decoder = LiveDecoder(surface, ::log, dump)
+        val decoder = newDecoder(surface, dump)
         liveDecoder = decoder
         liveError = null
         scope.launch {
-            if (!session.startLive(decoder::onPacket)) liveError = "Камера не начала трансляцию"
+            if (!session.startLive(decoder::onPacket)) liveError = tr("Камера не начала трансляцию", "The camera didn't start the live view")
         }
     }
 
+    /** The decoder reported this stream's real size (until then [liveAspect] may be the previous stream's). */
+    private var liveSizeKnown = false
+
+    private fun newDecoder(surface: android.view.Surface, dump: File? = null): LiveDecoder {
+        liveSizeKnown = false
+        return LiveDecoder(surface, ::log, dump) { w, h ->
+            scope.launch {
+                if (h > 0) liveAspect = w.toFloat() / h
+                liveSizeKnown = true
+                settings?.let(::restartLiveIfShapeChanged)
+            }
+        }
+    }
+
+    /** Stop, then start again — strictly in this order (two parallel requests may arrive swapped). */
+    private fun restartLive(surface: android.view.Surface) {
+        val old = liveDecoder ?: return
+        val decoder = newDecoder(surface)
+        liveDecoder = decoder
+        scope.launch {
+            runCatching { session.stopLive() }
+            withContext(Dispatchers.IO) { old.release() }
+            if (liveDecoder !== decoder || conn != ConnState.Connected) return@launch
+            if (!session.startLive(decoder::onPacket)) liveError = tr("Камера не начала трансляцию", "The camera didn't start the live view")
+        }
+    }
+
+    /** A preview surface is going away: move the picture to the remaining one, or stop the stream. */
+    fun detachLive(surface: android.view.Surface) {
+        val wasCurrent = liveSurfaces.lastOrNull() == surface
+        liveSurfaces.remove(surface)
+        val next = liveSurfaces.lastOrNull()
+        if (next == null) detachLive() else if (wasCurrent) liveDecoder?.setSurface(next)
+    }
+
     fun detachLive() {
+        liveSurfaces.clear()
         val decoder = liveDecoder ?: return
         liveDecoder = null
         scope.launch { runCatching { session.stopLive() } }
@@ -910,14 +1001,14 @@ class CameraController(private val app: Application) {
         if (conn is ConnState.Working) return
         if (!radiosReady(needWifi = false, retry = ::reconnectControl)) return
         linkJob = scope.launch {
-            conn = ConnState.Working("Подключение…")
+            conn = ConnState.Working(tr("Подключение…", "Connecting…"))
             val error = try {
                 session.connectControl { step -> scope.launch { conn = ConnState.Working(step) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("reconnect failed: ${e.message}")
-                "Ошибка: ${e.message}"
+                tr("Ошибка: ", "Error: ") + e.message
             }
             if (error != null) {
                 session.disconnect()
@@ -931,7 +1022,7 @@ class CameraController(private val app: Application) {
 
     private fun disconnectIfIdle() {
         // A recording carries on by itself on the camera; stopping it later just reconnects over BLE.
-        if (!isLinked || isDownloading || keepConnected || recordBusy) return
+        if (!isLinked || isDownloading || keepConnected || recordBusy || (viewing != null && uiShown)) return
         if (!uiShown) {
             // In the background: grace period from leaving the app or from the end of the last download.
             if (backgroundSecondsLeft() != 0) return
@@ -944,7 +1035,12 @@ class CameraController(private val app: Application) {
         if (SystemClock.elapsedRealtime() - lastActivity < IDLE_VISIBLE_MS) return
         log("idle for ${IDLE_VISIBLE_MS / 1000} s: disconnecting")
         disconnect()
-        conn = ConnState.Failed("Камера отключена, чтобы не разряжаться без дела.\nНажмите «Подключиться».")
+        conn = ConnState.Failed(
+            tr(
+                "Камера отключена, чтобы не разряжаться без дела.\nНажмите «Подключиться».",
+                "Disconnected to save the camera's battery.\nTap «Connect».",
+            ),
+        )
     }
 
     // ---------- selection ----------
@@ -962,6 +1058,46 @@ class CameraController(private val app: Application) {
 
     fun clearSelection() = selected.clear()
 
+    // ---------- viewing ----------
+
+    /** File shown in the in-app viewer (not downloaded yet); the link is kept alive while it is open. */
+    var viewing by mutableStateOf<CameraFile?>(null)
+
+    /** Gallery item of a downloaded file, to open it in the phone's own player / gallery. */
+    suspend fun galleryUri(file: CameraFile): android.net.Uri? =
+        if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
+
+    fun view(file: CameraFile) {
+        touch()
+        if (conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
+    }
+
+    /** Player data source for the in-app viewer, or null without the camera Wi-Fi. */
+    fun previewSource(): androidx.media3.datasource.DataSource.Factory? =
+        session.wifiLink?.let { CameraHttpDataSource.Factory(it) }
+
+    fun previewUrl(file: CameraFile): String = "http://${CameraTcp.HOST}${session.previewUri(file)}"
+
+    /** Photo for the viewer, decoded to about screen size (a 50 MP JPEG must not be decoded in full). */
+    suspend fun previewPhoto(file: CameraFile, maxSide: Int): ImageBitmap? = withContext(Dispatchers.IO) {
+        val bytes = runCatching { session.fetchFile(session.previewUri(file)) }
+            .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) sample *= 2
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+            ?.asImageBitmap()
+    }
+
+    /** «Скачать» from the viewer: just this file. */
+    fun downloadOne(file: CameraFile) {
+        if (isDownloading) return
+        selected.clear()
+        selected[file.name] = Unit
+        downloadSelected(overwrite = false)
+    }
+
     var deleting by mutableStateOf(false)
         private set
 
@@ -975,9 +1111,9 @@ class CameraController(private val app: Application) {
             try {
                 val failed = session.deleteFiles(files)
                 message = when {
-                    failed == null -> "Камера не удалила файлы"
-                    failed.isEmpty() -> "Удалено с камеры: ${files.size}"
-                    else -> "Не удалось удалить: ${failed.joinToString { it.substringAfterLast('/') }}"
+                    failed == null -> tr("Камера не удалила файлы", "The camera didn't delete the files")
+                    failed.isEmpty() -> tr("Удалено с камеры: ", "Deleted from the camera: ") + files.size
+                    else -> tr("Не удалось удалить: ", "Couldn't delete: ") + failed.joinToString { it.substringAfterLast('/') }
                 }
                 selected.clear()
                 loadFiles()
@@ -985,7 +1121,7 @@ class CameraController(private val app: Application) {
                 throw e
             } catch (e: Exception) {
                 log("delete failed: ${e.message}")
-                message = "Ошибка: ${e.message}"
+                message = tr("Ошибка: ", "Error: ") + e.message
             } finally {
                 deleting = false
             }
@@ -1033,7 +1169,7 @@ class CameraController(private val app: Application) {
         val queue = selectedFiles.filter { overwrite || it.name !in downloaded }.sortedBy { it.created }
         if (queue.isEmpty()) {
             selected.clear()
-            message = "Все выбранные файлы уже в галерее"
+            message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")
             return
         }
         downloadJob = scope.launch {
@@ -1062,10 +1198,13 @@ class CameraController(private val app: Application) {
                         failed++
                     }
                 }
-                lastResult = "Скачано: $ok" + (if (failed > 0) ", ошибок: $failed" else "") +
-                    (if (ok + failed < queue.size) ", прервано" else "")
+                lastResult = tr("Скачано: $ok", "Downloaded: $ok") + (if (failed > 0) tr(", ошибок: $failed", ", errors: $failed") else "") +
+                    (if (ok + failed < queue.size) tr(", прервано", ", interrupted") else "")
             } catch (e: CancellationException) {
-                lastResult = "Остановлено, скачано: $ok (недокачанное продолжится в следующий раз)"
+                lastResult = tr(
+                    "Остановлено, скачано: $ok (недокачанное продолжится в следующий раз)",
+                    "Stopped, downloaded: $ok (unfinished files resume next time)",
+                )
                 throw e
             } finally {
                 download = null

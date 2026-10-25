@@ -23,6 +23,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import app.goultra.transfer.ui.GalleryScreen
 import app.goultra.transfer.ui.OnboardingScreen
+import app.goultra.transfer.ui.Splash
+import app.goultra.transfer.ui.AppPrefs
+import app.goultra.transfer.ui.ThemeMode
+import app.goultra.transfer.ui.tr
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Modifier
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -55,8 +63,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         if (savedInstanceState == null && intent?.action == ACTION_RECORD) recordRequested = true
         val controller = cameraController
+        // Splash on a cold start only; not for the «start recording» shortcut and not with animations switched off.
+        val animations = android.provider.Settings.Global.getFloat(contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+        val splashFirst = savedInstanceState == null && intent?.action != ACTION_RECORD && animations
         setContent {
-            AppTheme {
+            var showSplash by rememberSaveable { mutableStateOf(splashFirst) }
+            AppTheme { Box(Modifier.fillMaxSize()) {
                 var hasPermissions by remember { mutableStateOf(hasPermissions()) }
                 var afterGrant by remember { mutableStateOf<(() -> Unit)?>(null) }
                 val permissions = rememberLauncherForActivityResult(
@@ -64,7 +76,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     hasPermissions = hasPermissions()
                     if (hasPermissions) afterGrant?.invoke()
-                    else controller.message = "Без доступа к Bluetooth и геолокации камеру не найти"
+                    else controller.message = tr("Без доступа к Bluetooth и геолокации камеру не найти", "Without Bluetooth and location access the camera can't be found")
                     afterGrant = null
                 }
                 val withPermissions = { action: () -> Unit ->
@@ -77,9 +89,9 @@ class MainActivity : ComponentActivity() {
                 val shareLog = {
                     val send = Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, "GO Ultra Transfer — журнал")
+                        .putExtra(Intent.EXTRA_SUBJECT, tr("GO Ultra Transfer — журнал", "GO Ultra Transfer — log"))
                         .putExtra(Intent.EXTRA_TEXT, controller.logText())
-                    startActivity(Intent.createChooser(send, "Отправить журнал"))
+                    startActivity(Intent.createChooser(send, tr("Отправить журнал", "Send log")))
                 }
                 if (!controller.onboarded) {
                     OnboardingScreen(
@@ -102,17 +114,18 @@ class MainActivity : ComponentActivity() {
                         onConnect = { withPermissions(controller::connect) },
                         onOpenDiagnostics = {
                             if (controller.isDownloading) {
-                                controller.message = "Идёт скачивание — дождитесь его или нажмите «Стоп»"
+                                controller.message = tr("Идёт скачивание — дождитесь его или нажмите «Стоп»", "Downloading — wait for it to finish or press «Stop»")
                             } else {
                                 controller.disconnect()
-                                startActivity(Intent(this, DiagActivity::class.java))
+                                startActivity(Intent(this@MainActivity, DiagActivity::class.java))
                             }
                         },
                         onShareLog = shareLog,
                         onRecord = { withPermissions(controller::startRecording) },
                     )
                 }
-            }
+                if (showSplash) Splash { showSplash = false }
+            } }
         }
     }
 
@@ -130,13 +143,27 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
+    val dark = when (AppPrefs.theme) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
     val context = LocalContext.current
     val colors = when {
         Build.VERSION.SDK_INT >= 31 && dark -> dynamicDarkColorScheme(context)
         Build.VERSION.SDK_INT >= 31 -> dynamicLightColorScheme(context)
         dark -> darkColorScheme()
         else -> lightColorScheme()
+    }
+    // The status / navigation bar icons follow the app theme, not the phone's (they may differ now).
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.SideEffect {
+        (view.context as? android.app.Activity)?.window?.let { w ->
+            androidx.core.view.WindowCompat.getInsetsController(w, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
     }
     MaterialTheme(colorScheme = colors, content = content)
 }

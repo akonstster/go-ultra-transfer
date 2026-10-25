@@ -19,9 +19,11 @@ import java.util.concurrent.TimeUnit
  * The first [DUMP_BYTES] of the stream are saved to [dumpFile] for offline analysis.
  */
 class LiveDecoder(
-    private val surface: Surface,
+    @Volatile private var surface: Surface,
     private val log: (String) -> Unit,
     private val dumpFile: File? = null,
+    /** Real picture size from the decoder: the stream follows the recording's shape (16:9, 4:3, 2.35:1). */
+    private val onSize: (Int, Int) -> Unit = { _, _ -> },
 ) {
     private val queue = ArrayBlockingQueue<Pair<ByteArray, Long>>(90)
     @Volatile private var running = true
@@ -31,7 +33,22 @@ class LiveDecoder(
     private var dropped = 0
     private var dump: FileOutputStream? = runCatching { dumpFile?.let { FileOutputStream(it) } }.getOrNull()
     private var dumped = 0L
+    /** Guards codec calls: [setSurface] comes from the UI thread while the loop runs on its own. */
+    private val codecLock = Any()
+    private var codec: MediaCodec? = null
     private val thread = Thread(::loop, "live-decoder").apply { start() }
+
+    /**
+     * Moves the picture to another view without restarting the stream (portrait box ↔ full-screen landscape).
+     * Synchronous, so the caller may release the old surface right after.
+     */
+    fun setSurface(s: Surface) {
+        synchronized(codecLock) {
+            if (s == surface) return
+            surface = s
+            codec?.let { c -> runCatching { c.setOutputSurface(s) }.onFailure { log("декодер: смена экрана: ${it.message}") } }
+        }
+    }
 
     /** Called with every stream packet (reader thread); non-video packets are ignored. */
     fun onPacket(p: ByteArray) {
@@ -69,30 +86,38 @@ class LiveDecoder(
     private fun loop() {
         while (running && csd == null) Thread.sleep(10)
         val params = csd ?: return
-        val codec = openCodec(params) ?: return
+        val codec = synchronized(codecLock) { openCodec(params)?.also { codec = it } } ?: return
         val info = MediaCodec.BufferInfo()
         var frames = 0
         var fed = 0
         try {
             while (running) {
                 queue.poll(10, TimeUnit.MILLISECONDS)?.let { (data, ts) ->
-                    val index = codec.dequeueInputBuffer(50_000)
+                    val index = synchronized(codecLock) { codec.dequeueInputBuffer(20_000) }
                     if (index >= 0) {
-                        codec.getInputBuffer(index)!!.apply { clear(); put(data) }
-                        codec.queueInputBuffer(index, 0, data.size, ts, 0)
+                        synchronized(codecLock) {
+                            codec.getInputBuffer(index)!!.apply { clear(); put(data) }
+                            codec.queueInputBuffer(index, 0, data.size, ts, 0)
+                        }
                         fed++
                     } else {
                         dropped++
                     }
                 }
                 while (true) {
-                    val out = codec.dequeueOutputBuffer(info, 0)
+                    val out = synchronized(codecLock) { codec.dequeueOutputBuffer(info, 0) }
                     if (out >= 0) {
-                        codec.releaseOutputBuffer(out, true)
+                        synchronized(codecLock) { codec.releaseOutputBuffer(out, true) }
                         if (++frames == 1) log("трансляция: первый кадр на экране")
                     } else if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                         val f = codec.outputFormat
-                        log("трансляция: ${f.getInteger(MediaFormat.KEY_WIDTH)}×${f.getInteger(MediaFormat.KEY_HEIGHT)}")
+                        // The visible area (crop) if the decoder reports one, else the full buffer.
+                        val w = if (f.containsKey("crop-right")) f.getInteger("crop-right") - f.getInteger("crop-left") + 1
+                        else f.getInteger(MediaFormat.KEY_WIDTH)
+                        val h = if (f.containsKey("crop-bottom")) f.getInteger("crop-bottom") - f.getInteger("crop-top") + 1
+                        else f.getInteger(MediaFormat.KEY_HEIGHT)
+                        log("трансляция: ${w}×$h")
+                        onSize(w, h)
                     } else {
                         break
                     }
@@ -101,8 +126,11 @@ class LiveDecoder(
         } catch (e: Exception) {
             log("декодер остановлен: ${e.message}")
         } finally {
-            runCatching { codec.stop() }
-            runCatching { codec.release() }
+            synchronized(codecLock) {
+                this.codec = null
+                runCatching { codec.stop() }
+                runCatching { codec.release() }
+            }
             log("трансляция: подано $fed, кадров $frames, пропущено $dropped")
         }
     }

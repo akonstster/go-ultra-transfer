@@ -2,10 +2,16 @@ package app.goultra.transfer
 
 import android.app.Application
 import android.content.Context
+import app.goultra.transfer.ui.AppPrefs
 import app.goultra.transfer.ui.CameraController
 
 class GoUltraApp : Application() {
     val controller by lazy { CameraController(this) }
+
+    override fun onCreate() {
+        super.onCreate()
+        AppPrefs.init(this)
+    }
 }
 
 val Context.cameraController: CameraController get() = (applicationContext as GoUltraApp).controller

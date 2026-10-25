@@ -147,6 +147,8 @@ object SettingCodes {
         "VIDEO_TIMESHIFT" to Mode(4, null, 12),
         "VIDEO_LOOPRECORDING" to Mode(6, null, 17),
         "VIDEO_SUPER" to Mode(5, null, 16),
+        "VIDEO_BABYVIEW" to Mode(16, null, 65), // «Глазами ребенка» (Toddler Titan), FOV fixed to Titan
+
         "PHOTO_SINGLE" to Mode(null, 0, 6),
         "PHOTO_BURST" to Mode(null, 3, 5),
         "PHOTO_INTERVAL" to Mode(null, 2, 3, timelapseMode = 2),
@@ -173,7 +175,7 @@ object SettingCodes {
     )
     val fov = mapOf(
         "LINEAR" to 1, "ULTRAWIDE" to 2, "ACTION_VIEW" to 4, "LINEARHORIZON_45" to 6, "LINEARHORIZON_360" to 11,
-        "DEWARP" to 13, "MEGA_VIEW" to 14,
+        "DEWARP" to 13, "MEGA_VIEW" to 14, "SUPER_NEW" to 15,
     )
     val flowstate = mapOf(
         "FLOW_STATE_LEVEL_CV5_CLOSE" to 0, "FLOW_STATE_LEVEL_CV5_SLIGHT" to 1,
