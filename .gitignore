@@ -1,0 +1,27 @@
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/.kotlin/
+android/local.properties
+android/captures/
+*.iml
+.idea/
+
+# Built apps go to GitHub Releases, not into git
+*.apk
+*.aab
+
+# Personal working notes and tool settings (contain device serials)
+CLAUDE.md
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+
+# Camera data dumped while researching (may contain the Wi-Fi password, serial number)
+ble/snapshots/
+*.h265
+*.log
+probe*/

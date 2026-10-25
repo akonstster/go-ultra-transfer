@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_record"
+        android:shortcutId="record"
+        android:shortcutLongLabel="@string/shortcut_record_long"
+        android:shortcutShortLabel="@string/shortcut_record">
+        <intent
+            android:action="app.goultra.transfer.RECORD"
+            android:targetClass="app.goultra.transfer.MainActivity"
+            android:targetPackage="app.goultra.transfer" />
+    </shortcut>
+</shortcuts>

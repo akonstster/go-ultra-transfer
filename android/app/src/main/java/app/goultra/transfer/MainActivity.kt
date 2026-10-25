@@ -1,0 +1,142 @@
+package app.goultra.transfer
+
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import app.goultra.transfer.ui.GalleryScreen
+import app.goultra.transfer.ui.OnboardingScreen
+
+class MainActivity : ComponentActivity() {
+    companion object {
+        /** Home-screen shortcut «Начать запись» (res/xml/shortcuts.xml). */
+        const val ACTION_RECORD = "app.goultra.transfer.RECORD"
+    }
+
+    /** Set by the shortcut intent; consumed once the UI (and permissions) are ready. */
+    private var recordRequested by mutableStateOf(false)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == ACTION_RECORD) recordRequested = true
+        // Debug: `am start -n app.goultra.transfer/.MainActivity --ez snapshot true` from any tab (no live view).
+        // Debug: `--es opts 133,134,135` logs GET_OPTIONS for exactly these type numbers (read-only).
+        intent.getStringExtra("opts")?.let { list ->
+            cameraController.debugOptions(list.split(',').mapNotNull { it.trim().toIntOrNull() })
+        }
+        // Debug: `--ez selftest true` runs the settings self-test (same as menu ⋮ → «Самопроверка настроек»).
+        if (intent.getBooleanExtra("selftest", false)) cameraController.selfTest()
+        // `--es fms 0-40` widens the function modes read (finding an unknown mode's number).
+        if (intent.getBooleanExtra("snapshot", false)) {
+            val fms = intent.getStringExtra("fms")?.split('-')?.mapNotNull { it.toIntOrNull() }
+            cameraController.debugSnapshot(fms?.takeIf { it.size == 2 }?.let { (a, b) -> (a..b).toList() })
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        if (savedInstanceState == null && intent?.action == ACTION_RECORD) recordRequested = true
+        val controller = cameraController
+        setContent {
+            AppTheme {
+                var hasPermissions by remember { mutableStateOf(hasPermissions()) }
+                var afterGrant by remember { mutableStateOf<(() -> Unit)?>(null) }
+                val permissions = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions(),
+                ) {
+                    hasPermissions = hasPermissions()
+                    if (hasPermissions) afterGrant?.invoke()
+                    else controller.message = "Без доступа к Bluetooth и геолокации камеру не найти"
+                    afterGrant = null
+                }
+                val withPermissions = { action: () -> Unit ->
+                    if (hasPermissions) action() else {
+                        afterGrant = action
+                        permissions.launch(requestedPermissions())
+                    }
+                }
+
+                val shareLog = {
+                    val send = Intent(Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "GO Ultra Transfer — журнал")
+                        .putExtra(Intent.EXTRA_TEXT, controller.logText())
+                    startActivity(Intent.createChooser(send, "Отправить журнал"))
+                }
+                if (!controller.onboarded) {
+                    OnboardingScreen(
+                        controller = controller,
+                        hasPermissions = hasPermissions,
+                        onStart = { withPermissions(controller::runSetup) },
+                        onShareLog = shareLog,
+                    )
+                } else {
+                    LaunchedEffect(recordRequested) {
+                        if (recordRequested) {
+                            recordRequested = false
+                            withPermissions(controller::onRecordShortcut)
+                        } else if (hasPermissions) {
+                            controller.autoConnect()
+                        }
+                    }
+                    GalleryScreen(
+                        controller = controller,
+                        onConnect = { withPermissions(controller::connect) },
+                        onOpenDiagnostics = {
+                            if (controller.isDownloading) {
+                                controller.message = "Идёт скачивание — дождитесь его или нажмите «Стоп»"
+                            } else {
+                                controller.disconnect()
+                                startActivity(Intent(this, DiagActivity::class.java))
+                            }
+                        },
+                        onShareLog = shareLog,
+                        onRecord = { withPermissions(controller::startRecording) },
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        cameraController.onForeground()
+    }
+
+    override fun onStop() {
+        // Leaving the app (also with Back) starts the background grace period; rotation doesn't count.
+        if (!isChangingConfigurations) cameraController.onBackground()
+        super.onStop()
+    }
+}
+
+@Composable
+private fun AppTheme(content: @Composable () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val context = LocalContext.current
+    val colors = when {
+        Build.VERSION.SDK_INT >= 31 && dark -> dynamicDarkColorScheme(context)
+        Build.VERSION.SDK_INT >= 31 -> dynamicLightColorScheme(context)
+        dark -> darkColorScheme()
+        else -> lightColorScheme()
+    }
+    MaterialTheme(colorScheme = colors, content = content)
+}

@@ -1,0 +1,1083 @@
+package app.goultra.transfer.ui
+
+import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.os.SystemClock
+import android.util.Log
+import android.util.LruCache
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import app.goultra.transfer.CameraService
+import app.goultra.transfer.camera.CamSettings
+import app.goultra.transfer.camera.CameraConf
+import app.goultra.transfer.camera.CameraFile
+import app.goultra.transfer.camera.CameraSession
+import app.goultra.transfer.camera.CaptureStatus
+import app.goultra.transfer.camera.PbWriter
+import app.goultra.transfer.camera.SettingCodes
+import app.goultra.transfer.camera.Downloader
+import app.goultra.transfer.camera.LiveDecoder
+import app.goultra.transfer.camera.MediaKind
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import java.io.File
+
+sealed interface ConnState {
+    data object Idle : ConnState
+    data class Working(val step: String) : ConnState
+    data object Connected : ConnState
+    /** BLE control only (recording works, no files / live view): after «разбудить и записать». */
+    data object Remote : ConnState
+    data class Failed(val message: String) : ConnState
+}
+
+enum class Filter { ALL, PHOTO, VIDEO }
+
+enum class Tab { FILES, CAMERA }
+
+data class DownloadProgress(
+    val name: String,
+    val index: Int,
+    val count: Int,
+    val done: Long,
+    val total: Long,
+    val bytesPerSec: Long,
+)
+
+/**
+ * App-wide camera state: lives as long as the process (kept alive by [CameraService] while connected),
+ * so downloads continue when the screen is off or the app is in the background.
+ */
+class CameraController(private val app: Application) {
+    companion object {
+        private const val IDLE_VISIBLE_MS = 5 * 60_000L
+        private const val BACKGROUND_GRACE_MS = 3 * 60_000L
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val prefs = app.getSharedPreferences("camera", 0)
+
+    var onboarded by mutableStateOf(prefs.getBoolean("onboarded", false))
+        private set
+    var setup by mutableStateOf<ConnState>(ConnState.Idle)
+        private set
+    var conn by mutableStateOf<ConnState>(ConnState.Idle)
+        private set
+    var files by mutableStateOf<List<CameraFile>>(emptyList())
+        private set
+    var filter by mutableStateOf(Filter.ALL)
+    var downloaded by mutableStateOf<Set<String>>(emptySet())
+        private set
+    var download by mutableStateOf<DownloadProgress?>(null)
+        private set
+    var message by mutableStateOf<String?>(null)
+
+    /** Result of the last download batch. */
+    var lastResult: String = ""
+        private set
+
+    /** Result of a finished batch not yet shown as a notification (taken by [CameraService]). */
+    private var downloadResult: String? = null
+
+    fun takeDownloadResult(): String? = downloadResult.also { downloadResult = null }
+
+    /** Selected file names (map used as a snapshot-aware set). */
+    val selected = mutableStateMapOf<String, Unit>()
+
+    private val logLines = ArrayDeque<String>()
+    private val logTime = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+    /** Android/data/app.goultra.transfer/files/log.txt — readable with adb even where logcat is filtered (Huawei). */
+    private val logFile = app.getExternalFilesDir(null)?.let { File(it, "log.txt") }
+    private val session = CameraSession(app, ::log)
+
+    /** The log file is written here, never on the caller's thread (main, BLE binder…). */
+    private val logWriter = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /** Logcat + an in-memory tail (shared via «Отправить журнал») + a log file. */
+    fun log(msg: String) {
+        Log.i("GUT", msg)
+        val line = "${synchronized(logTime) { logTime.format(java.util.Date()) }} $msg"
+        synchronized(logLines) {
+            logLines.addLast(line)
+            while (logLines.size > 1000) logLines.removeFirst()
+        }
+        logFile?.let { f ->
+            logWriter.execute {
+                runCatching {
+                    if (f.length() > 2_000_000) f.renameTo(File(f.path + ".1"))
+                    f.appendText(line + "\n")
+                }
+            }
+        }
+    }
+
+    fun logText(): String = buildString {
+        appendLine("GO Ultra Transfer ${app.packageManager.getPackageInfo(app.packageName, 0).versionName}")
+        appendLine("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
+        synchronized(logLines) { logLines.forEach { appendLine(it) } }
+    }
+
+    private val memCache = LruCache<String, ImageBitmap>(300)
+    private val thumbPermits = Semaphore(3)
+    private val thumbDir = File(app.cacheDir, "thumbs").apply { mkdirs() }
+    private var downloadJob: Job? = null
+    /** The running connect() or runSetup() chain; both use the same BLE link, so only one at a time. */
+    private var linkJob: Job? = null
+    private var autoConnected = false
+    /** The background timer dropped a live connection: restore it when the app comes back. */
+    private var resumeOnForeground = false
+    private var resumeControlOnly = false
+
+    // Idle timeout: don't keep the camera awake and the phone on its Wi-Fi for nothing.
+    private var lastActivity = SystemClock.elapsedRealtime()
+    private var backgroundSince = 0L
+    private var uiShown by mutableStateOf(false)
+
+    val inBackground: Boolean get() = !uiShown
+
+    val isLinked: Boolean get() = conn == ConnState.Connected || conn == ConnState.Remote
+
+    var tab by mutableStateOf(Tab.FILES)
+
+    /** The camera screen (live view, recording) is on screen: never disconnect on idle then. */
+    private val keepConnected: Boolean get() = tab == Tab.CAMERA && uiShown
+
+    /** Recording state, polled over BLE once a second while the camera tab is visible. */
+    var capture by mutableStateOf<CaptureStatus?>(null)
+        private set
+    var recordBusy by mutableStateOf(false)
+        private set
+    var liveError by mutableStateOf<String?>(null)
+        private set
+    private var liveDecoder: LiveDecoder? = null
+
+    /** Shooting mode, settings and battery levels read from the camera (camera tab). */
+    var settings by mutableStateOf<CamSettings?>(null)
+        private set
+    /** The camera's capability description (/CONF), cached on disk: allowed values per mode. */
+    var conf by mutableStateOf<CameraConf?>(null)
+        private set
+    var settingBusy by mutableStateOf<String?>(null)
+        private set
+    private val confFile = File(app.filesDir, "camera_conf.json")
+
+    /** Bluetooth / Wi-Fi / VPN on the phone; the UI asks to fix what blocks the connection. */
+    var radios by mutableStateOf(PhoneRadios.check(app))
+        private set
+    /** Connection the user asked for while Bluetooth or Wi-Fi was off: runs as soon as they are on. */
+    private var afterRadios by mutableStateOf<(() -> Unit)?>(null)
+
+    val isDownloading: Boolean get() = downloadJob?.isActive == true
+
+    init {
+        if (!prefs.getBoolean("migrated_to_dcim", false)) {
+            scope.launch(Dispatchers.IO) {
+                runCatching { Downloader.migrateLegacy(app) }
+                    .onSuccess { log("migrated legacy gallery items: $it") }
+                    .onFailure { log("legacy migration failed: ${it.message}") }
+                prefs.edit().putBoolean("migrated_to_dcim", true).apply()
+            }
+        }
+        scope.launch {
+            while (true) {
+                delay(10_000)
+                disconnectIfIdle()
+            }
+        }
+        scope.launch {
+            // Connections are made from the visible app, so the foreground service may start here.
+            snapshotFlow { isLinked }.collect { if (it) CameraService.start(app) }
+        }
+        scope.launch(Dispatchers.IO) {
+            if (confFile.exists()) runCatching { CameraConf(confFile.readText()) }.getOrNull()?.let { conf = it }
+        }
+        scope.launch {
+            // Camera tab opened (or the link came up while it is open): read the current settings.
+            snapshotFlow { Triple(tab, conn, uiShown) }.collect { (t, c, shown) ->
+                if (t == Tab.CAMERA && shown && (c == ConnState.Connected || c == ConnState.Remote)) refreshSettings()
+            }
+        }
+        scope.launch {
+            var tick = 0
+            while (true) {
+                delay(1_000)
+                val linked = conn == ConnState.Connected || conn == ConnState.Remote
+                if (linked && uiShown && tab == Tab.CAMERA && !recordBusy && session.hasControl) {
+                    runCatching { session.captureStatus() }.getOrNull()?.let { capture = it }
+                    // Battery / charging and settings changed on the camera itself: re-read every 30 s.
+                    if (++tick % 30 == 0 && settingBusy == null) {
+                        runCatching { session.readSettings() }.getOrNull()?.let(::showSettings)
+                    }
+                }
+            }
+        }
+        PhoneRadios.watch(app) {
+            scope.launch {
+                radios = PhoneRadios.check(app)
+                afterRadios?.let { retry ->
+                    afterRadios = null
+                    retry() // checks the radios again and waits further if something is still off
+                }
+            }
+        }
+        session.onLost = {
+            scope.launch {
+                if (conn == ConnState.Connected) {
+                    detachLive()
+                    // Drop the dead TCP link and the camera network request (else keepalives / 10 s waits go on).
+                    session.closeWifi()
+                    // Wi-Fi gone but Bluetooth still there: recording control keeps working.
+                    conn = if (session.hasControl) ConnState.Remote else ConnState.Failed("Связь с камерой потеряна")
+                }
+            }
+        }
+    }
+
+    val visibleFiles: List<CameraFile>
+        get() = when (filter) {
+            Filter.ALL -> files
+            Filter.PHOTO -> files.filter { it.kind == MediaKind.PHOTO }
+            Filter.VIDEO -> files.filter { it.kind == MediaKind.VIDEO }
+        }
+
+    val selectedFiles: List<CameraFile> get() = files.filter { it.name in selected }
+
+    // ---------- first-run setup ----------
+
+    fun runSetup() {
+        if (setup is ConnState.Working) return
+        if (!radiosReady(needWifi = false, retry = ::runSetup)) return
+        disconnect()
+        linkJob = scope.launch {
+            setup = ConnState.Working("Подготовка…")
+            val error = try {
+                session.setup { step -> scope.launch { setup = ConnState.Working(step) } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("setup failed: ${e.message}")
+                "Ошибка: ${e.message}"
+            }
+            setup = if (error == null) ConnState.Connected else ConnState.Failed(error)
+        }
+    }
+
+    fun finishOnboarding() {
+        prefs.edit().putBoolean("onboarded", true).apply()
+        onboarded = true
+        setup = ConnState.Idle
+        autoConnected = true
+        connect()
+    }
+
+    fun restartOnboarding() {
+        disconnect()
+        prefs.edit().putBoolean("onboarded", false).apply()
+        onboarded = false
+        setup = ConnState.Idle
+    }
+
+    // ---------- connection ----------
+
+    /** Connects once per process start, when the app is opened. */
+    fun autoConnect() {
+        if (autoConnected) return
+        autoConnected = true
+        connect()
+    }
+
+    /** Full connection (files, live view). From [ConnState.Remote] it adds Wi-Fi to the existing BLE link. */
+    fun connect() {
+        if (conn is ConnState.Working || conn == ConnState.Connected || setup is ConnState.Working) return
+        if (!radiosReady(needWifi = true, retry = ::connect)) return
+        linkJob = scope.launch {
+            conn = ConnState.Working("Подключение…")
+            val error = try {
+                session.connect { step -> scope.launch { conn = ConnState.Working(step) } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("connect failed: ${e.message}")
+                "Ошибка: ${e.message}"
+            }
+            if (error != null) {
+                session.disconnect()
+                conn = ConnState.Failed(error)
+                return@launch
+            }
+            conn = ConnState.Connected
+            touch()
+            loadFiles()
+            loadConf()
+        }
+    }
+
+    fun refresh() {
+        touch()
+        // On the camera tab: re-read settings (they may have been changed on the camera itself).
+        if (tab == Tab.CAMERA) {
+            refreshSettings()
+            debugSnapshot()
+        } else if (conn == ConnState.Connected) {
+            scope.launch { loadFiles() }
+        }
+    }
+
+    /** Settings whose allowed values depend on others (CONF depend_on) and that the app can rewrite. */
+    private val DEPENDENT_PARAMS = listOf(
+        "flowstate_level", "fov_type", "horizon_lock", "hdr_switch", "i_log_switch", "filter_mode",
+        "damage_zoom", "undamage_zoom", "metering_mode", "sharpness_level",
+    )
+
+    private val debuggable = app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+    /** Previous snapshot per set of function modes read (a wide scan is compared only with a wide one). */
+    private val lastSnapshots = mutableMapOf<List<Int>, Map<String, String>>()
+    private var snapshotJob: Job? = null
+
+    val isDebugBuild: Boolean get() = debuggable
+
+    /** Debug: GET_OPTIONS for exactly [types], one request each, raw reply logged. */
+    fun debugOptions(types: List<Int>) {
+        if (!debuggable || !session.hasControl) return
+        scope.launch { for (t in types) log("DEBUG opt $t → ${session.rawOptions(listOf(t))}") }
+    }
+
+    var selfTestRunning by mutableStateOf(false)
+        private set
+
+    /** What the self-test goes through (CONF names), also the order the restore writes back (resolution first). */
+    private val SELF_TEST_PARAMS = listOf(
+        "record_resolution", "photo_resolution", "fov_type", "flowstate_level", "horizon_lock", "dark_eis_enable",
+        "hdr_switch", "i_log_switch", "filter_mode", "sharpness_level", "self_portrait_switch_2",
+        // EV before the exposure mode: it does nothing in full manual, which the exposure loop ends with.
+        "exposure_bias", "exposure_program", "exposure_iso", "exposure_shutter_speed", "white_balance", "metering_mode",
+        "raw_capture_type", "lapse_time", "burst_capture_params", "cache_capture_enable", "record_duration",
+        "export_type", "photography_self_timer", "live_photo_switch", "damage_zoom", "undamage_zoom",
+    )
+
+    /**
+     * Debug builds: every mode, every value CONF allows — written exactly like the settings screen does it, read back,
+     * mismatches logged («САМОПРОВЕРКА ОШИБКА»). The user's values and mode are restored at the end.
+     */
+    fun selfTest() {
+        val c = conf
+        if (!debuggable || selfTestRunning || c == null || !session.hasControl || settingBusy != null) return
+        selfTestRunning = true
+        settingBusy = "selftest"
+        scope.launch {
+            val problems = mutableListOf<String>()
+            var checks = 0
+            val startMode = settings?.mode ?: runCatching { session.readSettings() }.getOrNull()?.mode
+            try {
+                for ((mode, m) in SettingCodes.modes) {
+                    message = "Самопроверка: ${mode.lowercase()}…"
+                    if (!switchMode(m)) {
+                        problems += "$mode: режим не включился"
+                        continue
+                    }
+                    val original = session.readSettings() ?: continue
+                    if (original.mode != mode) {
+                        problems += "$mode: после переключения камера в ${original.mode}"
+                        continue
+                    }
+                    log("самопроверка $mode: исходные ${original.values}")
+                    for (param in SELF_TEST_PARAMS) {
+                        if (!c.supports(mode, param) || !shown(mode, param)) continue
+                        var cur = session.readSettings() ?: break
+                        val options = optionsFor(c, mode, param, cur.values).filter { offered(param, it) && encodable(param, it) }
+                        for (value in options) {
+                            touch() // the idle timer must not drop the link mid-test
+                            if (locked(param, cur.values)) break
+                            if (sameValue(param, currentValue(param, cur.values), value)) continue
+                            // An earlier value of the same setting may have changed what is allowed now.
+                            if (value !in optionsFor(c, mode, param, cur.values)) continue
+                            checks++
+                            val ok = writeSetting(param, value, cur)
+                            delay(250)
+                            cur = session.readSettings() ?: break
+                            var read = currentValue(param, cur.values)
+                            if (ok == true && !sameValue(param, read, value)) {
+                                delay(1_000) // slow to apply (portrait…) is not the same as ignored
+                                cur = session.readSettings() ?: break
+                                read = currentValue(param, cur.values)
+                                if (sameValue(param, read, value)) log("самопроверка: $mode $param=$value применилось с задержкой")
+                            }
+                            if (ok != true || !sameValue(param, read, value)) {
+                                problems += "$mode $param=$value: ответ $ok, прочитано $read"
+                                log("САМОПРОВЕРКА ОШИБКА: ${problems.last()}")
+                            }
+                        }
+                    }
+                    restoreSettings(mode, original, problems)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                problems += "сбой: ${e.message}"
+                log("самопроверка: ${e.message}")
+            } finally {
+                runCatching {
+                    startMode?.let { SettingCodes.modes[it] }?.let { switchMode(it) }
+                    session.readSettings()?.let(::showSettings)
+                }
+                log("самопроверка: проверок $checks, ошибок ${problems.size}" + problems.joinToString("") { "\n  $it" })
+                message = "Самопроверка: проверок $checks, ошибок ${problems.size} (подробности в журнале)"
+                settingBusy = null
+                selfTestRunning = false
+            }
+        }
+    }
+
+    private suspend fun switchMode(m: SettingCodes.Mode): Boolean {
+        val ok = if (m.photoSub != null) {
+            session.writeOption(SettingCodes.OPT_PHOTO_SUB_MODE, m.photoSub.toLong())
+        } else {
+            session.writeOption(SettingCodes.OPT_VIDEO_SUB_MODE, m.videoSub!!.toLong())
+        }
+        delay(600)
+        return ok
+    }
+
+    /** Writes back what the self-test changed in [mode] (two passes: some values need others restored first). */
+    private suspend fun restoreSettings(mode: String, original: CamSettings, problems: MutableList<String>) {
+        repeat(2) {
+            for (param in SELF_TEST_PARAMS) {
+                // Locked values (e.g. the shutter the camera remembers in auto) must not be written back.
+                if (locked(param, original.values)) continue
+                val want = currentValue(param, original.values) ?: continue
+                val cur = session.readSettings() ?: return
+                if (sameValue(param, currentValue(param, cur.values), want)) continue
+                writeSetting(param, want, cur)
+                delay(250)
+            }
+        }
+        val after = session.readSettings() ?: return
+        val left = SELF_TEST_PARAMS.filter { p ->
+            !locked(p, original.values) &&
+                currentValue(p, original.values)?.let { !sameValue(p, currentValue(p, after.values), it) } == true
+        }
+        if (left.isNotEmpty()) {
+            problems += "$mode: не восстановлено " +
+                left.joinToString { "$it=${currentValue(it, after.values)} (было ${currentValue(it, original.values)})" }
+        }
+    }
+
+    /** Debug builds, mapping settings: logs every camera field that changed since the previous ⟳ (read-only). */
+    fun debugSnapshot(functionModes: List<Int>? = null) {
+        if (!debuggable || snapshotJob?.isActive == true || !session.hasControl) return
+        touch()
+        snapshotJob = scope.launch {
+            message = "Снимок настроек…"
+            // Video 7 / Pure 27 (verified); photo candidates by the FunctionMode enum: single 6, burst 5, interval 3, starlapse 18.
+            // Real modes (others echo VIDEO_NORMAL): timelapse 2, interval 3, burst 5, photo 6, timeshift 12,
+            // FreeFrame 16, loop 17, starlapse 18, slow motion 21, Pure 27; the narrow scan reads more field numbers.
+            val fms = functionModes ?: listOf(7, 27, 6, 5, 3, 18, 2, 12, 16, 17, 21)
+            val snap = runCatching { session.snapshot(fms, if (functionModes == null) 300 else 100) }.onFailure { log("снимок: ${it.message}") }.getOrNull()
+                ?: return@launch
+            // Static noise (calibration strings, card space, temperature) is left out of the diff.
+            val noisy = setOf("o.9", "o.19", "o.20.2", "o.158.2", "o.77") + snap.keys.filter { it.startsWith("p") && it.endsWith(".41") }
+            val prev = lastSnapshots[fms]?.filterKeys { it !in noisy }
+            if (prev == null) {
+                log("снимок (${snap.size}): $snap")
+            } else {
+                val diff = (prev.keys + snap.keys).filter { it !in noisy && prev[it] != snap[it] }.sorted()
+                    .joinToString("; ") { "$it: ${prev[it]} → ${snap[it]}" }
+                log("снимок, изменилось: ${diff.ifEmpty { "ничего" }}")
+            }
+            lastSnapshots[fms] = snap
+            message = "Снимок готов"
+        }
+    }
+
+    private suspend fun loadFiles() {
+        val list = try {
+            session.files()?.also { refreshDownloaded() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("file list failed: ${e.message}")
+            null
+        }
+        if (list == null) {
+            message = "Не удалось получить список файлов"
+            return
+        }
+        files = list
+        selected.keys.retainAll(list.map { it.name }.toSet())
+        fillMissingSizes(list)
+    }
+
+    /** The listing has no size for some files (RAW .dng): ask the HTTP server, one by one, and patch the list. */
+    private fun fillMissingSizes(list: List<CameraFile>) {
+        val missing = list.filter { (it.size ?: 0L) <= 0L }
+        if (missing.isEmpty()) return
+        scope.launch {
+            val sizes = mutableMapOf<String, Long>()
+            for (f in missing) {
+                if (conn != ConnState.Connected) return@launch
+                // The Wi-Fi link may vanish between the check and the request (link getter throws then).
+                runCatching { session.fileSize(f) }.getOrNull()?.let { sizes[f.uri] = it }
+            }
+            if (sizes.isNotEmpty()) files = files.map { f -> sizes[f.uri]?.let { f.copy(size = it) } ?: f }
+            log("размеры по HEAD: ${sizes.size} из ${missing.size}")
+        }
+    }
+
+    private suspend fun refreshDownloaded() {
+        downloaded = withContext(Dispatchers.IO) { Downloader.downloadedNames(app) }
+    }
+
+    /**
+     * Bluetooth (and Wi-Fi for [needWifi]) must be on. Otherwise the UI shows what to switch on
+     * and [retry] runs once it is — no need to press «Подключиться» again.
+     */
+    private fun radiosReady(needWifi: Boolean, retry: () -> Unit): Boolean {
+        radios = PhoneRadios.check(app)
+        val ok = radios.bluetooth && (radios.wifi || !needWifi)
+        afterRadios = if (ok) null else retry
+        if (!ok) log("ждём: Bluetooth ${radios.bluetooth}, Wi-Fi ${radios.wifi}")
+        return ok
+    }
+
+    /** The UI shows the Bluetooth / Wi-Fi prompt only while a connection waits for it. */
+    val waitingForRadios: Boolean get() = afterRadios != null && (!radios.bluetooth || !radios.wifi)
+
+    fun disconnect() {
+        afterRadios = null
+        linkJob?.cancel()
+        linkJob = null
+        downloadJob?.cancel()
+        detachLive()
+        session.disconnect()
+        files = emptyList()
+        selected.clear()
+        capture = null
+        conn = ConnState.Idle
+        if (setup is ConnState.Working) setup = ConnState.Idle
+    }
+
+    // ---------- recording ----------
+
+    /** Wakes the camera over BLE if needed (no Wi-Fi) and starts recording; ~4 s from a powered-off camera. */
+    fun startRecording() = recordAction(start = true)
+
+    fun stopRecording() = recordAction(start = false)
+
+    fun toggleRecording() = if (capture?.recording == true) stopRecording() else startRecording()
+
+    /** Home-screen shortcut «Начать запись»: no auto-connect over Wi-Fi, straight to recording. */
+    fun onRecordShortcut() {
+        autoConnected = true
+        tab = Tab.CAMERA
+        startRecording()
+    }
+
+    private fun recordAction(start: Boolean) {
+        if (recordBusy || conn is ConnState.Working || setup is ConnState.Working) return
+        if (!session.hasControl && !radiosReady(needWifi = false) { recordAction(start) }) return
+        touch()
+        recordBusy = true
+        scope.launch {
+            try {
+                if (!session.hasControl) {
+                    conn = ConnState.Working("Подключение…")
+                    val error = session.connectControl { step -> scope.launch { conn = ConnState.Working(step) } }
+                    if (error != null) {
+                        session.disconnect()
+                        conn = ConnState.Failed(error)
+                        return@launch
+                    }
+                    conn = ConnState.Remote
+                }
+                // Photo / burst: the shutter takes a picture; other modes (incl. interval, starlapse) record.
+                if (start && settings == null) session.readSettings()?.let(::showSettings)
+                val picture = start && settings?.mode?.let { SettingCodes.modes[it] }?.takesPicture == true
+                val ok = when {
+                    picture -> session.takePicture()
+                    start -> session.startRecording()
+                    else -> session.stopRecording()
+                }
+                if (!ok) {
+                    message = when {
+                        picture -> "Камера не сделала снимок"
+                        start -> "Камера не начала запись"
+                        else -> "Камера не остановила запись"
+                    }
+                } else if (picture) {
+                    message = "Снято"
+                }
+                capture = session.captureStatus() ?: capture
+                // The new file shows up in the list.
+                if ((picture || !start) && ok && conn == ConnState.Connected) loadFiles()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("record failed: ${e.message}")
+                message = "Ошибка: ${e.message}"
+            } finally {
+                recordBusy = false
+            }
+        }
+    }
+
+    // ---------- shooting settings ----------
+
+    /** Downloads /CONF over Wi-Fi when there is no cached copy yet (it only changes with firmware updates). */
+    private suspend fun loadConf() {
+        if (conf != null) return
+        val text = try {
+            session.fetchConf()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log("CONF не загружен: ${e.message}")
+            return
+        }
+        val parsed = runCatching { CameraConf(text) }.onFailure { log("CONF: ${it.message}") }.getOrNull() ?: return
+        withContext(Dispatchers.IO) { runCatching { confFile.writeText(text) } }
+        conf = parsed
+        log("CONF: режимов ${parsed.modes.size}")
+    }
+
+    private fun showSettings(s: CamSettings) {
+        if (s != settings) log("настройки: ${s.mode} ${s.values} батарея ${s.batteryPercent}/${s.podBatteryPercent}")
+        settings = s
+    }
+
+    fun refreshSettings() {
+        if (!session.hasControl) return
+        scope.launch {
+            if (session.hasWifi) loadConf()
+            runCatching { session.readSettings() }
+                .onFailure { log("settings read failed: ${it.message}") }
+                .getOrNull()
+                ?.let(::showSettings)
+        }
+    }
+
+    /** Switches the shooting mode: video_sub_mode (SET_OPTIONS 41) or photo_sub_mode (40). */
+    fun selectMode(mode: String) {
+        val m = SettingCodes.modes[mode] ?: return
+        applyChange("mode") {
+            if (m.photoSub != null) {
+                session.writeOption(SettingCodes.OPT_PHOTO_SUB_MODE, m.photoSub.toLong())
+            } else {
+                session.writeOption(SettingCodes.OPT_VIDEO_SUB_MODE, m.videoSub!!.toLong())
+            }
+        }
+    }
+
+    /**
+     * Writes one setting of the current mode ([param] is the CONF name, [value] a CONF value),
+     * then re-reads everything: the camera adjusts dependent values itself (e.g. no horizon lock without FlowState).
+     */
+    fun setSetting(param: String, value: String) {
+        val current = settings ?: return
+        applyChange(param) {
+            writeSetting(param, value, current) ?: true.also { message = "Это значение приложение пока не умеет выставлять" }
+        }
+    }
+
+    /**
+     * One setting of the current mode, exactly as the settings screen does it (the self-test uses it too).
+     * Returns whether the camera answered OK, or null when the app can't encode this value.
+     */
+    private suspend fun writeSetting(param: String, value: String, current: CamSettings): Boolean? {
+        val mode = current.mode ?: return null
+        val m = SettingCodes.modes[mode] ?: return null
+        val fm = m.functionMode
+        fun pb(build: PbWriter.() -> PbWriter) = PbWriter().build().toByteArray()
+        return when {
+            // The camera's own menu sets both option 134 and PhotographyOptions 42.
+            param == "dark_eis_enable" -> {
+                val on = if (value == "true") 1L else 0L
+                session.writeOption(SettingCodes.OPT_BLUR_REDUCTION, on, SettingCodes.OPT_BLUR_REDUCTION_TYPE) &&
+                    session.writePhotoOptions(fm, mapOf(SettingCodes.DARK_EIS to pb { varint(SettingCodes.DARK_EIS, on) }))
+            }
+            param == "lapse_time" -> {
+                val tm = m.timelapseMode ?: return null
+                val ms = value.toDoubleOrNull()?.let { (it * 1000).toLong() }?.takeIf { it > 0 } ?: return null
+                session.writeLapse(tm, ms)
+            }
+            else -> {
+                val fields = encode(param, value, current) ?: return null
+                // Dependents first, in their own SET: the camera checks a new value against the settings it has *now*.
+                val dependents = dependentFixes(mode, current, param, value)
+                (dependents.isEmpty() || session.writePhotoOptions(fm, dependents)) && session.writePhotoOptions(fm, fields)
+            }
+        }
+    }
+    /**
+     * Settings the camera menu itself adjusts when a choice makes them impossible (4K60 → HDR off, Ultrawide →
+     * MegaView). A write with an impossible combination is silently ignored by the camera, so the app sends these
+     * first: the first value CONF allows (off for switches). Two passes for chains (FOV → horizon lock).
+     */
+    private fun dependentFixes(mode: String, current: CamSettings, param: String, value: String): Map<Int, ByteArray> {
+        val c = conf ?: return emptyMap()
+        val values = current.values.toMutableMap().apply { put(param, value) }
+        val out = mutableMapOf<Int, ByteArray>()
+        if (values["hdr_switch"] == "true" && !c.hdrPossible(mode, values["record_resolution"])) {
+            encode("hdr_switch", "false", current)?.let { out.putAll(it); values["hdr_switch"] = "false" }
+            log("hdr_switch: true → false (нет HDR при ${values["record_resolution"]})")
+        }
+        repeat(2) {
+            for (dep in DEPENDENT_PARAMS) {
+                if (dep == param || !c.supports(mode, dep)) continue
+                val now = values[dep] ?: continue
+                val allowed = c.allowed(mode, dep, values)
+                if (allowed.isEmpty() || now in allowed) continue
+                val pick = if ("false" in allowed) "false" else allowed.firstOrNull { encode(dep, it, current) != null } ?: continue
+                encode(dep, pick, current)?.let {
+                    out.putAll(it)
+                    values[dep] = pick
+                    log("$dep: $now → $pick (несовместимо с $param=$value)")
+                }
+            }
+        }
+        return out
+    }
+
+    /** PhotographyOptions fields for one CONF value; null when the app doesn't know how to encode it. */
+    private fun encode(param: String, value: String, current: CamSettings): Map<Int, ByteArray>? {
+        fun pb(build: PbWriter.() -> PbWriter) = PbWriter().build().toByteArray()
+        fun seconds(vararg fields: Int) = fields.associateWith { f -> pb { varint(f, value.toLong()) } }
+        /** Both exposure blocks (20 still, 21 video) with the program derived from ISO / shutter like the camera does. */
+        fun exposure(iso: Long, shutter: Double): Map<Int, ByteArray> {
+            val program = SettingCodes.exposurePrograms.getValue(SettingCodes.programFor(iso, shutter)).toLong()
+            val body = PbWriter().varint(1, program).varint(2, iso).double(3, shutter).toByteArray()
+            return listOf(SettingCodes.STILL_EXPOSURE, SettingCodes.VIDEO_EXPOSURE).associateWith { f -> pb { bytes(f, body) } }
+        }
+        val iso = current.values["exposure_iso"]?.toLongOrNull() ?: 0L
+        val shutter = current.values["exposure_shutter_speed"]?.let(SettingCodes::shutterSeconds) ?: 0.0
+        fun burst(params: String, cache: Boolean): Map<Int, ByteArray>? {
+            val (shots, secs) = params.split('/').map { it.toLongOrNull() ?: return null }
+            val cached = if (cache) SettingCodes.burstCacheFrames[params] ?: return null else 0
+            return with(SettingCodes) {
+                mapOf(
+                    BURST_COUNT to pb { varint(BURST_COUNT, shots) },
+                    BURST_SECONDS to pb { varint(BURST_SECONDS, secs) },
+                    BURST_CACHE_FRAMES to pb { varint(BURST_CACHE_FRAMES, cached.toLong()) },
+                    BURST_CACHE to pb { varint(BURST_CACHE, if (cache) 1 else 0) },
+                )
+            }
+        }
+        fun bool(field: Int) = mapOf(field to pb { varint(field, if (value == "true") 1 else 0) })
+        fun code(field: Int, map: Map<String, Int>): Map<Int, ByteArray>? =
+            map[value]?.let { c -> mapOf(field to pb { varint(field, c.toLong()) }) }
+        return with(SettingCodes) {
+            when (param) {
+                "record_resolution" -> code(RESOLUTION, resolutions)
+                "fov_type" -> code(FOV, fov)
+                "flowstate_level" -> code(FLOWSTATE, flowstate)
+                "sharpness_level" -> code(SHARPNESS, sharpness)
+                "filter_mode" -> code(FILTER, filter)
+                "metering_mode" -> code(METERING, metering)
+                "white_balance" -> mapOf(WHITE_BALANCE to pb { varint(WHITE_BALANCE, value.toLong()) })
+                "exposure_bias" -> mapOf(EXPOSURE_BIAS to pb { varint(EXPOSURE_BIAS, zigzag(evToTenths(value))) })
+                "horizon_lock" -> bool(HORIZON_LOCK)
+                "hdr_switch" -> bool(HDR)
+                "i_log_switch" -> bool(I_LOG)
+                "damage_zoom", "undamage_zoom" -> {
+                    val on = value == "true"
+                    mapOf(
+                        DAMAGE_ZOOM to pb { varint(DAMAGE_ZOOM, if (on) 1 else 0) },
+                        ZOOM_SCALE to pb { double(ZOOM_SCALE, if (on) 1.0 else 0.0) },
+                    )
+                }
+                // Manual starts from the current values, or ISO 400 + 1/100 when they are auto.
+                "exposure_program" -> if (value == "FULL_AUTO") exposure(0, 0.0)
+                    else exposure(iso.takeIf { it > 0 } ?: 400, shutter.takeIf { it > 0 } ?: 0.01)
+                // «AUTO_3200»: auto ISO with that maximum (field 24), as the camera menu offers it.
+                "exposure_iso" -> if (value.startsWith("AUTO_")) {
+                    val limit = value.removePrefix("AUTO_").toLongOrNull() ?: 0
+                    exposure(0, shutter) + (ISO_TOP_LIMIT to pb { varint(ISO_TOP_LIMIT, limit) })
+                } else {
+                    exposure(value.toLongOrNull() ?: 0, shutter)
+                }
+                "exposure_shutter_speed" -> exposure(iso, shutterSeconds(value))
+                "video_iso_top_limit" -> seconds(ISO_TOP_LIMIT)
+                "self_portrait_switch_2" -> portrait[value]?.let { (brighten, smooth) ->
+                    val body = PbWriter().float(1, if (brighten) 1f else 0f).float(2, if (smooth) 1f else 0f).toByteArray()
+                    mapOf(BEAUTY to pb { bytes(BEAUTY, body) })
+                }
+                "photo_resolution" -> code(PHOTO_RESOLUTION, photoResolutions)
+                "raw_capture_type" -> code(RAW_CAPTURE, rawCapture)
+                "export_type" -> code(EXPORT_TYPE, exportType)
+                "photography_self_timer" -> seconds(SELF_TIMER)
+                "record_duration" -> seconds(DURATION, DURATION_2)
+                "live_photo_switch" -> mapOf(LIVE_PHOTO to pb { bytes(LIVE_PHOTO, PbWriter().varint(2, if (value == "true") 2 else 1).toByteArray()) })
+                "burst_capture_params" -> burst(value, current.values["cache_capture_enable"] == "true")
+                "cache_capture_enable" -> current.values["burst_capture_params"]?.let { burst(it, value == "true") }
+                else -> null
+            }
+        }
+    }
+
+    private fun applyChange(what: String, write: suspend () -> Boolean) {
+        if (settingBusy != null || !session.hasControl) return
+        touch()
+        settingBusy = what
+        scope.launch {
+            try {
+                if (!write()) message = "Камера не приняла настройку"
+                delay(300)
+                session.readSettings()?.let(::showSettings)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("setting $what failed: ${e.message}")
+                message = "Ошибка: ${e.message}"
+            } finally {
+                settingBusy = null
+            }
+        }
+    }
+
+    // ---------- live view ----------
+
+    /** The preview surface appeared (camera tab, full connection): start the stream into it. */
+    fun attachLive(surface: android.view.Surface) {
+        detachLive()
+        if (conn != ConnState.Connected) return
+        // Debug builds keep the first 5 MB of the stream (live.h265, length-prefixed packets) for analysis.
+        val debuggable = app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        val dump = if (debuggable) app.getExternalFilesDir(null)?.let { File(it, "live.h265") } else null
+        val decoder = LiveDecoder(surface, ::log, dump)
+        liveDecoder = decoder
+        liveError = null
+        scope.launch {
+            if (!session.startLive(decoder::onPacket)) liveError = "Камера не начала трансляцию"
+        }
+    }
+
+    fun detachLive() {
+        val decoder = liveDecoder ?: return
+        liveDecoder = null
+        scope.launch { runCatching { session.stopLive() } }
+        scope.launch(Dispatchers.IO) { decoder.release() }
+    }
+
+    /** Any user action (tap, scroll, refresh…) postpones the idle disconnect. */
+    fun touch() {
+        lastActivity = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * App went to the background (or was closed with Back): the connection is kept for [BACKGROUND_GRACE_MS]
+     * — e.g. to look at a downloaded file in the gallery — then released. [CameraService] (foreground service)
+     * keeps the process unfrozen meanwhile, otherwise the timer may never fire and the open BLE link / Wi-Fi
+     * keep the camera awake all night. Without a link the camera falls asleep by itself ~2.5 min later.
+     */
+    fun onBackground() {
+        uiShown = false
+        backgroundSince = SystemClock.elapsedRealtime()
+    }
+
+    /** Seconds left before the background disconnect, or null when the app is visible / nothing to release. */
+    fun backgroundSecondsLeft(): Int? {
+        if (uiShown || !isLinked || isDownloading) return null
+        val since = maxOf(backgroundSince, lastActivity)
+        return ((BACKGROUND_GRACE_MS - (SystemClock.elapsedRealtime() - since)) / 1000).toInt().coerceAtLeast(0)
+    }
+
+    /** Back in the foreground: reconnect if the background timer dropped the connection. */
+    fun onForeground() {
+        uiShown = true
+        radios = PhoneRadios.check(app)
+        touch()
+        if (resumeOnForeground && onboarded) {
+            resumeOnForeground = false
+            if (resumeControlOnly) reconnectControl() else connect()
+        }
+    }
+
+    /** BLE control link only (after «разбудить и записать»): restores [ConnState.Remote]. */
+    private fun reconnectControl() {
+        if (conn is ConnState.Working) return
+        if (!radiosReady(needWifi = false, retry = ::reconnectControl)) return
+        linkJob = scope.launch {
+            conn = ConnState.Working("Подключение…")
+            val error = try {
+                session.connectControl { step -> scope.launch { conn = ConnState.Working(step) } }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("reconnect failed: ${e.message}")
+                "Ошибка: ${e.message}"
+            }
+            if (error != null) {
+                session.disconnect()
+                conn = ConnState.Failed(error)
+            } else {
+                conn = ConnState.Remote
+                capture = runCatching { session.captureStatus() }.getOrNull()
+            }
+        }
+    }
+
+    private fun disconnectIfIdle() {
+        // A recording carries on by itself on the camera; stopping it later just reconnects over BLE.
+        if (!isLinked || isDownloading || keepConnected || recordBusy) return
+        if (!uiShown) {
+            // In the background: grace period from leaving the app or from the end of the last download.
+            if (backgroundSecondsLeft() != 0) return
+            log("приложение в фоне ${BACKGROUND_GRACE_MS / 60_000} мин: отключаюсь от камеры")
+            resumeOnForeground = true
+            resumeControlOnly = conn == ConnState.Remote
+            disconnect()
+            return
+        }
+        if (SystemClock.elapsedRealtime() - lastActivity < IDLE_VISIBLE_MS) return
+        log("idle for ${IDLE_VISIBLE_MS / 1000} s: disconnecting")
+        disconnect()
+        conn = ConnState.Failed("Камера отключена, чтобы не разряжаться без дела.\nНажмите «Подключиться».")
+    }
+
+    // ---------- selection ----------
+
+    fun toggle(file: CameraFile) {
+        touch()
+        if (selected.remove(file.name) == null) selected[file.name] = Unit
+    }
+
+    /** Selects all visible files that are not in the gallery yet. */
+    fun selectNew() {
+        touch()
+        visibleFiles.filter { it.name !in downloaded }.forEach { selected[it.name] = Unit }
+    }
+
+    fun clearSelection() = selected.clear()
+
+    var deleting by mutableStateOf(false)
+        private set
+
+    /** Deletes the selected files from the camera card (the UI asks for confirmation first). */
+    fun deleteSelected() {
+        val files = selectedFiles
+        if (files.isEmpty() || deleting || conn != ConnState.Connected || isDownloading) return
+        touch()
+        deleting = true
+        scope.launch {
+            try {
+                val failed = session.deleteFiles(files)
+                message = when {
+                    failed == null -> "Камера не удалила файлы"
+                    failed.isEmpty() -> "Удалено с камеры: ${files.size}"
+                    else -> "Не удалось удалить: ${failed.joinToString { it.substringAfterLast('/') }}"
+                }
+                selected.clear()
+                loadFiles()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("delete failed: ${e.message}")
+                message = "Ошибка: ${e.message}"
+            } finally {
+                deleting = false
+            }
+        }
+    }
+
+    // ---------- thumbnails ----------
+
+    suspend fun thumbnail(file: CameraFile): ImageBitmap? {
+        memCache.get(file.name)?.let { return it }
+        val cached = File(thumbDir, file.name + ".jpg")
+        val bitmap = withContext(Dispatchers.IO) {
+            cached.takeIf { it.exists() }?.let { f ->
+                BitmapFactory.decodeFile(f.path) ?: null.also { f.delete() } // corrupt cache entry: refetch
+            } ?: if (conn == ConnState.Connected) {
+                thumbPermits.withPermit {
+                    runCatching { session.thumbnail(file) }
+                        .onFailure { log("thumbnail ${file.name}: ${it.message}") }
+                        .getOrNull()
+                        ?.also { bmp -> saveAtomically(cached, bmp) }
+                }
+            } else {
+                null
+            }
+        } ?: return null
+        return bitmap.asImageBitmap().also { memCache.put(file.name, it) }
+    }
+
+    /** Temp file + rename: a killed process never leaves a truncated thumbnail behind. */
+    private fun saveAtomically(target: File, bmp: Bitmap) {
+        val tmp = File(target.path + ".tmp")
+        runCatching {
+            tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            if (!tmp.renameTo(target)) tmp.delete()
+        }.onFailure { tmp.delete() }
+    }
+
+    // ---------- downloads ----------
+
+    /** Selected files that are already in the gallery (the UI asks: skip or overwrite). */
+    val selectedAlreadyDownloaded: Int get() = selectedFiles.count { it.name in downloaded }
+
+    fun downloadSelected(overwrite: Boolean) {
+        if (isDownloading) return
+        val queue = selectedFiles.filter { overwrite || it.name !in downloaded }.sortedBy { it.created }
+        if (queue.isEmpty()) {
+            selected.clear()
+            message = "Все выбранные файлы уже в галерее"
+            return
+        }
+        downloadJob = scope.launch {
+            var ok = 0
+            var failed = 0
+            try {
+                for ((i, file) in queue.withIndex()) {
+                    if (conn != ConnState.Connected) break
+                    val startedAt = System.currentTimeMillis()
+                    var startedFrom = -1L
+                    download = DownloadProgress(file.name, i + 1, queue.size, 0, file.size ?: 0, 0)
+                    try {
+                        session.download(file, overwrite) { done, total ->
+                            if (startedFrom < 0) startedFrom = done
+                            val sec = (System.currentTimeMillis() - startedAt) / 1000.0
+                            val speed = if (sec > 0.5) ((done - startedFrom) / sec).toLong() else 0L
+                            scope.launch { download = DownloadProgress(file.name, i + 1, queue.size, done, total, speed) }
+                        }
+                        ok++
+                        downloaded = downloaded + file.name
+                        selected.remove(file.name)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        log("download ${file.name} failed: ${e.message}")
+                        failed++
+                    }
+                }
+                lastResult = "Скачано: $ok" + (if (failed > 0) ", ошибок: $failed" else "") +
+                    (if (ok + failed < queue.size) ", прервано" else "")
+            } catch (e: CancellationException) {
+                lastResult = "Остановлено, скачано: $ok (недокачанное продолжится в следующий раз)"
+                throw e
+            } finally {
+                download = null
+                message = lastResult
+                downloadResult = lastResult
+                touch() // the idle / background countdown starts after the download
+            }
+        }
+        CameraService.start(app)
+    }
+
+    fun cancelDownload() {
+        downloadJob?.cancel()
+    }
+}
