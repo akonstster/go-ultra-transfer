@@ -52,6 +52,9 @@ class CameraTcp(
      */
     @Volatile var onStream: ((ByteArray) -> Unit)? = null
 
+    /** Camera notifications (code 8xxx), called on the reader thread. */
+    @Volatile var onNotification: ((CamMessage) -> Unit)? = null
+
     suspend fun open(): Boolean = withContext(Dispatchers.IO) {
         val s = link.createSocket()
         socket = s // before connect(): close() must be able to release it if connect throws
@@ -96,7 +99,12 @@ class CameraTcp(
                     4 -> {
                         val m = Proto.parseMessage(p, 0, seqBytes = 3) ?: continue
                         val waiter = if (m.isResponse) pending.remove(m.seq) else null
-                        if (waiter != null) waiter.complete(m) else log("TCP уведомление ${m.code}: ${m.body.hex(24)}")
+                        if (waiter != null) {
+                            waiter.complete(m)
+                        } else {
+                            log("TCP уведомление ${m.code}: ${m.body.hex(24)}")
+                            runCatching { onNotification?.invoke(m) }
+                        }
                     }
                     else -> log("TCP пакет: ${p.hex(24)}")
                 }

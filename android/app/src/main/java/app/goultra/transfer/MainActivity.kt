@@ -53,6 +53,10 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra("scan", false)) cameraController.debugScan()
         // Debug: `--ei status 120` logs the raw capture status every second (mapping recording fields).
         intent.getIntExtra("status", 0).takeIf { it > 0 }?.let(cameraController::debugCaptureStatus)
+        // Debug: `--es cmd 56:0801` sends one allowed command (code:hex body) and logs the reply.
+        intent.getStringExtra("cmd")?.split(':')?.let { p ->
+            p[0].toIntOrNull()?.let { cameraController.debugCommand(it, p.getOrElse(1) { "" }) }
+        }
         // Debug: `--ez selftest true` runs the settings self-test (same as menu ⋮ → «Самопроверка настроек»).
         if (intent.getBooleanExtra("selftest", false)) cameraController.selfTest()
         // `--es fms 0-40` widens the function modes read (finding an unknown mode's number).

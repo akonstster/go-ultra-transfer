@@ -69,13 +69,17 @@ class CameraBle(private val context: Context, private val log: (String) -> Unit)
 
     // ---------- scan / bond / connect ----------
 
-    suspend fun scan(timeoutMs: Long = 15_000): ScanResult? {
+    /**
+     * The first camera advertising BE80 — or only the one called [name] (its advertised name, the serial's tail,
+     * e.g. «AB12CD»: the address is random and changes, the name doesn't).
+     */
+    suspend fun scan(timeoutMs: Long = 15_000, name: String? = null): ScanResult? {
         val scanner = adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
             ?: run { log("Bluetooth выключен"); return null }
         val found = CompletableDeferred<ScanResult>()
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                found.complete(result)
+                if (name == null || advertisedName(result) == name) found.complete(result)
             }
 
             override fun onScanFailed(errorCode: Int) {
@@ -85,7 +89,7 @@ class CameraBle(private val context: Context, private val log: (String) -> Unit)
         }
         val filters = listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_BE80)).build())
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-        log("поиск камеры (сервис BE80)…")
+        log("поиск камеры (сервис BE80${name?.let { ", «$it»" } ?: ""})…")
         scanner.startScan(filters, settings, callback)
         try {
             val r = withTimeoutOrNull(timeoutMs) { found.await() } ?: return null
@@ -96,6 +100,38 @@ class CameraBle(private val context: Context, private val log: (String) -> Unit)
             return r
         } finally {
             scanner.stopScan(callback)
+        }
+    }
+
+    /** The camera's advertised name («AB12CD»), or its device name. */
+    @SuppressLint("MissingPermission")
+    fun advertisedName(r: ScanResult): String? = r.scanRecord?.deviceName ?: r.device.name
+
+    /**
+     * Setup: every camera advertising BE80 for [ms] (one per name, strongest signal), to let the user pick one when
+     * several are around. Stops early once a camera was seen and nothing new turned up for a while.
+     */
+    suspend fun scanCameras(ms: Long = 5_000): List<ScanResult> {
+        val scanner = adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
+            ?: run { log("Bluetooth выключен"); return emptyList() }
+        val seen = java.util.concurrent.ConcurrentHashMap<String, ScanResult>()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val key = advertisedName(result) ?: result.device.address
+                seen.merge(key, result) { old, new -> if (new.rssi > old.rssi) new else old }
+            }
+        }
+        val filters = listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_BE80)).build())
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+        log("поиск всех камер рядом…")
+        scanner.startScan(filters, settings, callback)
+        try {
+            kotlinx.coroutines.delay(ms)
+        } finally {
+            scanner.stopScan(callback)
+        }
+        return seen.values.sortedByDescending { it.rssi }.also { list ->
+            log("камер рядом: ${list.size} — ${list.joinToString { "«${advertisedName(it)}» rssi=${it.rssi}" }}")
         }
     }
 

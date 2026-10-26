@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import app.goultra.transfer.CameraService
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CameraConf
+import app.goultra.transfer.camera.CameraInfo
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.CameraTcp
@@ -28,6 +29,7 @@ import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.LiveDecoder
 import app.goultra.transfer.camera.MediaKind
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -191,6 +193,17 @@ class CameraController(private val app: Application) {
     private var speedSwitchedAt = 0L
     /** A TimeShift recording just ended: the next file list tells its video length. */
     private var reportTimeShift = false
+
+    /** When Wi-Fi last came up, and the last silent reconnect after an early drop (once per 3 min, no loops). */
+    private var wifiUpAt = 0L
+    private var earlyRetryAt = 0L
+
+    /**
+     * Economy recording: live view stopped and the camera's Wi-Fi left; the camera keeps its access point off until
+     * the recording ends, Bluetooth alone follows and stops it. After the stop Wi-Fi is joined again.
+     */
+    var ecoRecording by mutableStateOf(false)
+        private set
     var recordBusy by mutableStateOf(false)
         private set
     var liveError by mutableStateOf<String?>(null)
@@ -273,12 +286,23 @@ class CameraController(private val app: Application) {
                 }
             }
         }
+        session.onLiveParams = { scope.launch { onLiveParamsChanged() } }
         session.onLost = {
             scope.launch {
                 if (conn == ConnState.Connected) {
-                    detachLive()
+                    pauseLive() // the screen's surface is kept: the stream comes back after a reconnect
                     // Drop the dead TCP link and the camera network request (else keepalives / 10 s waits go on).
                     session.closeWifi()
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - wifiUpAt < 60_000 && now - earlyRetryAt > 180_000) {
+                        // A woken camera restarts its access point once, ~30 s after the wake: the phone was on the
+                        // first one. Reconnecting at once (~2 s) instead of showing an error.
+                        log("Wi-Fi камеры пропал сразу после подключения (перезапуск точки доступа): подключаюсь заново")
+                        earlyRetryAt = now
+                        conn = if (session.hasControl) ConnState.Remote else ConnState.Idle
+                        connect()
+                        return@launch
+                    }
                     // Wi-Fi gone but Bluetooth still there: recording control keeps working.
                     conn = if (session.hasControl) ConnState.Remote else ConnState.Failed(tr("Связь с камерой потеряна", "Lost the link to the camera"))
                 }
@@ -295,7 +319,32 @@ class CameraController(private val app: Application) {
 
     val selectedFiles: List<CameraFile> get() = files.filter { it.name in selected }
 
+    // ---------- camera info (menu ⋮ → «Камера») ----------
+
+    /** Model / firmware / serial, read when the «Camera» window opens; kept after a disconnect (they don't change). */
+    var cameraInfo by mutableStateOf<CameraInfo?>(null)
+        private set
+
+    /** This phone's camera name («AB12CD»), remembered at setup or on the first connection. */
+    val cameraName: String? get() = session.cameraName
+
+    fun loadCameraInfo() {
+        if (!session.hasControl) return
+        refreshSettings() // battery, Pod, card
+        scope.launch { runCatching { session.cameraInfo() }.getOrNull()?.let { cameraInfo = it } }
+    }
+
     // ---------- first-run setup ----------
+
+    /** Several cameras found in setup: their names, shown for the user to pick ([chooseCamera]). */
+    var cameraChoices by mutableStateOf<List<String>?>(null)
+        private set
+    private var cameraChoice: CompletableDeferred<String?>? = null
+
+    /** The user picked a camera (null = cancel). */
+    fun chooseCamera(name: String?) {
+        cameraChoice?.complete(name)
+    }
 
     fun runSetup() {
         if (setup is ConnState.Working) return
@@ -304,7 +353,20 @@ class CameraController(private val app: Application) {
         linkJob = scope.launch {
             setup = ConnState.Working(tr("Подготовка…", "Preparing…"))
             val error = try {
-                session.setup { step -> scope.launch { setup = ConnState.Working(step) } }
+                session.setup(
+                    step = { step -> scope.launch { setup = ConnState.Working(step) } },
+                    choose = { names ->
+                        val choice = CompletableDeferred<String?>()
+                        cameraChoice = choice
+                        cameraChoices = names
+                        try {
+                            choice.await()
+                        } finally {
+                            cameraChoices = null
+                            cameraChoice = null
+                        }
+                    },
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -342,6 +404,10 @@ class CameraController(private val app: Application) {
     /** Full connection (files, live view). From [ConnState.Remote] it adds Wi-Fi to the existing BLE link. */
     fun connect() {
         if (conn is ConnState.Working || conn == ConnState.Connected || setup is ConnState.Working) return
+        if (ecoRecording && capture?.recording == true) {
+            message = tr("Wi-Fi камеры вернётся после остановки записи", "The camera's Wi-Fi comes back after the recording stops")
+            return
+        }
         if (!radiosReady(needWifi = true, retry = ::connect)) return
         linkJob = scope.launch {
             conn = ConnState.Working(tr("Подключение…", "Connecting…"))
@@ -369,7 +435,9 @@ class CameraController(private val app: Application) {
                 return@launch
             }
             conn = ConnState.Connected
+            wifiUpAt = SystemClock.elapsedRealtime()
             touch()
+            resumeLive()
             loadFiles()
             loadConf()
         }
@@ -412,6 +480,16 @@ class CameraController(private val app: Application) {
                 delay(1_000)
             }
             log("DEBUG статус записи: конец")
+        }
+    }
+
+    /** Debug: one allowed command ([CameraSession.rawCommand]) with a hex body, reply logged. */
+    fun debugCommand(code: Int, bodyHex: String) {
+        if (!debuggable || !session.hasControl) return
+        val body = bodyHex.chunked(2).mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
+        scope.launch {
+            val reply = runCatching { session.rawCommand(code, body) }.getOrElse { "ошибка: ${it.message}" }
+            log("DEBUG команда $code [$bodyHex] → $reply")
         }
     }
 
@@ -634,6 +712,8 @@ class CameraController(private val app: Application) {
     val waitingForRadios: Boolean get() = afterRadios != null && (!radios.bluetooth || !radios.wifi)
 
     fun disconnect() {
+        if (isLinked) log("отключение от камеры (Wi-Fi и Bluetooth)")
+        ecoRecording = false
         afterRadios = null
         linkJob?.cancel()
         linkJob = null
@@ -671,6 +751,11 @@ class CameraController(private val app: Application) {
     private fun updateCapture(status: CaptureStatus) {
         if (capture?.recording == true && !status.recording) {
             touch()
+            if (ecoRecording) {
+                // The camera brings its access point back after the stop (~20 s): join it again.
+                ecoRecording = false
+                if (conn == ConnState.Remote) scope.launch { connect() }
+            }
             // The new file's length needs the file list (Wi-Fi); stopped on the camera, the list is loaded here
             // (a stop from the app loads it itself).
             if (capture?.state == CaptureStatus.TIMESHIFT && conn == ConnState.Connected) {
@@ -717,6 +802,17 @@ class CameraController(private val app: Application) {
         if (capture?.state == CaptureStatus.TIMESHIFT && SystemClock.elapsedRealtime() - speedSwitchedAt >= 2_000) {
             timeShiftNormal = normal
         }
+    }
+
+    /** Economy recording (after the user's confirmation): see [ecoRecording]. */
+    fun startEcoRecording() {
+        if (capture?.recording != true || conn != ConnState.Connected) return
+        touch()
+        log("экономия: трансляция и Wi-Fi камеры отключены до конца записи, остаётся Bluetooth")
+        ecoRecording = true
+        pauseLive()
+        session.closeWifi()
+        conn = ConnState.Remote
     }
 
     /** TimeShift during a recording: Auto (sped up) ↔ normal speed, like the camera's own switch. */
@@ -881,7 +977,7 @@ class CameraController(private val app: Application) {
      */
     fun setSetting(param: String, value: String) {
         val current = settings ?: return
-        applyChange(param) {
+        applyChange(param, param to value) {
             writeSetting(param, value, current) ?: true.also { message = tr("Это значение приложение пока не умеет выставлять", "The app can't set this value yet") }
         }
     }
@@ -1021,15 +1117,22 @@ class CameraController(private val app: Application) {
         }
     }
 
-    private fun applyChange(what: String, write: suspend () -> Boolean) {
+    /** Writes, then reads back; [expect] (param → value): some (live photo, portrait) show up only ~1–2 s later. */
+    private fun applyChange(what: String, expect: Pair<String, String>? = null, write: suspend () -> Boolean) {
         if (settingBusy != null || !session.hasControl) return
         touch()
         settingBusy = what
         scope.launch {
             try {
-                if (!write()) message = tr("Камера не приняла настройку", "The camera didn't accept the setting")
+                val ok = write()
+                if (!ok) message = tr("Камера не приняла настройку", "The camera didn't accept the setting")
                 delay(300)
-                session.readSettings()?.let(::showSettings)
+                var read = session.readSettings()?.also(::showSettings)
+                var tries = 0
+                while (ok && expect != null && read != null && read.values[expect.first] != expect.second && ++tries <= 4) {
+                    delay(700)
+                    read = session.readSettings()?.also(::showSettings)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1061,6 +1164,7 @@ class CameraController(private val app: Application) {
         val decoder = newDecoder(surface, dump)
         liveDecoder = decoder
         liveError = null
+        liveStartedAt = SystemClock.elapsedRealtime()
         scope.launch {
             if (!session.startLive(decoder::onPacket)) liveError = tr("Камера не начала трансляцию", "The camera didn't start the live view")
         }
@@ -1080,11 +1184,28 @@ class CameraController(private val app: Application) {
         }
     }
 
+    /**
+     * The camera restarted its encoder (8234 UPDATE_LIVE_STREAM_PARAMS) after a setting change (live photo, photo
+     * mode…). Frames keep coming, but the decoder set up from the first keyframe stays frozen: restart the stream.
+     * The 8234 that follows our own StartLiveStream is ignored.
+     */
+    private fun onLiveParamsChanged() {
+        val now = SystemClock.elapsedRealtime()
+        if (liveDecoder == null || conn != ConnState.Connected || now - liveStartedAt < 5_000) return
+        val surface = liveSurfaces.lastOrNull() ?: return
+        log("камера перезапустила поток (8234): перезапускаю трансляцию")
+        restartLive(surface)
+    }
+
+    /** When the app last sent StartLiveStream (its own 8234 comes ~1–2 s later). */
+    private var liveStartedAt = 0L
+
     /** Stop, then start again — strictly in this order (two parallel requests may arrive swapped). */
     private fun restartLive(surface: android.view.Surface) {
         val old = liveDecoder ?: return
         val decoder = newDecoder(surface)
         liveDecoder = decoder
+        liveStartedAt = SystemClock.elapsedRealtime()
         scope.launch {
             runCatching { session.stopLive() }
             withContext(Dispatchers.IO) { old.release() }

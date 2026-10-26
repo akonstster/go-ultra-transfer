@@ -4,8 +4,11 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.MacAddress
 import android.net.NetworkRequest
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiNetworkSpecifier
+import android.os.Build
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import java.net.DatagramSocket
@@ -26,10 +29,30 @@ class CameraWifi(
     @Volatile var link: CameraLink? = null
         private set
 
+    private val prefs = context.getSharedPreferences("camera", 0)
+
+    /**
+     * A request naming the access point's BSSID too (remembered from the first connection) is auto-approved by
+     * Android: no device-selection dialog. EMUI shows that dialog on every name-only request, even when it connects
+     * by itself, and tapping the stale dialog drops the link. If the remembered BSSID doesn't match any more, the
+     * name-only request (with the dialog) follows.
+     */
     suspend fun connect(creds: WifiCreds, timeoutMs: Int = 60_000): CameraLink? {
+        val key = "bssid:${creds.ssid}"
+        val saved = prefs.getString(key, null)?.let { runCatching { MacAddress.fromString(it) }.getOrNull() }
+        if (saved != null) {
+            connectOnce(creds, saved, timeoutMs)?.let { return it }
+            log("Wi-Fi камеры: по запомненному BSSID не подключилось — забываю его")
+            prefs.edit().remove(key).apply()
+        }
+        return connectOnce(creds, null, timeoutMs)
+    }
+
+    private suspend fun connectOnce(creds: WifiCreds, bssid: MacAddress?, timeoutMs: Int): CameraLink? {
         release()
         val specifier = WifiNetworkSpecifier.Builder()
             .setSsid(creds.ssid)
+            .apply { if (bssid != null) setBssid(bssid) }
             .setWpa2Passphrase(creds.password)
             .build()
         val request = NetworkRequest.Builder()
@@ -38,9 +61,20 @@ class CameraWifi(
             .setNetworkSpecifier(specifier)
             .build()
         val result = CompletableDeferred<Network?>()
-        val cb = object : ConnectivityManager.NetworkCallback() {
+        // Location info in the callback (Android 12+): the BSSID to remember; needs the location permission.
+        val flags = if (Build.VERSION.SDK_INT >= 31) ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO else 0
+        val cb = object : ConnectivityManager.NetworkCallback(flags) {
             override fun onAvailable(n: Network) {
                 result.complete(n)
+            }
+
+            override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
+                if (bssid != null || Build.VERSION.SDK_INT < 31) return
+                val seen = (caps.transportInfo as? WifiInfo)?.bssid?.takeIf { it != "02:00:00:00:00:00" } ?: return
+                if (prefs.getString("bssid:${creds.ssid}", null) != seen) {
+                    prefs.edit().putString("bssid:${creds.ssid}", seen).apply()
+                    log("Wi-Fi камеры: BSSID запомнен — дальше без системного запроса")
+                }
             }
 
             override fun onUnavailable() {
@@ -57,7 +91,7 @@ class CameraWifi(
             }
         }
         callback = cb
-        log("подключение к «${creds.ssid}» (подтвердите системный запрос)…")
+        log(if (bssid != null) "подключение к «${creds.ssid}» по запомненному BSSID…" else "подключение к «${creds.ssid}» (подтвердите системный запрос)…")
         cm.requestNetwork(request, cb, timeoutMs)
         val n = result.await() ?: return null
         log("Wi-Fi камеры подключён (сеть $n)")

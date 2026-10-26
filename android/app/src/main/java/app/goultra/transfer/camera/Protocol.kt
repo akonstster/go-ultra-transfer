@@ -21,6 +21,9 @@ data class CaptureStatus(val state: Int, val seconds: Int) {
     }
 }
 
+/** Options 48 model («Insta360 GO Ultra»), 30 firmware («v1.9.29»), 15 serial number. */
+data class CameraInfo(val model: String?, val firmware: String?, val serial: String?)
+
 class WifiCreds(val ssid: String, val password: String, val channel: Int) {
     override fun toString() = "WifiCreds($ssid, channel=$channel, password=***)"
 }
@@ -33,6 +36,8 @@ object Proto {
     const val CMD_STOP_CAPTURE = 5
     const val CMD_GET_CURRENT_CAPTURE_STATUS = 15
     const val CMD_IFRAME_REQUEST = 105
+    /** UPDATE_LIVE_STREAM_PARAMS {1 encode, 2 width, 3 height, 4 fps}: after StartLiveStream and when the camera restarts its encoder. */
+    const val NOTIFY_LIVE_STREAM_PARAMS = 8234
     const val CMD_SET_OPTIONS = 7
     const val CMD_SET_PHOTOGRAPHY_OPTIONS = 9
     const val CMD_GET_PHOTOGRAPHY_OPTIONS = 10

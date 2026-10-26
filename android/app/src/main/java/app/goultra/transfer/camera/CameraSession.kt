@@ -56,14 +56,33 @@ class CameraSession(private val context: Context, private val log: (String) -> U
     private val link: CameraLink get() = wifi.link ?: error(tr("нет подключения к Wi-Fi камеры", "no Wi-Fi link to the camera"))
 
     /**
+     * This phone's camera: its advertised name («AB12CD», the serial's tail), chosen in setup. Connections go only
+     * to it (another Insta360 nearby also advertises BE80). Null on installs set up before it was kept: the first
+     * camera that connects is remembered.
+     */
+    var cameraName: String?
+        get() = context.getSharedPreferences("camera", 0).getString("camera_name", null)
+        private set(value) = context.getSharedPreferences("camera", 0).edit().putString("camera_name", value).apply()
+
+    /**
      * First-run setup with the camera switched on: BLE bond (lets us wake it later) + authorization of this phone.
+     * Several cameras around: [choose] asks the user (their names; null = cancelled).
      * Returns null on success, otherwise a message for the user.
      */
-    suspend fun setup(step: (String) -> Unit): String? {
+    suspend fun setup(step: (String) -> Unit, choose: suspend (List<String>) -> String?): String? {
         disconnect()
         closing = false
         step(tr("Поиск камеры…", "Looking for the camera…"))
-        val found = ble.scan() ?: return tr("Камера не найдена. Включите её кнопкой и положите рядом с телефоном.", "Camera not found. Switch it on with its button and put it next to the phone.")
+        val cameras = ble.scanCameras()
+        val found = when (cameras.size) {
+            0 -> null
+            1 -> cameras.first()
+            else -> {
+                val names = cameras.map { ble.advertisedName(it) ?: it.device.address }
+                val picked = choose(names) ?: return tr("Камера не выбрана", "No camera chosen")
+                cameras[names.indexOf(picked)]
+            }
+        } ?: return tr("Камера не найдена. Включите её кнопкой и положите рядом с телефоном.", "Camera not found. Switch it on with its button and put it next to the phone.")
         step(tr("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
         if (!ble.connect(found.device) { step(PAIRING_HINT) }) return tr("Не удалось подключиться по Bluetooth", "Couldn't connect over Bluetooth")
         if (!ble.isBonded) {
@@ -74,6 +93,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         step(tr("Авторизация…", "Authorizing…"))
         val ok = ble.authorize(authId) { step(AUTH_HINT) }
         ble.disconnect()
+        if (ok) cameraName = ble.advertisedName(found)
         return if (ok) null else tr("Камера не подтвердила подключение", "The camera didn't confirm the connection")
     }
 
@@ -92,7 +112,11 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         authorized = false
         ble.disconnect()
         step(tr("Поиск камеры…", "Looking for the camera…"))
-        val found = ble.scan() ?: return tr("Камера не найдена. Она рядом и заряжена?", "Camera not found. Is it nearby and charged?")
+        val name = cameraName
+        val found = ble.scan(name = name) ?: return tr(
+            "Камера${name?.let { " $it" } ?: ""} не найдена. Она рядом и заряжена?",
+            "Camera${name?.let { " $it" } ?: ""} not found. Is it nearby and charged?",
+        )
         step(tr("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
         if (!ble.connect(found.device) { step(PAIRING_HINT) }) {
             return tr(
@@ -111,6 +135,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             return tr("Камера не подтвердила подключение", "The camera didn't confirm the connection")
         }
         authorized = true
+        if (name == null) ble.advertisedName(found)?.let { cameraName = it; log("камера запомнена: «$it»") }
         return null
     }
 
@@ -318,10 +343,20 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         )
     }
 
+    /** Model, firmware and serial number for the «Camera» screen (one request each). */
+    suspend fun cameraInfo(): CameraInfo {
+        suspend fun text(type: Int) = ble.request(
+            Proto.CMD_GET_OPTIONS, PbWriter().packed(1, listOf(type.toLong())).toByteArray(), timeoutMs = 1_500, quiet = true,
+        )?.takeIf { it.code == 200 }?.body?.pbFields()?.field(2)?.data?.pbFields()?.field(type)?.string
+        return CameraInfo(model = text(48), firmware = text(30), serial = text(15))
+    }
+
     /** Debug: raw reply (hex) of a read-only command with an empty body (only capture status is allowed). */
-    suspend fun rawCommand(code: Int): String {
-        require(code == Proto.CMD_GET_CURRENT_CAPTURE_STATUS) { "only read-only commands" }
-        val r = ble.request(code, ByteArray(0), timeoutMs = 3_000, quiet = true)
+    suspend fun rawCommand(code: Int, body: ByteArray = ByteArray(0)): String {
+        // Read-only capture status only (24 erases the card, 32 reboots, 12 deletes files). The power experiments
+        // (49/50 OLED, 56 standby) are done: CLAUDE.md, docs/PROTOCOL.md.
+        require(code == Proto.CMD_GET_CURRENT_CAPTURE_STATUS) { "command $code not allowed" }
+        val r = ble.request(code, body, timeoutMs = 3_000, quiet = true)
         return "${r?.code} ${r?.body?.hex(120)}"
     }
 
@@ -428,10 +463,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     // ---------- live view (TCP 6666) ----------
 
+    /** The camera announced new stream parameters (8234), on the TCP reader thread. */
+    @Volatile var onLiveParams: (() -> Unit)? = null
+
     /** Starts the preview stream (empty StartLiveStream → 1080p30 H.265); packets go to [onPacket]. */
     suspend fun startLive(onPacket: (ByteArray) -> Unit): Boolean {
         val t = tcp ?: return false
         t.onStream = onPacket
+        t.onNotification = { m -> if (m.code == Proto.NOTIFY_LIVE_STREAM_PARAMS) onLiveParams?.invoke() }
         val r = t.request(Proto.CMD_START_LIVE_STREAM, ByteArray(0))
         log("StartLiveStream: ${r?.code}")
         if (r?.code == 200) t.request(Proto.CMD_IFRAME_REQUEST, ByteArray(0), 3_000)

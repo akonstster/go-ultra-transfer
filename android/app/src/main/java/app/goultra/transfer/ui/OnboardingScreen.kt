@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,8 +56,24 @@ fun OnboardingScreen(
             Text(tr("Подключение камеры", "Connect the camera"), style = MaterialTheme.typography.headlineSmall)
             PhoneRadiosBanner(controller)
             Spacer(Modifier.height(24.dp))
+            val choices = controller.cameraChoices
             when (val state = controller.setup) {
-                is ConnState.Working -> {
+                // Several cameras around (another Insta360 nearby): which one is this phone's.
+                is ConnState.Working -> if (choices != null) {
+                    Text(
+                        tr("Рядом несколько камер. Выберите свою — название есть на её экране и коробке:",
+                            "Several cameras nearby. Pick yours — its name is on its screen and box:"),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.widthIn(max = 400.dp),
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Column(Modifier.widthIn(max = 320.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        choices.forEach { name ->
+                            OutlinedButton({ controller.chooseCamera(name) }, Modifier.fillMaxWidth()) { Text("GO Ultra $name") }
+                        }
+                    }
+                    TextButton({ controller.chooseCamera(null) }) { Text(tr("Отмена", "Cancel")) }
+                } else {
                     CircularProgressIndicator()
                     Spacer(Modifier.height(24.dp))
                     Text(

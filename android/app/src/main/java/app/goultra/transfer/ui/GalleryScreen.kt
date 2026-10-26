@@ -162,9 +162,12 @@ fun GalleryScreen(
                     }
                     var menu by remember { mutableStateOf(false) }
                     var showSettings by remember { mutableStateOf(false) }
+                    var showCamera by remember { mutableStateOf(false) }
                     if (showSettings) AppSettingsDialog { showSettings = false }
+                    if (showCamera) CameraInfoDialog(vm) { showCamera = false }
                     IconButton({ menu = true }) { Icon(Icons.Filled.MoreVert, tr("Меню", "Menu")) }
                     DropdownMenu(menu, { menu = false }) {
+                        DropdownMenuItem({ Text(tr("Камера", "Camera")) }, { menu = false; showCamera = true })
                         if (vm.conn != ConnState.Idle) {
                             DropdownMenuItem({ Text(tr("Отключиться", "Disconnect")) }, { menu = false; vm.disconnect() })
                         }
@@ -343,7 +346,16 @@ private fun FileTile(
     onLongClick: () -> Unit,
 ) {
     // Keyed by size too: a just-shot RAW gets its size a moment later, by then its paired .jpg (the preview) exists.
-    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size) { value = loadThumbnail(file) }
+    // A just-taken shot may not be readable yet (the camera is still writing it): fresh files retry a few times.
+    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size) {
+        val fresh = file.created?.isAfter(java.time.LocalDateTime.now().minusMinutes(10)) == true
+        var attempt = 0
+        while (true) {
+            value = loadThumbnail(file)
+            if (value != null || !fresh || ++attempt > 3) break
+            kotlinx.coroutines.delay(2_000L * attempt)
+        }
+    }
     val shape = RoundedCornerShape(6.dp)
     Box(
         Modifier

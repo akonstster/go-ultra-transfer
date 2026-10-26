@@ -54,6 +54,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.BurstMode
 import androidx.compose.material.icons.filled.Camera
@@ -468,7 +470,9 @@ fun CameraTab(vm: CameraController, onConnect: () -> Unit, onRecord: () -> Unit)
                     ) {
                         if (recording) vm.stopRecording() else onRecord()
                     }
-                    Spacer(Modifier.width(88.dp))
+                    Box(Modifier.width(88.dp), contentAlignment = Alignment.Center) {
+                        if (recording && conn == ConnState.Connected) EcoButton(vm)
+                    }
                 }
                 if (!linked) {
                     Text(
@@ -509,9 +513,18 @@ private fun PreviewBox(
                 Spacer(Modifier.height(12.dp))
                 Text(conn.step, color = Color.White, textAlign = TextAlign.Center, modifier = Modifier.padding(8.dp))
             }
-            ConnState.Remote -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(tr("Трансляция — при подключении по Wi-Fi", "Live view needs a Wi-Fi connection"), color = Color.White)
-                TextButton(onConnect) { Text(tr("Подключиться по Wi-Fi", "Connect over Wi-Fi")) }
+            ConnState.Remote -> if (vm.ecoRecording) {
+                Text(
+                    tr("Экономия: Wi-Fi камеры выключен до конца записи", "Saving power: the camera's Wi-Fi is off until the recording ends"),
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(16.dp),
+                )
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(tr("Трансляция — при подключении по Wi-Fi", "Live view needs a Wi-Fi connection"), color = Color.White)
+                    TextButton(onConnect) { Text(tr("Подключиться по Wi-Fi", "Connect over Wi-Fi")) }
+                }
             }
             else -> Text(tr("Камера не подключена", "Camera not connected"), color = Color.White)
         }
@@ -616,6 +629,45 @@ private fun RecBadge(vm: CameraController, modifier: Modifier = Modifier) {
         fontWeight = FontWeight.Bold,
         modifier = modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
     )
+}
+
+/**
+ * Economy recording: after a warning, the live view stops and the camera's Wi-Fi is left — the camera keeps it off
+ * until the recording ends; Bluetooth still shows the time and stops the recording.
+ */
+@Composable
+private fun EcoButton(vm: CameraController) {
+    var ask by remember { mutableStateOf(false) }
+    Box(
+        Modifier.size(52.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant).clickable { ask = true },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Icons.Filled.BatterySaver, tr("Экономия батареи", "Save battery"), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (ask) {
+        AlertDialog(
+            onDismissRequest = { ask = false },
+            title = { Text(tr("Экономия батареи камеры", "Save the camera's battery")) },
+            text = {
+                Text(
+                    tr(
+                        "Трансляция остановится, телефон отключится от Wi-Fi камеры, и камера выключит свой Wi-Fi. " +
+                            "Так будет до конца записи: ни картинки, ни файлов до остановки, включить обратно нельзя.\n\n" +
+                            "Время записи и кнопка «Стоп» (здесь и в уведомлении) работают по Bluetooth. " +
+                            "После остановки приложение снова подключится по Wi-Fi само.",
+                        "The live view stops, the phone leaves the camera's Wi-Fi and the camera turns its Wi-Fi off. " +
+                            "It stays so until the recording ends: no picture and no files until the stop, and it can't " +
+                            "be turned back on.\n\nThe recording time and Stop (here and in the notification) work over " +
+                            "Bluetooth. After the stop the app joins the Wi-Fi again by itself.",
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton({ ask = false; vm.startEcoRecording() }) { Text(tr("Включить экономию", "Save battery")) }
+            },
+            dismissButton = { TextButton({ ask = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
+    }
 }
 
 /** TimeShift recording: Auto (sped up, the camera picks how much) ↔ normal speed (1×). */
@@ -909,7 +961,7 @@ private fun BatteryLabel(name: String, percent: Int, charging: Boolean) {
     Text("$name $percent%", color = Color.White, fontSize = 12.sp)
 }
 
-/** «SD 46 мин · 19 ГБ» (video) or «SD 1630 фото · 19 ГБ» (photo): what still fits on the card. */
+/** «SD 46 мин» (video) or «SD 1630 фото» (photo): what still fits on the card. */
 @Composable
 private fun CardChip(card: CardInfo, modifier: Modifier = Modifier) {
     val left = when {
@@ -920,8 +972,9 @@ private fun CardChip(card: CardInfo, modifier: Modifier = Modifier) {
         }
         else -> null
     }
+    // Only what still fits (the free size made the label run into the battery one); the size if that's unknown.
     Text(
-        listOfNotNull("SD", left, formatSize(card.freeBytes)).joinToString(" · ").replaceFirst("SD · ", "SD "),
+        "SD " + (left ?: formatSize(card.freeBytes)),
         color = if (card.freeBytes < card.totalBytes / 20) Color(0xFFFFB4A9) else Color.White, // < 5 % free: warn
         fontSize = 12.sp,
         modifier = modifier.background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
@@ -1082,22 +1135,22 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     )
                 }
                 if (recording) RecBadge(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp))
-                Column(Modifier.align(Alignment.TopStart).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    val s = vm.settings
-                    s?.card?.let { CardChip(it) }
-                    if (s?.batteryPercent != null || s?.podBatteryPercent != null) {
-                        Row(
-                            Modifier.background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            s.batteryPercent?.let { BatteryLabel(tr("Камера", "Camera"), it, s.charging) }
-                            if (s.batteryPercent != null && s.podBatteryPercent != null) Spacer(Modifier.width(10.dp))
-                            s.podBatteryPercent?.let { BatteryLabel("Pod", it, s.podCharging) }
-                        }
+                // Same places as in portrait: card top left, batteries top right.
+                val s = vm.settings
+                s?.card?.let { CardChip(it, Modifier.align(Alignment.TopStart).padding(12.dp)) }
+                if (s?.batteryPercent != null || s?.podBatteryPercent != null) {
+                    Row(
+                        Modifier.align(Alignment.TopEnd).padding(12.dp)
+                            .background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        s.batteryPercent?.let { BatteryLabel(tr("Камера", "Camera"), it, s.charging) }
+                        if (s.batteryPercent != null && s.podBatteryPercent != null) Spacer(Modifier.width(10.dp))
+                        s.podBatteryPercent?.let { BatteryLabel("Pod", it, s.podCharging) }
                     }
                 }
             }
-            // The shutter centred at the side; the TimeShift speed above it (an equal gap below keeps it centred).
+            // The shutter centred at the side; the TimeShift speed above it, battery saving below.
             Column(
                 Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1111,7 +1164,7 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     countdown = vm.countdown,
                     light = true,
                 ) { if (recording) vm.stopRecording() else onRecord() }
-                Spacer(Modifier.size(52.dp))
+                Box(Modifier.size(52.dp)) { if (recording && vm.conn == ConnState.Connected) EcoButton(vm) }
             }
         }
     }

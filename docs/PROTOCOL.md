@@ -232,6 +232,17 @@ in the read-back.
 
 Ask for each Options type in its own request: a type the camera doesn't answer makes the whole request fail.
 
+### Camera info
+
+Options 48 model (`Insta360 GO Ultra`), 30 firmware (`v1.9.29`), 15 serial number — strings, one request each.
+
+### Live view restarts (*verified*)
+
+Changing some settings (live photo, photo modes) makes the camera restart its encoder and send
+UPDATE_LIVE_STREAM_PARAMS (8234) mid-stream. Frames keep coming, but a decoder set up from the first keyframe
+freezes; restarting the stream (STOP, then START) fixes it. The 8234 that follows a client's own StartLiveStream
+can be ignored.
+
 ### TimeShift (*verified*)
 
 - During a recording the speed is **PhotographyOptions 37 of function mode 12**: 0 = Auto (sped up), 1 = Normal.
@@ -247,6 +258,16 @@ Ask for each Options type in its own request: a type the camera doesn't answer m
 
 After the BLE and Wi-Fi links drop, the camera counts down (second byte of its advertising data) and sleeps within
 ~3 minutes. **CLOSE_CAMERA_WIFI (34) prevents that** — the camera then stays awake and drains; don't send it.
+
+There is no power-off command: SET_STANDBY_MODE (56) answers 400 to both LOW_ENERGY `{1: 1}` and WAKE_UP `{1: 2}`.
+OPEN/CLOSE_OLED (49/50) answer 200, but the Pod already turns its preview off by itself while a phone is connected.
+
+**A woken camera restarts its access point once, ~30 s after the wake** (a burst of CAM_WIFI_START 8215
+notifications): a phone that joined the first one loses it and can rejoin in ~2 s.
+
+Android note: a WifiNetworkSpecifier with the SSID only makes EMUI show its device-selection dialog on every request
+(even when it connects by itself; tapping the stale dialog drops the link). Adding the access point's BSSID
+(remembered from the first connection; reading it needs the location permission) gets the request auto-approved.
 
 **During a recording the camera turns its Wi-Fi access point off once the phone leaves it**, and OPEN_CAMERA_WIFI
 (33, answers 200) doesn't bring it back until the recording stops (then the phone rejoins in ~20 s). A client that

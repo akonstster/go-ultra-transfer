@@ -5,7 +5,7 @@ It wakes the camera over Bluetooth, joins its Wi-Fi, lists files with previews, 
 the camera, downloads them to the phone gallery (in the background, with resume), deletes them from the card,
 shows a live preview (full screen when the phone is turned sideways), records and takes photos (and keeps control
 of a recording with the phone's screen off, with Stop in the notification), switches the TimeShift speed while
-recording, shows the card space left, and exposes all of the camera's shooting settings for its 12 modes. The interface is in Russian and English, light or dark.
+recording, has a battery-saving mode for long recordings, shows the card space left, and exposes all of the camera's shooting settings for its 12 modes. The interface is in Russian and English, light or dark.
 The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). Not affiliated with Insta360.
 
 ---
@@ -19,6 +19,8 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
 - Одной кнопкой: будит камеру по Bluetooth (даже выключенную) и сам подключается к её Wi-Fi.
 - Если на телефоне выключен Bluetooth или Wi-Fi — предложит включить и продолжит сам; предупредит о VPN.
 - После ухода из приложения держит связь ещё 3 минуты, потом отпускает камеру — она засыпает сама.
+- Запоминает свою камеру: если рядом несколько камер Insta360, при настройке предложит выбрать, а дальше
+  подключается только к ней.
 
 **Файлы**
 - Превью, группировка по дням, фильтр «фото / видео», отметка уже скачанных.
@@ -34,6 +36,9 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
 - Запись и фото с телефона, таймер с обратным отсчётом, «разбудить и сразу снимать» — ярлык на рабочем столе.
 - Запись при выключенном экране телефона: трансляция останавливается (бережёт батарею камеры), связь остаётся,
   в уведомлении (и на экране блокировки) — кнопка «Остановить запись».
+- «Экономия» во время записи (кнопка рядом с затвором, с предупреждением): трансляция и Wi-Fi камеры выключаются
+  до конца записи — для долгих таймлапсов. Время и «Стоп» работают по Bluetooth, после остановки приложение
+  подключается по Wi-Fi само.
 - TimeShift: переключение «Авто / Обычная» прямо во время записи; после остановки — длина получившегося ролика.
 - Остаток на карте памяти: минуты записи (или число фото) и свободное место.
 - Все 12 режимов: видео, PureVideo, замедление, таймлапс, TimeShift, петля, FreeFrame, «глазами ребёнка»,
@@ -46,6 +51,8 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
 
 **Приложение**
 - Русский и английский интерфейс, светлая и тёмная тема (или как в телефоне) — меню ⋮ → «Настройки».
+- Меню ⋮ → «Камера»: состояние подключения, модель, прошивка, серийный номер, заряд камеры и Pod, карта памяти;
+  отключить / подключить.
 
 ## Требования
 
