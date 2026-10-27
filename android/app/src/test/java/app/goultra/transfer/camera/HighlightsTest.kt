@@ -95,4 +95,10 @@ class HighlightsTest {
         // No room between touching pieces.
         assertEquals(null, at(one + Highlight(6000, 8000), 5000))
     }
+
+    @Test
+    fun piecesThatMeetAreOneInTheClip() {
+        val pieces = listOf(Highlight(1000, 2000), Highlight(2000, 3500), Highlight(5000, 6000))
+        assertEquals(listOf(Highlight(1000, 3500), Highlight(5000, 6000)), Highlights.joinTouching(pieces))
+    }
 }

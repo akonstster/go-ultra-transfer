@@ -95,6 +95,17 @@ object Highlights {
         return if (end - start >= MIN_PIECE_MS) Highlight(start, end) else null
     }
 
+    /** Pieces that meet (one ends where the next starts) as one: the clip has no seam there. */
+    fun joinTouching(pieces: List<Highlight>): List<Highlight> {
+        val out = mutableListOf<Highlight>()
+        for (p in pieces.sortedBy { it.startMs }) {
+            val last = out.lastOrNull()
+            if (last != null && p.startMs <= last.endMs!!) out[out.lastIndex] = last.copy(endMs = maxOf(last.endMs, p.endMs!!))
+            else out += p
+        }
+        return out
+    }
+
     /** Pieces as text for the phone's storage: `start-end,start-end` (ms); "" = all removed. */
     fun encode(pieces: List<Highlight>): String = pieces.joinToString(",") { "${it.startMs}-${it.endMs}" }
 

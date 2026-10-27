@@ -39,8 +39,10 @@ gallery.
   the picture — frames along the whole video (key frames of the phone's copy or the camera's LRV, `FrameReader` kept
   open, tiles at multiples of 2 s, cached in `CameraController.timelineFrame`), a fixed white playhead in the middle;
   drag the strip to scrub (the player follows), pinch to zoom (whole video … 1.5 s per screen). Pieces are yellow
-  bands; tap selects, the selected one gets handles (start snaps to the nearest key frame, ticks on top; end free
-  unless B-frames; neither crosses a neighbour). «+ Кусок» at the playhead, «Удалить», «Как на камере», «Готово».
+  bands with bold edges and a triangle inside each edge at the top (pieces that meet stay readable); frames are
+  separated by a dark gap. Tap selects, the selected one gets handles (start snaps to the nearest key frame — or onto
+  the end of the piece before, `KeyFrames.nearestStart`; ticks on top; end free unless B-frames; neither crosses a
+  neighbour). Pieces that meet are joined before cutting (`Highlights.joinTouching`): one piece, no seam. «+ Кусок» at the playhead, «Удалить», «Как на камере», «Готово».
   The film strip of piece cards stays for playback mode. Edits: SharedPreferences `pieces`, key = file name,
   `start-end,…` ms, "" = all removed (`Highlights.encode/decode/normalize`; edited pieces that only touch stay apart,
   the camera's marks keep the camera's rule — touching ones merge); the camera file and its phone copy share them.

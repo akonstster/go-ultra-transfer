@@ -1935,9 +1935,11 @@ class CameraController(private val app: Application) {
             return
         }
         val name = clipName(file)
-        // Starts on the nearest key frame, as the editor sets them (camera marks never edited aren't there yet).
+        // Pieces moved together are one piece in the clip (no seam); starts on the nearest key frame, as the editor
+        // sets them (camera marks never edited aren't there yet).
+        val joined = Highlights.joinTouching(marked)
         val keys = keyFrameCache[file.name]
-        var pieces = keys?.let { k -> marked.fold(emptyList<Highlight>()) { done, p -> done + k.snapStart(p, done) } } ?: marked
+        var pieces = keys?.let { k -> joined.fold(emptyList<Highlight>()) { done, p -> done + k.snapStart(p, done) } } ?: joined
         val wantedUs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs } * 1000
         // Progress in bytes, as for downloads: the share of the file the pieces make up.
         val estimate = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * wantedUs / (it * 1_000_000L) } } ?: 0L
@@ -1949,7 +1951,7 @@ class CameraController(private val app: Application) {
                 var cut = emptyList<Highlight>()
                 // Without the key frames yet (never edited): read them first, then snap as above.
                 if (keys == null) {
-                    keyFrames(file)?.let { k -> pieces = marked.fold(emptyList()) { done, p -> done + k.snapStart(p, done) } }
+                    keyFrames(file)?.let { k -> pieces = joined.fold(emptyList()) { done, p -> done + k.snapStart(p, done) } }
                 }
                 withContext(Dispatchers.IO) {
                     val job = coroutineContext[Job]

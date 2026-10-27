@@ -78,4 +78,15 @@ class Mp4IndexTest {
         assertEquals(Highlight(4000, 5800), keys.snapStart(Highlight(5100, 5800), emptyList()))
         assertEquals(Highlight(4500, 5800), keys.snapStart(Highlight(4500, 5800), listOf(Highlight(4200, 4500))))
     }
+
+    @Test
+    fun aStartCanMeetThePieceBefore() {
+        val keys = KeyFrames(listOf(0, 2000, 4000, 6000), false)
+        // Dragged close to the neighbour's end: it sticks there (one seamless piece in the clip), not to a key frame.
+        assertEquals(3300, keys.nearestStart(3400, 3300, 5000, touch = 3300))
+        // Nearer a key frame: the key frame.
+        assertEquals(4000, keys.nearestStart(3800, 3300, 5000, touch = 3300))
+        // «+ Кусок» right after a piece stays right after it.
+        assertEquals(Highlight(6500, 8500), keys.snapStart(Highlight(6500, 8500), listOf(Highlight(4000, 6500))))
+    }
 }

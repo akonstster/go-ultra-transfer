@@ -89,6 +89,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
@@ -534,11 +535,12 @@ private fun TimelineEditor(
                     val left = x(t)
                     val right = x(minOf(t + step, duration))
                     if (right < 0 || left > size.width) continue
+                    // A dark gap between frames, so each one's edges show.
                     val img = frames[t]
                     if (img == null) {
-                        drawRect(Color(0xFF262626), Offset(left, stripTop), Size(right - left - 1, stripH))
+                        drawRect(Color(0xFF262626), Offset(left, stripTop), Size(right - left - FRAME_GAP_PX, stripH))
                     } else {
-                        drawCover(img, left, stripTop, right - left - 1, stripH)
+                        drawCover(img, left, stripTop, right - left - FRAME_GAP_PX, stripH)
                     }
                 }
                 // Key frames: where a piece can start (only when they aren't packed too tight to see).
@@ -550,12 +552,21 @@ private fun TimelineEditor(
                         }
                     }
                 }
+                // Pieces: a band, bold edges and a triangle inside each edge at the top — two pieces that meet still
+                // show where one ends and the next begins.
+                val edge = MARK_COLOR.copy(alpha = 1f)
+                val tri = EDGE_TRIANGLE_PX
                 for ((i, p) in shown.withIndex()) {
                     val left = x(p.startMs)
                     val right = x(p.endMs!!)
                     if (right < 0 || left > size.width) continue
-                    drawRect(MARK_COLOR.copy(alpha = 0.35f), Offset(left, stripTop), Size(right - left, stripH))
-                    if (i == current) drawRect(MARK_COLOR, Offset(left, stripTop), Size(right - left, stripH), style = Stroke(3f))
+                    drawRect(MARK_COLOR.copy(alpha = if (i == current) 0.45f else 0.3f), Offset(left, stripTop), Size(right - left, stripH))
+                    drawLine(edge, Offset(left + 2, stripTop), Offset(left + 2, size.height), 4f)
+                    drawLine(edge, Offset(right - 2, stripTop), Offset(right - 2, size.height), 4f)
+                    val t = minOf(tri, (right - left) / 2)
+                    drawPath(Path().apply { moveTo(left, stripTop); lineTo(left + t, stripTop); lineTo(left, stripTop + t); close() }, edge)
+                    drawPath(Path().apply { moveTo(right, stripTop); lineTo(right - t, stripTop); lineTo(right, stripTop + t); close() }, edge)
+                    if (i == current) drawRect(edge, Offset(left, stripTop), Size(right - left, stripH), style = Stroke(2f))
                 }
                 drawLine(Color.White, Offset(cx, 0f), Offset(cx, size.height), 4f)
             }
@@ -594,7 +605,9 @@ private fun TimelineEditor(
                                     val minLen = Highlights.MIN_PIECE_MS
                                     val moved = if (edge == Edge.START) {
                                         val hi = p.endMs!! - minLen
-                                        (keys?.nearest(raw.toLong(), before, hi) ?: raw.toLong()).coerceIn(before, maxOf(before, hi))
+                                        // A key frame, or right onto the end of the piece before (they then meet).
+                                        val touch = if (current > 0) before else null
+                                        (keys?.nearestStart(raw.toLong(), before, hi, touch) ?: raw.toLong()).coerceIn(before, maxOf(before, hi))
                                     } else {
                                         val lo = p.startMs + minLen
                                         val free = raw.toLong()
@@ -647,6 +660,12 @@ private fun tileStep(pxPerMs: Float, tilePx: Float): Long {
 private val TIMELINE_HEIGHT = 64.dp
 private val TILE_WIDTH = 56.dp
 private val HANDLE_WIDTH = 22.dp
+
+/** Dark gap between frames on the timeline. */
+private const val FRAME_GAP_PX = 3f
+
+/** The triangles marking a piece's edges (inside it, at the top of the frames). */
+private const val EDGE_TRIANGLE_PX = 26f
 
 /** Room above the frames for the key frame ticks. */
 private const val KEY_TICKS_PX = 14f

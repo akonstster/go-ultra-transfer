@@ -12,10 +12,17 @@ class KeyFrames(val ms: List<Long>, val bFrames: Boolean) {
     fun nearest(at: Long, lo: Long = 0, hi: Long = Long.MAX_VALUE): Long =
         ms.filter { it in lo..hi }.minByOrNull { abs(it - at) } ?: at
 
-    /** [piece] starting on the nearest key frame, not before the end of an earlier piece of [others], not into its own end. */
+    /**
+     * Where a piece's start can stand nearest to [at]: a key frame in [lo]..[hi], or [touch] — the end of the piece
+     * before it. Pieces may meet: the clip then runs on through there without a seam, so no key frame is needed.
+     */
+    fun nearestStart(at: Long, lo: Long, hi: Long, touch: Long?): Long =
+        (ms.filter { it in lo..hi } + listOfNotNull(touch?.takeIf { it <= hi })).minByOrNull { abs(it - at) } ?: at
+
+    /** [piece] starting where [nearestStart] puts it among [others] (not before an earlier one's end, not into its own). */
     fun snapStart(piece: Highlight, others: List<Highlight>): Highlight {
-        val lo = others.filter { it.endMs!! <= piece.startMs }.maxOfOrNull { it.endMs!! } ?: 0L
-        return piece.copy(startMs = nearest(piece.startMs, lo, piece.endMs!! - Highlights.MIN_PIECE_MS))
+        val before = others.filter { it.endMs!! <= piece.startMs }.maxOfOrNull { it.endMs!! }
+        return piece.copy(startMs = nearestStart(piece.startMs, before ?: 0L, piece.endMs!! - Highlights.MIN_PIECE_MS, before))
     }
 }
 
