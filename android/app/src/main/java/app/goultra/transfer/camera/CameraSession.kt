@@ -4,8 +4,10 @@ import app.goultra.transfer.ui.tr
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.time.ZoneId
 import kotlin.random.Random
 
@@ -256,6 +258,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         }
         val raw = tcpLock.withLock { tcp?.fileThumbnail(file.uri) } ?: return null
         return Thumbnails.fromNv12(raw)
+    }
+
+    /** Frames of the video's light copy at [timesMs] for the film strip (Wi-Fi only; null = not read). */
+    suspend fun frames(file: CameraFile, timesMs: List<Long>, width: Int): List<Bitmap?> = withContext(Dispatchers.IO) {
+        val link = wifiLink ?: return@withContext timesMs.map { null }
+        val uri = previewUri(file)
+        val size = Downloader.contentLength(link, uri) ?: return@withContext timesMs.map { null }
+        RemoteFrames.frames(link, uri, size, timesMs, width)
     }
 
     /** Highlight marks of a video (Wi-Fi only); null when they couldn't be read. */

@@ -65,11 +65,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.SeekParameters
 import kotlinx.coroutines.delay
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.filled.Flag
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.runtime.mutableIntStateOf
@@ -190,19 +195,19 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
             delay(40)
         }
     }
-    Box(Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
-            update = { view -> view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size)) },
-            modifier = Modifier.fillMaxSize(),
-        )
-        if (pieces.isNotEmpty()) {
-            Row(
-                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp)
-                    .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+    // Frames for the strip: read once, when the strip is first opened (Range reads of the light copy).
+    var frames by remember(file.uri) { mutableStateOf<List<ImageBitmap?>>(emptyList()) }
+    LaunchedEffect(film, pieces) {
+        if (film && frames.size != pieces.size) frames = vm.pieceFrames(file, pieces)
+    }
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            AndroidView(
+                factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
+                update = { view -> view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size)) },
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (pieces.isNotEmpty()) {
                 FilterChip(
                     selected = film,
                     onClick = { film = !film },
@@ -212,17 +217,43 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
                         containerColor = Color(0x99000000), labelColor = Color.White,
                         selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
                     ),
+                    modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
                 )
-                if (film) pieces.forEachIndexed { i, piece ->
-                    AssistChip(
-                        onClick = { player.seekTo(piece.startMs); player.play() },
-                        label = { Text(clock(piece.startMs) + "–" + clock(piece.endMs!!)) },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = if (i == current) MARK_COLOR else Color(0x99000000),
-                            labelColor = if (i == current) Color.Black else Color.White,
-                        ),
+            }
+        }
+        if (film && pieces.isNotEmpty()) {
+            FilmStrip(pieces, frames, current) { i -> player.seekTo(pieces[i].startMs); player.play() }
+        }
+    }
+}
+
+/** The camera-style film strip: a frame per marked piece with its length; the playing one framed in yellow. */
+@Composable
+private fun FilmStrip(pieces: List<Highlight>, frames: List<ImageBitmap?>, current: Int, onPick: (Int) -> Unit) {
+    val state = rememberLazyListState()
+    LaunchedEffect(current) { if (current >= 0) state.animateScrollToItem(maxOf(0, current - 1)) }
+    LazyRow(
+        state = state,
+        modifier = Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(vertical = 10.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        itemsIndexed(pieces) { i, piece ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onPick(i) }) {
+                Box(
+                    Modifier.size(112.dp, 63.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFF222222))
+                        .border(2.dp, if (i == current) MARK_COLOR else Color.Transparent, RoundedCornerShape(6.dp)),
+                ) {
+                    frames.getOrNull(i)?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+                    val seconds = (piece.endMs!! - piece.startMs) / 1000.0
+                    Text(
+                        "%.1f ".format(seconds) + tr("с", "s"),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        modifier = Modifier.align(Alignment.BottomEnd).background(Color(0x99000000)).padding(horizontal = 4.dp),
                     )
                 }
+                Text(clock(piece.startMs), color = if (i == current) MARK_COLOR else Color(0xCCFFFFFF), fontSize = 12.sp)
             }
         }
     }

@@ -18,7 +18,12 @@ Local, untracked notes with device serials, adb ids and every past finding: `CLA
   with the piece count toggles the **film strip**: only pieces play (gaps skipped, 300 ms slack for key frames), after
   the last one it returns to the first and pauses; the current piece's chip is yellow; tapping a chip jumps there.
 
-**Next ideas** (not started): flag badge on grid tiles; marks in downloaded files (parse the local trailer); export /
+- Film strip at the bottom (after v0.9, tested on the Huawei): a frame per piece (its middle, nearest key frame)
+  with its length and start; current piece framed in yellow, auto-scrolled; tap → jump. Frames come from the
+  LRV on the camera via `camera/RemoteFrames.kt` — MediaMetadataRetriever over HTTP Range (256 KB blocks), so only
+  the index and a few key frames are read; loaded once, when the strip is first opened.
+
+**Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
 
 ## Goal of this step

@@ -1609,6 +1609,13 @@ class CameraController(private val app: Application) {
 
     fun previewUrl(file: CameraFile): String = "http://${CameraTcp.HOST}${session.previewUri(file)}"
 
+    /** Film strip frames: one per piece (its middle), small; null where a frame couldn't be read. */
+    suspend fun pieceFrames(file: CameraFile, pieces: List<Highlight>): List<ImageBitmap?> {
+        if (conn != ConnState.Connected || pieces.isEmpty()) return pieces.map { null }
+        val times = pieces.map { (it.startMs + (it.endMs ?: it.startMs)) / 2 }
+        return runCatching { session.frames(file, times, 320) }.getOrElse { times.map { null } }.map { it?.asImageBitmap() }
+    }
+
     /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
     suspend fun highlights(file: CameraFile): List<Highlight> {
         if (conn != ConnState.Connected) return emptyList()
