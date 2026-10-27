@@ -980,6 +980,7 @@ class CameraController(private val app: Application) {
         }
         // To find out whether (and how) the camera reports the marks during a recording.
         if (status.keyPoints != null && status.keyPoints != capture?.keyPoints) log("отметки записи (keyTimePointDetail): ${status.keyPoints}")
+        if (debuggable && status.recording && status.fields != capture?.fields) log("DEBUG поля статуса записи: ${status.fields}")
         capture = status
         val now = SystemClock.elapsedRealtime()
         if (!status.recording) {
