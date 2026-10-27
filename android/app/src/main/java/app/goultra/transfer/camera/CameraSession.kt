@@ -319,13 +319,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     suspend fun stopRecording(): Boolean = ble.request(Proto.CMD_STOP_CAPTURE, timeoutMs = 8_000)?.code == 200
 
-    /** Over Wi-Fi when it is there (BLE replies can get lost while the live view runs), else over BLE. */
-    suspend fun captureStatus(): CaptureStatus? {
-        val t = tcp
-        val r = if (t != null) t.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, ByteArray(0), 3_000)
-        else ble.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, timeoutMs = 3_000, quiet = true)
-        return r?.takeIf { it.code == 200 }?.let { CaptureStatus.parse(it.body) }
-    }
+    /**
+     * Over BLE (the reply this parser is verified on; over Wi-Fi the same request didn't show the recording —
+     * 28.10, to be looked at before switching).
+     */
+    suspend fun captureStatus(): CaptureStatus? =
+        ble.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, timeoutMs = 3_000, quiet = true)
+            ?.takeIf { it.code == 200 }
+            ?.let { CaptureStatus.parse(it.body) }
 
     /** TimeShift recording: normal speed now? (PhotographyOptions 37 of its function mode). */
     suspend fun timeShiftNormal(): Boolean? {
