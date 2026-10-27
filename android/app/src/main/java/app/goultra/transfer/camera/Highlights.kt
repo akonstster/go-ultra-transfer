@@ -60,10 +60,40 @@ object Highlights {
     /** Shortest piece kept after an edit (a handle dragged onto the other one). */
     const val MIN_PIECE_MS = 300L
 
-    /** Edited pieces made tidy: inside the video, in order, overlapping ones merged, slivers dropped. */
-    fun normalize(pieces: List<Highlight>, durationMs: Long? = null): List<Highlight> =
-        this.pieces(pieces.map { p -> Highlight(maxOf(0, p.startMs), p.endMs ?: (p.startMs + AROUND_MS)) }, durationMs)
-            .filter { it.endMs!! - it.startMs >= MIN_PIECE_MS }
+    /**
+     * Edited pieces made tidy: inside the video, in order, overlapping ones merged, slivers dropped. Pieces that only
+     * touch stay apart (one added right after another is a piece of its own in the strip).
+     */
+    fun normalize(pieces: List<Highlight>, durationMs: Long? = null): List<Highlight> {
+        val out = mutableListOf<Highlight>()
+        pieces.map { p -> Highlight(maxOf(0, p.startMs), minOf(p.endMs ?: (p.startMs + AROUND_MS), durationMs ?: Long.MAX_VALUE)) }
+            .sortedBy { it.startMs }
+            .forEach { p ->
+                val last = out.lastOrNull()
+                if (last != null && p.startMs < last.endMs!!) out[out.lastIndex] = last.copy(endMs = maxOf(last.endMs, p.endMs!!))
+                else out += p
+            }
+        return out.filter { it.endMs!! - it.startMs >= MIN_PIECE_MS }
+    }
+
+    /**
+     * The piece «+ Кусок» adds at [atMs] to tidy [pieces]: [AROUND_MS] either side, kept inside the free gap there.
+     * Standing inside a piece: right after it, up to the next one. Standing in a gap: moved off the piece before,
+     * cut short at (or shifted back from) the piece after. Null when the gap is too small for a piece.
+     */
+    fun pieceAt(pieces: List<Highlight>, atMs: Long, durationMs: Long? = null): Highlight? {
+        val inside = pieces.firstOrNull { atMs >= it.startMs && atMs < it.endMs!! }
+        val gapStart = inside?.endMs ?: pieces.lastOrNull { it.endMs!! <= atMs }?.endMs ?: 0L
+        val gapEnd = pieces.firstOrNull { it !== inside && it.startMs >= gapStart }?.startMs ?: durationMs ?: Long.MAX_VALUE
+        val length = 2 * AROUND_MS
+        val (start, end) = if (inside != null) {
+            gapStart to minOf(gapStart + length, gapEnd)
+        } else {
+            val end = minOf(maxOf(atMs - AROUND_MS, gapStart) + length, gapEnd)
+            maxOf(gapStart, end - length) to end
+        }
+        return if (end - start >= MIN_PIECE_MS) Highlight(start, end) else null
+    }
 
     /** Pieces as text for the phone's storage: `start-end,start-end` (ms); "" = all removed. */
     fun encode(pieces: List<Highlight>): String = pieces.joinToString(",") { "${it.startMs}-${it.endMs}" }

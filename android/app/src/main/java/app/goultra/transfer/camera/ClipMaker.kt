@@ -8,31 +8,32 @@ import java.io.FileDescriptor
 import java.nio.ByteBuffer
 
 /**
- * One clip of the marked pieces of a video, without re-encoding: samples are copied as they are, so every piece
- * starts on the key frame at or before its start and ends on the first key frame at or after its end (a little longer
- * than marked, never shorter). Pieces that meet after that are joined seamlessly. Only the video and the first audio
- * track are kept (no Insta360 trailer, so the clip carries no marks of its own).
+ * One clip of the marked pieces of a video, without re-encoding: samples are copied as they are. A piece has to start
+ * on a key frame, so it starts at the key frame at or before its start; it ends exactly where marked (the first frame at
+ * or after its end) — only a video with B-frames (frames stored out of display order) ends on a key frame too.
+ * A piece whose key frame lies in what the previous piece already wrote simply carries on from there (no frame twice).
+ * Only the video and the first audio track are kept (no Insta360 trailer, so the clip carries no marks of its own).
  */
 object ClipMaker {
-    /** The sample under the read position of a source, in file order (as [MediaExtractor] gives them). */
+    /** The current sample of a source and moving through them (as [MediaExtractor] gives them: in time order). */
     interface Samples {
         /** Track of the current sample; −1 past the end. */
         val track: Int
         val timeUs: Long
         val isSync: Boolean
 
-        /** To the key frame at or before [us] (all selected tracks). */
+        /** To [us]: video to the key frame at or before it, other tracks to about [us]. */
         fun seek(us: Long)
         fun advance()
     }
 
-    /** After the cut end (a key frame), samples still come for this long (other tracks lag behind in the file). */
+    /** After the cut end, samples still come for this long (other tracks lag behind in the file). */
     private const val TAIL_US = 1_000_000L
 
     /**
-     * Cuts [pieces] (ms, with ends) out of [src]: [write] gets each kept sample — its track, its time in the clip,
-     * key frame or not — while it is the current one. Returns the pieces as actually cut (ms of the source).
-     * [onProgress]: µs of the clip written so far.
+     * Cuts [pieces] (ms, with ends; sorted, not overlapping) out of [src]: [write] gets each kept sample — its track,
+     * its time in the clip, key frame or not — while it is the current one. Returns the pieces as actually cut (ms of
+     * the source; a piece carried on from the previous one is merged into it). [onProgress]: µs of the clip so far.
      */
     fun cut(
         src: Samples,
@@ -43,27 +44,38 @@ object ClipMaker {
     ): List<Highlight> {
         val out = mutableListOf<Highlight>()
         var base = 0L // clip time where this piece starts
-        var prevEnd = -1L // source time where the previous piece ended (a key frame)
+        var prevEnd = -1L // source time where the previous piece ended (its first frame not taken)
+        var reordered = false // B-frames seen: then a piece may only end on a key frame
         for (piece in pieces) {
             val startUs = piece.startMs * 1000
             val endUs = (piece.endMs ?: piece.startMs) * 1000
-            if (endUs <= prevEnd) continue // swallowed by the previous piece's key-frame tail
-            src.seek(maxOf(startUs, prevEnd))
+            if (endUs <= prevEnd) continue // already inside what was written
+            // The key frame this piece has to start from.
+            src.seek(startUs)
+            while (src.track >= 0 && src.track != video) src.advance()
+            if (src.track < 0) continue
+            val key = src.timeUs
+            // In what the previous piece wrote: go on from its end (the decoder has every frame up to there).
+            val carryOn = prevEnd >= 0 && key < prevEnd
+            val from = if (carryOn) prevEnd else key
+            src.seek(from) // again, so the sound starts there too, not at the piece's own start
             var cutStart = -1L
             var cutEnd = -1L
             var lastVideo = -1L
+            var prevVideo = -1L
             var frame = 33_333L
             while (src.track >= 0) {
                 val t = src.timeUs
                 if (src.track == video) {
+                    if (prevVideo >= 0 && t < prevVideo) reordered = true
+                    if (prevVideo in 0 until t && cutStart >= 0) frame = t - prevVideo
+                    prevVideo = t
                     if (cutStart < 0) {
-                        // The first key frame here (not before the previous piece's end: no frame twice).
-                        if (!src.isSync || t < prevEnd) { src.advance(); continue }
+                        if (t < from || (!carryOn && !src.isSync)) { src.advance(); continue }
                         cutStart = t
                     }
-                    if (lastVideo in 0 until t) frame = t - lastVideo
-                    if (cutEnd < 0 && src.isSync && t > cutStart && t >= endUs) cutEnd = t
-                    if (cutEnd < 0 && t >= cutStart) lastVideo = maxOf(lastVideo, t)
+                    if (cutEnd < 0 && t > cutStart && t >= endUs && (src.isSync || !reordered)) cutEnd = t
+                    if (cutEnd < 0) lastVideo = maxOf(lastVideo, t)
                 }
                 if (cutEnd >= 0 && t > cutEnd + TAIL_US) break
                 if (cutStart >= 0 && t >= cutStart && (cutEnd < 0 || t < cutEnd)) {
@@ -72,9 +84,10 @@ object ClipMaker {
                 }
                 src.advance()
             }
-            if (cutStart < 0) continue // no key frame left: nothing of this piece
+            if (cutStart < 0) continue // nothing left of the video here
             if (cutEnd < 0) cutEnd = lastVideo + frame // the file ended inside the piece
-            out += Highlight(cutStart / 1000, cutEnd / 1000)
+            if (carryOn && out.isNotEmpty()) out[out.lastIndex] = out.last().copy(endMs = cutEnd / 1000)
+            else out += Highlight(cutStart / 1000, cutEnd / 1000)
             base += cutEnd - cutStart
             prevEnd = cutEnd
         }

@@ -220,8 +220,8 @@ private fun DownloadChoice(
                     tr("Только отмеченное", "Marked pieces only") + " — ${pieces.size} · " + "%.1f ".format(piecesMs / 1000.0) +
                         tr("с", "s") + (clipBytes?.let { ", ~${formatSize(it)}" } ?: "") + "\n" +
                         tr(
-                            "Одним клипом $clipName. Куски режутся по ключевым кадрам (бывают чуть длиннее), с камеры читаются только они.",
-                            "One clip, $clipName. Pieces are cut on key frames (may come out a bit longer); only they are read from the camera.",
+                            "Одним клипом $clipName. Начало куска сдвигается назад к ключевому кадру, с камеры читаются только куски.",
+                            "One clip, $clipName. A piece's start moves back to a key frame; only the pieces are read from the camera.",
                         ),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -304,7 +304,7 @@ private fun VideoPreview(
     /** An edit: the pieces in effect come back; [focusMs] picks the piece to keep selected. */
     fun commit(new: List<Highlight>?, focusMs: Long?) {
         val now = onEdit(new)
-        current = focusMs?.let { f -> now.indexOfFirst { f in it.startMs..it.endMs!! } } ?: -1
+        current = focusMs?.let { f -> now.indexOfFirst { f >= it.startMs && f < it.endMs!! } } ?: -1
     }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -339,8 +339,13 @@ private fun VideoPreview(
                     player, pieces, current, durationMs, edited,
                     onChange = { i, piece -> commit(pieces.toMutableList().also { it[i] = piece }, piece.startMs) },
                     onAdd = { at ->
-                        val end = if (durationMs > 0) minOf(durationMs, at + Highlights.AROUND_MS) else at + Highlights.AROUND_MS
-                        commit(pieces + Highlight(maxOf(0, at - Highlights.AROUND_MS), end), at)
+                        // Not on top of another piece: into the free gap there (Highlights.pieceAt).
+                        val added = Highlights.pieceAt(pieces, at, durationMs.takeIf { it > 0 })
+                        if (added == null) {
+                            android.widget.Toast.makeText(context, tr("Здесь нет места для куска", "No room for a piece here"), android.widget.Toast.LENGTH_SHORT).show()
+                        } else {
+                            commit(pieces + added, added.startMs)
+                        }
                     },
                     onDelete = { i -> commit(pieces.filterIndexed { j, _ -> j != i }, null) },
                     onReset = { commit(null, null) },
@@ -397,7 +402,7 @@ private fun FilmStrip(pieces: List<Highlight>, frames: List<ImageBitmap?>, curre
 /**
  * Editing the pieces under the film strip: the selected piece's start and end as two handles (the slider spans the
  * piece and [EDIT_MARGIN_MS] either side as it was when selected; the picture follows the handle), a new 2 s piece
- * where the video stands, deleting the selected one, and going back to the camera's marks.
+ * where the video stands (or in the free gap next to it), deleting the selected one, back to the camera's marks.
  */
 @kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable

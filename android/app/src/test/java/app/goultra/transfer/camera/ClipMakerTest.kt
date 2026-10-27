@@ -11,12 +11,17 @@ class ClipMakerTest {
     private val video = 0
     private val audio = 1
 
-    /** [seconds] of media, interleaved in the file in half-second chunks (video, then audio), as a camera writes it. */
-    private class FakeFile(seconds: Int) : ClipMaker.Samples {
+    /**
+     * [seconds] of media, interleaved in the file in half-second chunks (video, then audio), as a camera writes it.
+     * [bFrames]: inside a chunk, frames 1–2, 3–4 … are stored swapped (decode order ≠ display order).
+     */
+    private class FakeFile(seconds: Int, bFrames: Boolean = false) : ClipMaker.Samples {
         val samples = buildList {
             for (chunk in 0 until seconds * 2) {
                 val from = chunk * 500_000L
-                for (f in 0 until 15) {
+                val order = (0 until 15).toMutableList()
+                if (bFrames) for (i in 1 until 14 step 2) java.util.Collections.swap(order, i, i + 1)
+                for (f in order) {
                     val t = from + f * 33_333L
                     add(Sample(0, t, t % 1_000_000L < 33_333L))
                 }
@@ -35,9 +40,9 @@ class ClipMakerTest {
 
     private class Written(val track: Int, val clipUs: Long, val sync: Boolean)
 
-    private fun cut(pieces: List<Highlight>, seconds: Int = 10): Pair<List<Highlight>, List<Written>> {
+    private fun cut(pieces: List<Highlight>, seconds: Int = 10, bFrames: Boolean = false): Pair<List<Highlight>, List<Written>> {
         val written = mutableListOf<Written>()
-        val cut = ClipMaker.cut(FakeFile(seconds), video, pieces, { track, us, sync -> written += Written(track, us, sync) })
+        val cut = ClipMaker.cut(FakeFile(seconds, bFrames), video, pieces, { track, us, sync -> written += Written(track, us, sync) })
         return cut to written
     }
 
@@ -48,38 +53,58 @@ class ClipMakerTest {
             assertTrue(times.all { it in 0 until durationUs })
         }
         assertTrue("starts on a key frame", written.first { it.track == video }.let { it.sync && it.clipUs == 0L })
+        // Sound from the key frame on, not only from the piece's marked start.
+        assertTrue("sound from the start", written.first { it.track == audio }.clipUs == 0L)
     }
 
     @Test
-    fun onePieceGrowsToKeyFrames() {
+    fun onePieceStartsOnAKeyFrameAndEndsWhereMarked() {
+        // Frames every 33.3 ms: the first one at or after 4.2 s is at 4.233 s.
         val (cut, written) = cut(listOf(Highlight(2500, 4200)))
-        assertEquals(listOf(Highlight(2000, 5000)), cut)
-        assertEquals(90, written.count { it.track == video })
-        assertEquals(150, written.count { it.track == audio })
-        assertSound(written, 3_000_000)
+        assertEquals(listOf(Highlight(2000, 4233)), cut)
+        assertEquals(67, written.count { it.track == video })
+        assertSound(written, 2_233_332)
     }
 
     @Test
-    fun piecesInOneGopJoinWithoutRepeats() {
-        val (cut, written) = cut(listOf(Highlight(1200, 1800), Highlight(2100, 2600)))
-        assertEquals(listOf(Highlight(1000, 2000), Highlight(2000, 3000)), cut)
-        assertSound(written, 2_000_000)
-        assertEquals(60, written.count { it.track == video })
+    fun threeShortPiecesStayShort() {
+        // The case from the phone: three short pieces must not grow to most of a 10 s video.
+        val (cut, written) = cut(listOf(Highlight(1300, 1800), Highlight(4400, 4900), Highlight(7600, 8100)))
+        // Each ends on the first frame at or after its mark (frames every 33.3 ms).
+        assertEquals(listOf(Highlight(1000, 1833), Highlight(4000, 4933), Highlight(7000, 8133)), cut)
+        val clipUs = written.filter { it.track == video }.maxOf { it.clipUs }
+        assertTrue("about 3 s, not 8: $clipUs", clipUs < 3_100_000)
+        assertSound(written, 3_200_000)
     }
 
     @Test
-    fun aPieceInsideThePreviousTailIsSkipped() {
-        val (cut, _) = cut(listOf(Highlight(1200, 1500), Highlight(1600, 1900)))
-        assertEquals(listOf(Highlight(1000, 2000)), cut)
+    fun aPieceStartingInsideThePreviousOneCarriesOn() {
+        // The second piece's key frame (1 s) was already written: it goes on from where the first one ended.
+        val (cut, written) = cut(listOf(Highlight(1200, 1800), Highlight(1900, 2600)))
+        assertEquals(listOf(Highlight(1000, 2633)), cut)
+        assertSound(written, 1_633_332)
+        assertEquals(49, written.count { it.track == video })
+    }
+
+    @Test
+    fun aPieceInsideWhatWasWrittenIsSkipped() {
+        val (cut, _) = cut(listOf(Highlight(1200, 1900), Highlight(1500, 1800)))
+        assertEquals(listOf(Highlight(1000, 1933)), cut)
     }
 
     @Test
     fun separatePiecesFollowEachOther() {
         val (cut, written) = cut(listOf(Highlight(1000, 2000), Highlight(6500, 7500)))
-        assertEquals(listOf(Highlight(1000, 2000), Highlight(6000, 8000)), cut)
-        assertSound(written, 3_000_000)
+        assertEquals(listOf(Highlight(1000, 2000), Highlight(6000, 7500)), cut)
+        assertSound(written, 2_500_000)
         // The second piece's key frame sits right after the first piece in the clip.
         assertTrue(written.any { it.track == video && it.sync && it.clipUs == 1_000_000L })
+    }
+
+    @Test
+    fun withBFramesAPieceEndsOnAKeyFrame() {
+        val (cut, _) = cut(listOf(Highlight(2500, 4200)), bFrames = true)
+        assertEquals(listOf(Highlight(2000, 5000)), cut)
     }
 
     @Test

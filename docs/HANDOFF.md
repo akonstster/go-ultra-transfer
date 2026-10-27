@@ -36,14 +36,17 @@ gallery.
 
 **Step 3 (written together with step 2, not yet tested on a phone):**
 - Editing in the film strip (`ui/FileViewer.kt` → `PieceEditor`): «Править куски» → the selected piece as a
-  RangeSlider (the piece ± 5 s as selected — the scale must not change under the user's hands, it only widens if the piece outgrows it; the picture follows the handle), «+ Кусок здесь» (2 s at
-  the player position), «Удалить», «Как на камере». The flag chip is shown for every video (pieces can be added to an
+  RangeSlider (the piece ± 5 s as selected — the scale must not change under the user's hands, it only widens if the piece outgrows it; the picture follows the handle), «+ Кусок» (2 s at the
+  player position, moved into the free gap: inside a piece → right after it, up to the next; `Highlights.pieceAt`), «Удалить», «Как на камере». The flag chip is shown for every video (pieces can be added to an
   unmarked one). Edits: SharedPreferences `pieces`, key = file name, `start-end,…` ms, "" = all removed
-  (`Highlights.encode/decode/normalize`); the camera file and its phone copy share them.
+  (`Highlights.encode/decode/normalize`; edited pieces that only touch stay apart, the camera's marks keep
+  the camera's rule — touching ones merge); the camera file and its phone copy share them.
 - «Скачать» on a video with pieces → «Целиком» / «Только отмеченное». A downloaded one gets «Клип» instead.
 - `camera/ClipMaker.kt`: MediaExtractor → MediaMuxer, no re-encoding; each piece from the key frame at/before its
-  start to the first key frame at/after its end; pieces meeting after that join without repeated frames; video +
-  first audio track only. `cut()` is pure (a `Samples` interface) and unit-tested on a made-up 30 fps file
+  start (sound from there too) to the first frame at/after its end — a key frame only if B-frames are seen (first
+  version ended on key frames too: three short pieces of a 10 s video came out 8 s long); a piece whose key frame lies
+  in what was already written carries on from the previous end. Video + first audio track only. The log line
+  `клип …: отмечено …; вырезано …` shows how far the starts moved — i.e. the camera's key-frame spacing. `cut()` is pure (a `Samples` interface) and unit-tested on a made-up 30 fps file
   (`ClipMakerTest`). From the camera: `CameraSession.clipSource` → `CameraRangeSource` (2 MB Range blocks, strict:
   a failed block throws instead of ending the clip). Saved by `Downloader.saveClip` as `<stem>_HL.mp4` in
   DCIM/Camera (pending while written, deleted on failure/«Стоп»); runs as a download job (bottom progress, «Стоп»).

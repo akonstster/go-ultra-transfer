@@ -1894,7 +1894,12 @@ class CameraController(private val app: Application) {
                 }
                 val seconds = cut.sumOf { it.endMs!! - it.startMs } / 1000.0
                 lastResult = tr("Клип сохранён: $name · ", "Clip saved: $name · ") + "%.1f ".format(seconds) + tr("с", "s")
-                log("клип $name: " + cut.joinToString { "${it.startMs}–${it.endMs}" } + if (local == null) " (с камеры)" else " (с телефона)")
+                // Asked for vs cut (the starts move back to key frames: shows how far apart they are on this camera).
+                log(
+                    "клип $name " + (if (local == null) "(с камеры)" else "(с телефона)") +
+                        ": отмечено " + pieces.joinToString { "${it.startMs}–${it.endMs}" } +
+                        "; вырезано " + cut.joinToString { "${it.startMs}–${it.endMs}" } + "; итого %.1f с".format(seconds),
+                )
                 loadPhoneFiles()
             } catch (e: CancellationException) {
                 lastResult = tr("Клип не сохранён: остановлено", "Clip not saved: stopped")
