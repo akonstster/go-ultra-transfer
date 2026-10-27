@@ -57,4 +57,48 @@ class HighlightsTest {
     fun truncatedRecordKeepsWhatParsed() {
         assertEquals(listOf(Highlight(1320)), Highlights.parse(bytes("01 01 00 00 00 40 24 14 00 00 00 00 00 02 05 00 00 00 01"), null))
     }
+
+    @Test
+    fun editedPiecesAreTidied() {
+        val edited = listOf(Highlight(5000, 7000), Highlight(-200, 900), Highlight(6500, 8000), Highlight(9000, 9100))
+        assertEquals(listOf(Highlight(0, 900), Highlight(5000, 8000)), Highlights.normalize(edited, 9_500))
+    }
+
+    @Test
+    fun editsSurviveStorage() {
+        val pieces = listOf(Highlight(0, 900), Highlight(5000, 8000))
+        assertEquals(pieces, Highlights.decode(Highlights.encode(pieces)))
+        assertEquals(emptyList<Highlight>(), Highlights.decode(Highlights.encode(emptyList())))
+    }
+
+    @Test
+    fun touchingPiecesStayApart() {
+        val pieces = listOf(Highlight(4000, 6000), Highlight(6000, 8000))
+        assertEquals(pieces, Highlights.normalize(pieces, 10_000))
+    }
+
+    @Test
+    fun addedPieceFindsAFreeSpot() {
+        val one = listOf(Highlight(4000, 6000))
+        fun at(pieces: List<Highlight>, ms: Long) = Highlights.pieceAt(pieces, ms, 10_000)
+        assertEquals(Highlight(4000, 6000), at(emptyList(), 5000))
+        assertEquals(Highlight(0, 2000), at(emptyList(), 300))
+        // Inside a piece: right after it — up to the next one if that comes sooner than 2 s.
+        assertEquals(Highlight(6000, 8000), at(one, 5000))
+        assertEquals(Highlight(6000, 7000), at(one + Highlight(7000, 9000), 5000))
+        // Overlapping the piece before: starts where it ends.
+        assertEquals(Highlight(6000, 8000), at(one, 6500))
+        // Overlapping the piece after: ends where it starts, 2 s long if there is room.
+        assertEquals(Highlight(5000, 7000), at(listOf(Highlight(7000, 9000)), 6500))
+        // At the end of the video: shorter.
+        assertEquals(Highlight(9000, 10_000), at(listOf(Highlight(7000, 9000)), 8000))
+        // No room between touching pieces.
+        assertEquals(null, at(one + Highlight(6000, 8000), 5000))
+    }
+
+    @Test
+    fun piecesThatMeetAreOneInTheClip() {
+        val pieces = listOf(Highlight(1000, 2000), Highlight(2000, 3500), Highlight(5000, 6000))
+        assertEquals(listOf(Highlight(1000, 3500), Highlight(5000, 6000)), Highlights.joinTouching(pieces))
+    }
 }

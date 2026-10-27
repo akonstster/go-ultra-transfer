@@ -6,7 +6,8 @@ import java.time.format.DateTimeFormatter
 enum class MediaKind { PHOTO, VIDEO }
 
 /**
- * A file on the camera card. Metadata comes from GetFileInfoList (ExtraMetadata):
+ * A file on the camera card — or, with [localUri], its copy already in the phone's gallery (the Files tab without the
+ * camera). Metadata comes from GetFileInfoList (ExtraMetadata):
  * 7 creation_time (yyyyMMddHHmmss, wrong for LIV), 9 file_size (approximate), 10 total_time (s),
  * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks).
  */
@@ -19,7 +20,10 @@ data class CameraFile(
     val fps: Int?,
     val created: LocalDateTime?,
     val firstFrameUs: Long? = null,
+    /** content:// item of the downloaded copy, for a file listed from the phone. */
+    val localUri: String? = null,
 ) {
+    val isOnPhone: Boolean get() = localUri != null
     val name: String get() = uri.substringAfterLast('/')
     val kind: MediaKind get() = if (name.endsWith(".mp4", ignoreCase = true)) MediaKind.VIDEO else MediaKind.PHOTO
     val isLive: Boolean get() = name.startsWith("LIV_")

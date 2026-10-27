@@ -23,6 +23,55 @@ Local, untracked notes with device serials, adb ids and every past finding: `CLA
   LRV on the camera via `camera/RemoteFrames.kt` — MediaMetadataRetriever over HTTP Range (256 KB blocks), so only
   the index and a few key frames are read; loaded once, when the strip is first opened.
 
+**Step 1 of 3 — done, works on the phone (27.10):** the Files tab without the camera lists our gallery items
+(`Downloader.phoneFiles`, `CameraFile.localUri`, `CameraController.phoneFiles` / `showsPhone`) under a small connect
+bar; a video opens in our viewer from the phone, marks from its own trailer (`camera/LocalTrailer.kt`: the id-0 table
+of `[u16 id][u32 size][u32 offset]`, or a walk back through `data + [u16 id][u32 size]` footers, as ExifTool does;
+unit test with synthetic trailers), film-strip frames via `RemoteFrames.local`. Photos still open in the phone's
+gallery.
+
+**Step 2 — done:** with the camera connected, a downloaded video also opens from the phone
+(`CameraController.withPhoneCopy`: the camera item plus `localUri`); its marks still come from the camera first
+(they may have been edited there after the download), the phone's trailer is the fallback.
+
+**Step 3 — done, released in v0.10 (27.10, tested on the phone by the user):**
+- Editing (`ui/FileViewer.kt` → `TimelineEditor`, replaced the RangeSlider editor): a video-editor timeline under
+  the picture — frames along the whole video (key frames of the phone's copy or the camera's LRV, `FrameReader` kept
+  open, tiles at multiples of 2 s, cached in `CameraController.timelineFrame`), a fixed white playhead in the middle;
+  drag the strip to scrub (the player follows), pinch to zoom (whole video … 1.5 s per screen). Pieces are yellow
+  bands with bold edges and a triangle inside each edge at the top (pieces that meet stay readable); frames are
+  separated by a dark gap. Tap selects, the selected one gets handles (start snaps to the nearest key frame — or onto
+  the end of the piece before, `KeyFrames.nearestStart`; ticks on top; end free unless B-frames; neither crosses a
+  neighbour). Pieces that meet are joined before cutting (`Highlights.joinTouching`): one piece, no seam. «+ Кусок» at the playhead, «Удалить», «Как на камере», «Готово».
+  The film strip of piece cards stays for playback mode. Edits: SharedPreferences `pieces`, key = file name,
+  `start-end,…` ms, "" = all removed (`Highlights.encode/decode/normalize`; edited pieces that only touch stay apart,
+  the camera's marks keep the camera's rule — touching ones merge); the camera file and its phone copy share them.
+- «✂ Обрезать» chip next to the flag (the most wanted use): one piece over the whole video, selected in the timeline,
+  so its handles trim the start and end; with pieces already there it asks — replace them, or keep and edit them.
+  The trimmed clip is «Только отмеченное» / «Клип» (one piece: the sound is copied as is). A sound crossfade at seams
+  was considered and dropped (it would need re-encoding the sound) — the user decided against re-encoding.
+- «Скачать» on a video with pieces → «Целиком» / «Только отмеченное». A downloaded one gets «Клип» instead.
+- `camera/ClipMaker.kt`: MediaExtractor → MediaMuxer, no re-encoding; each piece from the key frame at/before its
+  start (sound from there too) to the first frame at/after its end — a key frame only if B-frames are seen (first
+  version ended on key frames too: three short pieces of a 10 s video came out 8 s long); a piece whose key frame lies
+  in what was already written carries on from the previous end. Video + first audio track only. The log line
+  `клип …: отмечено …; вырезано …` shows how far the starts moved — i.e. the camera's key-frame spacing. `cut()` is pure (a `Samples` interface) and unit-tested on a made-up 30 fps file
+  (`ClipMakerTest`). From the camera: `CameraSession.clipSource` → `CameraRangeSource` (2 MB Range blocks, strict:
+  a failed block throws instead of ending the clip). Saved by `Downloader.saveClip` as `<stem>_HL.mp4` in
+  DCIM/Camera (pending while written, deleted on failure/«Стоп»); runs as a download job (bottom progress, «Стоп»).
+- Key frames in the editor (`camera/Mp4Index.kt`, `KeyFrames`): read from the mp4 index alone (stss/stts/ctts/elst)
+  of the full-quality file — the phone's copy, or the camera's original over Range (not the LRV, its key frames may
+  differ). `MediaExtractor.seekTo` would read a whole key frame per seek — hundreds of MB for a long video from the
+  camera. Times are rounded up to ms so a start set on a key frame never falls before it. The start handle snaps to
+  the nearest key frame (user's choice: nearest — we can't tell how far a mark missed one), «+ Кусок» too; the end
+  is free unless ctts shows B-frames. Ticks over the scale show the key frames. The scale is the piece ± 5 s, so a
+  long video is edited at the same precision as a short one. `saveClip` snaps every piece's start the same way before
+  cutting (camera marks never edited too), so the clip matches the editor's rule; ClipMaker counts a frame within the
+  last ms as reaching the end (key frame times are rounded up to ms).
+- Assumed, not verified: the camera's LRV (played while editing a camera file) and the original share a timeline; the
+  platform extractor applies the elst shift the same way as `Mp4Index` (both 0 on most camera files).
+- Unknowns to check on the phone: audio at the piece joins, B-frames (if the GO Ultra uses them), rotation.
+
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
 

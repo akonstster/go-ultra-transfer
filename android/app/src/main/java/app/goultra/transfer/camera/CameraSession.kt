@@ -274,6 +274,31 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return Highlights.parse(raw, file.firstFrameUs, file.durationSec?.let { (it + 1) * 1000L })
     }
 
+    /**
+     * The full-quality file as a source for a clip of its pieces: big Range blocks (the pieces are read straight
+     * through), a failed read throws rather than cutting the clip short.
+     */
+    suspend fun clipSource(file: CameraFile): CameraRangeSource {
+        val cam = link
+        val size = Downloader.contentLength(cam, file.uri) ?: file.size ?: error(tr("нет размера файла", "no file size"))
+        return CameraRangeSource(cam, file.uri, size, block = 2L * 1024 * 1024, keep = 6, strict = true)
+    }
+
+    /** Frames of the light copy (the one the viewer plays) for the editor's timeline; null without Wi-Fi. */
+    suspend fun frameReader(file: CameraFile): FrameReader? = withContext(Dispatchers.IO) {
+        val cam = wifiLink ?: return@withContext null
+        val uri = previewUri(file)
+        val size = Downloader.contentLength(cam, uri) ?: return@withContext null
+        RemoteFrames.reader(cam, uri, size)
+    }
+
+    /** The full-quality file for reading its index ([Mp4Index]): small blocks, only what is asked for travels. */
+    suspend fun indexSource(file: CameraFile): CameraRangeSource {
+        val cam = link
+        val size = Downloader.contentLength(cam, file.uri) ?: file.size ?: error(tr("нет размера файла", "no file size"))
+        return CameraRangeSource(cam, file.uri, size, block = 64L * 1024, keep = 16)
+    }
+
     /** [liveVideo]: the clip of a live photo, saved together with it as one gallery file ([LivePhoto]). */
     suspend fun download(
         file: CameraFile,

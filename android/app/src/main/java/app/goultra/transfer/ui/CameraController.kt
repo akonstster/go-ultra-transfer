@@ -20,6 +20,13 @@ import app.goultra.transfer.camera.CameraInfo
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
+import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.ClipMaker
+import app.goultra.transfer.camera.KeyFrames
+import app.goultra.transfer.camera.FrameReader
+import app.goultra.transfer.camera.Mp4Index
+import app.goultra.transfer.camera.LocalTrailer
+import app.goultra.transfer.camera.RemoteFrames
 import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
@@ -39,6 +46,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -87,6 +95,13 @@ class CameraController(private val app: Application) {
     var files by mutableStateOf<List<CameraFile>>(emptyList())
         private set
     var filter by mutableStateOf(Filter.ALL)
+
+    /** Downloaded files in the phone's gallery: the Files tab shows them while the camera isn't connected. */
+    var phoneFiles by mutableStateOf<List<CameraFile>>(emptyList())
+        private set
+
+    /** The Files tab lists the phone's copies (no camera), not the camera's card. */
+    val showsPhone: Boolean get() = conn != ConnState.Connected
     var downloaded by mutableStateOf<Set<String>>(emptySet())
         private set
     var download by mutableStateOf<DownloadProgress?>(null)
@@ -262,6 +277,16 @@ class CameraController(private val app: Application) {
             if (confFile.exists()) runCatching { CameraConf(confFile.readText()) }.getOrNull()?.let { conf = it }
         }
         scope.launch {
+            // Without the camera the Files tab lists the phone's copies: re-read on start, after a disconnect and
+            // when the app comes back (files may have been deleted in the gallery meanwhile).
+            // A camera file left open in the viewer can't play any more: close it.
+            snapshotFlow { showsPhone && uiShown }.collect {
+                if (!it) return@collect
+                if (viewing?.isOnPhone == false) viewing = null
+                loadPhoneFiles()
+            }
+        }
+        scope.launch {
             // Camera tab opened (or the link came up while it is open): read the current settings.
             snapshotFlow { Triple(tab, conn, uiShown) }.collect { (t, c, shown) ->
                 if (t == Tab.CAMERA && shown && (c == ConnState.Connected || c == ConnState.Remote)) refreshSettings()
@@ -422,9 +447,10 @@ class CameraController(private val app: Application) {
         memCache.put(file.name, small.asImageBitmap())
     }
 
-    /** The file list without live-photo clips (they belong to their photo's tile). */
+    /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
     val listedFiles: List<CameraFile>
         get() {
+            if (showsPhone) return phoneFiles
             val paired = liveClips.values.map { it.name }.toSet()
             return files.filter { it.name !in paired }
         }
@@ -570,6 +596,16 @@ class CameraController(private val app: Application) {
             debugSnapshot()
         } else if (conn == ConnState.Connected) {
             scope.launch { loadFiles() }
+        } else {
+            loadPhoneFiles()
+        }
+    }
+
+    private fun loadPhoneFiles() {
+        scope.launch {
+            phoneFiles = withContext(Dispatchers.IO) {
+                runCatching { Downloader.phoneFiles(app) }.onFailure { log("файлы на телефоне: ${it.message}") }.getOrNull()
+            } ?: return@launch
         }
     }
 
@@ -1591,16 +1627,26 @@ class CameraController(private val app: Application) {
 
     // ---------- viewing ----------
 
-    /** File shown in the in-app viewer (not downloaded yet); the link is kept alive while it is open. */
+    /** File shown in the in-app viewer: still on the camera (the link is kept alive while it is open) or a phone copy. */
     var viewing by mutableStateOf<CameraFile?>(null)
 
     /** Gallery item of a downloaded file, to open it in the phone's own player / gallery. */
     suspend fun galleryUri(file: CameraFile): android.net.Uri? =
-        if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
+        if (file.localUri != null) android.net.Uri.parse(file.localUri) else if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
+
+    /**
+     * A downloaded video opens from the phone even with the camera there: full quality, no Wi-Fi traffic. The item
+     * keeps the camera's uri, so its marks still come from the camera (they may have been edited there since).
+     */
+    suspend fun withPhoneCopy(file: CameraFile): CameraFile {
+        if (file.isOnPhone || file.kind != MediaKind.VIDEO || file.name !in downloaded) return file
+        val uri = withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) } ?: return file
+        return file.copy(localUri = uri.toString())
+    }
 
     fun view(file: CameraFile) {
         touch()
-        if (conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
+        if (file.isOnPhone || conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
     }
 
     /** Player data source for the in-app viewer, or null without the camera Wi-Fi. */
@@ -1611,15 +1657,32 @@ class CameraController(private val app: Application) {
 
     /** Film strip frames: one per piece (its middle), small; null where a frame couldn't be read. */
     suspend fun pieceFrames(file: CameraFile, pieces: List<Highlight>): List<ImageBitmap?> {
-        if (conn != ConnState.Connected || pieces.isEmpty()) return pieces.map { null }
         val times = pieces.map { (it.startMs + (it.endMs ?: it.startMs)) / 2 }
+        file.localUri?.let { uri ->
+            return withContext(Dispatchers.IO) {
+                RemoteFrames.local(app, android.net.Uri.parse(uri), times, 320).map { it?.asImageBitmap() }
+            }
+        }
+        if (conn != ConnState.Connected || pieces.isEmpty()) return pieces.map { null }
         return runCatching { session.frames(file, times, 320) }.getOrElse { times.map { null } }.map { it?.asImageBitmap() }
     }
 
     /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
     suspend fun highlights(file: CameraFile): List<Highlight> {
-        if (conn != ConnState.Connected) return emptyList()
-        return runCatching { session.highlights(file) }.getOrNull().orEmpty()
+        // A camera file with a phone copy: the camera's record first (marks edited there after the download).
+        val onCard = !file.uri.startsWith(Downloader.PHONE_PREFIX) && conn == ConnState.Connected
+        val fromCamera = if (onCard) runCatching { session.highlights(file) }.getOrNull() else null
+        // Otherwise a downloaded copy keeps the camera's trailer: the same record, read from the end of the file.
+        val marks = fromCamera ?: file.localUri?.let { local ->
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    LocalTrailer.read(app, android.net.Uri.parse(local))?.let { t ->
+                        t.highlight?.let { Highlights.parse(it, t.firstFrameUs, file.durationSec?.let { s -> (s + 1) * 1000L }) }
+                    }
+                }.onFailure { log("отметки ${file.name} с телефона: ${it.message}") }.getOrNull()
+            }
+        }
+        return marks.orEmpty()
             .also { if (debuggable) log("отметки ${file.name}: ${it.joinToString { h -> "${h.startMs}" + (h.endMs?.let { e -> "–$e" } ?: "") }}") }
     }
 
@@ -1684,7 +1747,12 @@ class CameraController(private val app: Application) {
         val bitmap = withContext(Dispatchers.IO) {
             cached.takeIf { it.exists() }?.let { f ->
                 BitmapFactory.decodeFile(f.path) ?: null.also { f.delete() } // corrupt cache entry: refetch
-            } ?: if (conn == ConnState.Connected) {
+            } ?: if (file.localUri != null) {
+                // A phone copy whose camera thumbnail was never cached: the gallery's own (cached by MediaStore).
+                runCatching { app.contentResolver.loadThumbnail(android.net.Uri.parse(file.localUri), android.util.Size(320, 320), null) }
+                    .onFailure { log("миниатюра ${file.name} с телефона: ${it.message}") }
+                    .getOrNull()
+            } else if (conn == ConnState.Connected) {
                 thumbPermits.withPermit {
                     runCatching { session.thumbnail(file) }
                         .onFailure { log("thumbnail ${file.name}: ${it.message}") }
@@ -1768,4 +1836,170 @@ class CameraController(private val app: Application) {
     fun cancelDownload() {
         downloadJob?.cancel()
     }
+
+    // ---------- pieces: edits and clips ----------
+
+    /** Pieces edited in the film strip, per file name (the camera's file and its phone copy share them). */
+    private val piecePrefs = app.getSharedPreferences("pieces", 0)
+
+    /** The pieces as edited on the phone; null = never edited (the camera's marks apply). */
+    fun editedPieces(file: CameraFile): List<Highlight>? = piecePrefs.getString(file.name, null)?.let(Highlights::decode)
+
+    /** [pieces] null: back to the camera's marks. */
+    fun savePieces(file: CameraFile, pieces: List<Highlight>?) {
+        piecePrefs.edit().apply { if (pieces == null) remove(file.name) else putString(file.name, Highlights.encode(pieces)) }.apply()
+    }
+
+    fun clipName(file: CameraFile): String = file.stem + "_HL.mp4"
+
+    // ---------- the editor's timeline: frames along the whole video ----------
+
+    private val timelineLock = kotlinx.coroutines.sync.Mutex()
+    private var timelineReader: Pair<String, FrameReader>? = null
+    private val timelineFrames = LruCache<String, ImageBitmap>(600)
+
+    /** A small frame of [file] near [ms] (its key frame), from the phone's copy or the camera's light copy. */
+    suspend fun timelineFrame(file: CameraFile, ms: Long): ImageBitmap? {
+        val key = "${file.name}@$ms"
+        timelineFrames.get(key)?.let { return it }
+        return timelineLock.withLock {
+            withContext(Dispatchers.IO) {
+                timelineFrames.get(key) ?: run {
+                    val id = file.localUri ?: file.uri
+                    val reader = timelineReader?.takeIf { it.first == id }?.second
+                        ?: openFrameReader(file)?.also { r -> timelineReader?.second?.close(); timelineReader = id to r }
+                        ?: return@withContext null
+                    reader.frame(ms, 192)?.asImageBitmap()?.also { timelineFrames.put(key, it) }
+                }
+            }
+        }
+    }
+
+    private suspend fun openFrameReader(file: CameraFile): FrameReader? = runCatching {
+        file.localUri?.let { RemoteFrames.localReader(app, android.net.Uri.parse(it)) }
+            ?: if (conn == ConnState.Connected) session.frameReader(file) else null
+    }.onFailure { log("лента ${file.name}: ${it.message}") }.getOrNull()
+
+    /** The viewer closed: let the video go. */
+    fun closeTimeline() {
+        scope.launch {
+            timelineLock.withLock {
+                timelineReader?.second?.close()
+                timelineReader = null
+            }
+        }
+    }
+
+    private val keyFrameCache = mutableMapOf<String, KeyFrames>()
+
+    /**
+     * Key frames of the full-quality video (the one clips are cut from — not the camera's light copy): from the
+     * phone's copy, or the index of the camera's file over Range reads. Null when they couldn't be read.
+     */
+    suspend fun keyFrames(file: CameraFile): KeyFrames? {
+        keyFrameCache[file.name]?.let { return it }
+        val keys = withContext(Dispatchers.IO) {
+            runCatching {
+                val local = file.localUri
+                if (local != null) {
+                    app.contentResolver.openFileDescriptor(android.net.Uri.parse(local), "r")?.use { pfd ->
+                        java.io.FileInputStream(pfd.fileDescriptor).channel.use { ch ->
+                            Mp4Index.keyFrames(ch.size()) { at, n ->
+                                val buf = java.nio.ByteBuffer.allocate(n)
+                                while (buf.hasRemaining() && ch.read(buf, at + buf.position()) > 0) Unit
+                                buf.array()
+                            }
+                        }
+                    }
+                } else if (conn == ConnState.Connected) {
+                    val src = session.indexSource(file)
+                    Mp4Index.keyFrames(src.getSize()) { at, n -> src.bytes(at, n) }.also { log("индекс ${file.name}: прочитано ${src.fetched / 1024} КБ") }
+                } else {
+                    null
+                }
+            }.onFailure { log("ключевые кадры ${file.name}: ${it.message}") }.getOrNull()
+        } ?: return null
+        keyFrameCache[file.name] = keys
+        return keys
+    }
+
+    /**
+     * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
+     * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
+     */
+    fun saveClip(file: CameraFile, marked: List<Highlight>) {
+        if (isDownloading || marked.isEmpty()) return
+        val local = file.localUri
+        if (local == null && conn != ConnState.Connected) {
+            message = tr("Чтобы сделать клип с камеры, подключитесь", "Connect to make a clip from the camera")
+            return
+        }
+        val name = clipName(file)
+        // Pieces moved together are one piece in the clip (no seam); starts on the nearest key frame, as the editor
+        // sets them (camera marks never edited aren't there yet).
+        val joined = Highlights.joinTouching(marked)
+        val keys = keyFrameCache[file.name]
+        var pieces = keys?.let { k -> joined.fold(emptyList<Highlight>()) { done, p -> done + k.snapStart(p, done) } } ?: joined
+        val wantedUs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs } * 1000
+        // Progress in bytes, as for downloads: the share of the file the pieces make up.
+        val estimate = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * wantedUs / (it * 1_000_000L) } } ?: 0L
+        downloadJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
+            var reportedAt = 0L
+            download = DownloadProgress(name, 1, 1, 0, estimate, 0)
+            try {
+                var cut = emptyList<Highlight>()
+                // Without the key frames yet (never edited): read them first, then snap as above.
+                if (keys == null) {
+                    keyFrames(file)?.let { k -> pieces = joined.fold(emptyList()) { done, p -> done + k.snapStart(p, done) } }
+                }
+                withContext(Dispatchers.IO) {
+                    val job = coroutineContext[Job]
+                    val camera = if (local == null) session.clipSource(file) else null
+                    val open: (android.media.MediaExtractor) -> Unit = if (camera != null) {
+                        { ex -> ex.setDataSource(camera) }
+                    } else {
+                        val uri = android.net.Uri.parse(local!!)
+                        ({ ex -> ex.setDataSource(app, uri, null) })
+                    }
+                    Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
+                        cut = ClipMaker.join(open, pieces, fd) { us ->
+                            if (job?.isActive == false) throw CancellationException("остановлено")
+                            val now = System.currentTimeMillis()
+                            if (now - reportedAt >= 250) {
+                                reportedAt = now
+                                val done = camera?.fetched ?: if (wantedUs > 0) estimate * us / wantedUs else 0L
+                                val sec = (now - startedAt) / 1000.0
+                                val speed = if (camera != null && sec > 0.5) (done / sec).toLong() else 0L
+                                scope.launch { download = DownloadProgress(name, 1, 1, done, maxOf(estimate, done), speed) }
+                            }
+                        }
+                    }
+                }
+                val seconds = cut.sumOf { it.endMs!! - it.startMs } / 1000.0
+                lastResult = tr("Клип сохранён: $name · ", "Clip saved: $name · ") + "%.1f ".format(seconds) + tr("с", "s")
+                // Asked for vs cut (the starts move back to key frames: shows how far apart they are on this camera).
+                log(
+                    "клип $name " + (if (local == null) "(с камеры)" else "(с телефона)") +
+                        ": отмечено " + marked.joinToString { "${it.startMs}–${it.endMs}" } +
+                        "; вырезано " + cut.joinToString { "${it.startMs}–${it.endMs}" } + "; итого %.1f с".format(seconds) +
+                        "; ключевые кадры " + keyFrames(file)?.ms.orEmpty()
+                            .filter { k -> pieces.any { k >= it.startMs - 5_000 && k <= it.endMs!! } }.joinToString(),
+                )
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Клип не сохранён: остановлено", "Clip not saved: stopped")
+                throw e
+            } catch (e: Exception) {
+                log("клип $name: ${e.message}")
+                lastResult = tr("Не удалось сделать клип", "Couldn't make the clip") + (e.message?.let { ": $it" } ?: "")
+            } finally {
+                download = null
+                message = lastResult
+                touch()
+            }
+        }
+        if (local == null) CameraService.start(app)
+    }
+
 }

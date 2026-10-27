@@ -5,7 +5,10 @@ It wakes the camera over Bluetooth, joins its Wi-Fi, lists files with previews, 
 the camera, downloads them to the phone gallery (in the background, with resume), deletes them from the card,
 shows a live preview (full screen when the phone is turned sideways), records and takes photos (and keeps control
 of a recording with the phone's screen off, with Stop in the notification), switches the TimeShift speed while
-recording, has a battery-saving mode for long recordings, shows the card space left, and exposes all of the camera's shooting settings for its 12 modes. The interface is in Russian and English, light or dark.
+recording, has a battery-saving mode for long recordings, shows the card space left, and exposes all of the camera's shooting settings for its 12 modes.
+It shows the camera's highlight marks, lets you edit the marked pieces on a timeline or trim a video, and saves just
+those pieces as one clip without re-encoding — reading only the needed bytes from the camera. Without the camera it
+lists what is already on the phone. The interface is in Russian and English, light or dark.
 The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). Not affiliated with Insta360.
 
 ---
@@ -24,8 +27,9 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
 
 **Файлы**
 - Превью, группировка по дням, фильтр «фото / видео», отметка уже скачанных.
-- **Нажмите** — файл открывается: скачанный в плеере или галерее телефона, ещё не скачанный — прямо с камеры
-  (видео в лёгкой копии низкого качества, мгновенно; фото целиком, с увеличением). **Удерживайте** — выбор.
+- **Нажмите** — файл открывается: скачанное видео — в просмотре приложения с телефона (полное качество), скачанное
+  фото — в галерее телефона, ещё не скачанное — прямо с камеры (видео в лёгкой копии низкого качества, мгновенно;
+  фото целиком, с увеличением). **Удерживайте** — выбор.
 - Скачивание в галерею (DCIM/Camera) в фоне, с прогрессом и докачкой после обрыва, без дублей.
 - Живые фото (LIV) — одна плитка «LIVE»; скачиваются одним файлом в открытом формате
   [Android Motion Photo](https://developer.android.com/media/platform/motion-photo-format) (фото в полном
@@ -35,6 +39,15 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
 - Отметки (флажки), поставленные при записи или в просмотре на камере, — жёлтые метки на шкале видео. Флажок
   в просмотре включает «фотоплёнку», как на камере: внизу — кадры отмеченных кусков с длительностью (по 2 с вокруг
   отметки, близкие объединяются), играются только они, остальное пропускается; касание кадра — переход к куску.
+- Без камеры вкладка «Файлы» показывает уже скачанное на телефон (по дням, с превью). Скачанное видео — и без
+  камеры, и с ней — открывается в том же просмотре с телефона, в полном качестве, с отметками и «фотоплёнкой».
+- Куски правятся как в видеоредакторе: лента кадров всего видео с линией по центру (листать — перемотка,
+  щипок — масштаб), куски — жёлтые полосы с ручками; начало встаёт на ключевой кадр. «+ Кусок», удалить, «Как на камере».
+- «✂ Обрезать» у видео: всё видео одним куском с ручками на начале и конце — обрезка, затем «Только отмеченное»
+  (или «Клип» у скачанного).
+  Правки хранятся на телефоне. «Скачать» у видео с кусками предлагает «Целиком» или «Только отмеченное» — один
+  клип `…_HL.mp4` без перекодирования (начало куска — с ключевого кадра перед ним), с камеры читаются только индекс файла и сами куски.
+  У уже скачанного видео кнопка «Клип» делает то же из копии на телефоне.
 - Удаление выбранных файлов с камеры (кнопка вверху, с подтверждением).
 
 **Камера**

@@ -51,6 +51,53 @@ object Downloader {
         return names
     }
 
+    /** [CameraFile.uri] of a file listed from the phone (no camera path). */
+    const val PHONE_PREFIX = "/phone/"
+
+    /**
+     * Files this app saved to the gallery, as list items for the Files tab without the camera (newest first).
+     * Date from the name like on the camera, else DATE_TAKEN; duration from MediaStore (videos only).
+     */
+    fun phoneFiles(context: Context): List<CameraFile> {
+        val out = mutableListOf<CameraFile>()
+        for (video in listOf(false, true)) {
+            val collection = collection(video)
+            context.contentResolver.query(
+                collection,
+                arrayOf(
+                    MediaStore.MediaColumns._ID,
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.SIZE,
+                    MediaStore.MediaColumns.DATE_TAKEN,
+                    MediaStore.MediaColumns.WIDTH,
+                    MediaStore.MediaColumns.HEIGHT,
+                    MediaStore.MediaColumns.DURATION,
+                ),
+                OUR_FOLDERS,
+                null,
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    val taken = if (c.isNull(3)) null else c.getLong(3)
+                    out += CameraFile(
+                        uri = "$PHONE_PREFIX$name",
+                        size = if (c.isNull(2)) null else c.getLong(2),
+                        durationSec = if (c.isNull(6)) null else ((c.getLong(6) + 500) / 1000).toInt(),
+                        width = if (c.isNull(4)) null else c.getInt(4),
+                        height = if (c.isNull(5)) null else c.getInt(5),
+                        fps = null,
+                        created = CameraFile.createdFromName(name) ?: taken?.let {
+                            java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
+                        },
+                        localUri = ContentUris.withAppendedId(collection, c.getLong(0)).toString(),
+                    )
+                }
+            }
+        }
+        return out.sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+    }
+
     /**
      * One-time cleanup after versions that saved to Pictures|Movies/GO Ultra and created "name (1).jpg" duplicates:
      * duplicates are deleted, originals move to DCIM/Camera. Only our own items are visible here.
@@ -193,6 +240,42 @@ object Downloader {
             null,
         )
         item
+    }
+
+    /**
+     * A clip made on the phone ([ClipMaker]) saved as [name] in DCIM/Camera: a pending item while [write] fills it,
+     * removed if that fails or is stopped. A clip of the same name is overwritten in place.
+     */
+    fun saveClip(context: Context, name: String, takenAtMillis: Long?, write: (java.io.FileDescriptor) -> Unit): Uri {
+        val resolver = context.contentResolver
+        val collection = collection(video = true)
+        val pending = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) }
+        val item = findExisting(resolver, collection, name)?.uri?.also { resolver.update(it, pending, null, null) }
+            ?: resolver.insert(
+                collection,
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, TARGET)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                },
+            ) ?: error("MediaStore insert failed")
+        try {
+            resolver.openFileDescriptor(item, "rwt")!!.use { write(it.fileDescriptor) }
+        } catch (e: Throwable) {
+            runCatching { resolver.delete(item, null, null) }
+            throw e
+        }
+        resolver.update(
+            item,
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+                takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+            },
+            null,
+            null,
+        )
+        return item
     }
 
     /** Truncates the item to [at] and writes [bytes] there (live photo: its photo part). */
