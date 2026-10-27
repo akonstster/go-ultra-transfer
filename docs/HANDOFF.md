@@ -30,11 +30,11 @@ of `[u16 id][u32 size][u32 offset]`, or a walk back through `data + [u16 id][u32
 unit test with synthetic trailers), film-strip frames via `RemoteFrames.local`. Photos still open in the phone's
 gallery.
 
-**Step 2 (not yet tested on a phone):** with the camera connected, a downloaded video also opens from the phone
+**Step 2 — done:** with the camera connected, a downloaded video also opens from the phone
 (`CameraController.withPhoneCopy`: the camera item plus `localUri`); its marks still come from the camera first
 (they may have been edited there after the download), the phone's trailer is the fallback.
 
-**Step 3 (written together with step 2, not yet tested on a phone):**
+**Step 3 — done, released in v0.10 (27.10, tested on the phone by the user):**
 - Editing (`ui/FileViewer.kt` → `TimelineEditor`, replaced the RangeSlider editor): a video-editor timeline under
   the picture — frames along the whole video (key frames of the phone's copy or the camera's LRV, `FrameReader` kept
   open, tiles at multiples of 2 s, cached in `CameraController.timelineFrame`), a fixed white playhead in the middle;
