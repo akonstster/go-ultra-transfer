@@ -46,6 +46,10 @@ gallery.
   The film strip of piece cards stays for playback mode. Edits: SharedPreferences `pieces`, key = file name,
   `start-end,…` ms, "" = all removed (`Highlights.encode/decode/normalize`; edited pieces that only touch stay apart,
   the camera's marks keep the camera's rule — touching ones merge); the camera file and its phone copy share them.
+- «✂ Обрезать» chip next to the flag (the most wanted use): one piece over the whole video, selected in the timeline,
+  so its handles trim the start and end; with pieces already there it asks — replace them, or keep and edit them.
+  The trimmed clip is «Только отмеченное» / «Клип» (one piece: the sound is copied as is). A sound crossfade at seams
+  was considered and dropped (it would need re-encoding the sound) — the user decided against re-encoding.
 - «Скачать» on a video with pieces → «Целиком» / «Только отмеченное». A downloaded one gets «Клип» instead.
 - `camera/ClipMaker.kt`: MediaExtractor → MediaMuxer, no re-encoding; each piece from the key frame at/before its
   start (sound from there too) to the first frame at/after its end — a key frame only if B-frames are seen (first

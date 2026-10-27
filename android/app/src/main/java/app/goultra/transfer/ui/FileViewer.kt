@@ -321,6 +321,33 @@ private fun VideoPreview(
         val now = onEdit(new)
         current = focusMs?.let { f -> now.indexOfFirst { f >= it.startMs && f < it.endMs!! } } ?: -1
     }
+    /** «Обрезать»: one piece over the whole video, selected in the timeline — drag its ends to trim. */
+    fun trimWhole() {
+        val end = durationMs.takeIf { it > 0 } ?: file.durationSec?.let { it * 1000L } ?: return
+        commit(listOf(Highlight(0, end)), 0)
+        film = true
+        editing = true
+        player.pause()
+    }
+    var askTrim by remember(file.uri) { mutableStateOf(false) }
+    if (askTrim) {
+        AlertDialog(
+            onDismissRequest = { askTrim = false },
+            title = { Text(tr("Обрезать видео", "Trim the video")) },
+            text = {
+                Text(
+                    tr(
+                        "Уже есть отмеченные куски (${pieces.size}). Заменить их одним куском на всё видео, чтобы обрезать начало и конец? Или оставить куски и править их.",
+                        "There are marked pieces (${pieces.size}). Replace them with one piece over the whole video to trim its start and end? Or keep the pieces and edit them.",
+                    ),
+                )
+            },
+            confirmButton = { TextButton({ askTrim = false; trimWhole() }) { Text(tr("Заменить", "Replace")) } },
+            dismissButton = {
+                TextButton({ askTrim = false; film = true; editing = true; player.pause() }) { Text(tr("Оставить куски", "Keep pieces")) }
+            },
+        )
+    }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             AndroidView(
@@ -328,18 +355,33 @@ private fun VideoPreview(
                 update = { view -> view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size)) },
                 modifier = Modifier.fillMaxSize(),
             )
-            // Shown without marks too: pieces can be added by hand in the strip.
-            FilterChip(
-                selected = film,
-                onClick = { film = !film; if (!film) editing = false },
-                label = { Text(if (film) tr("Отмеченное", "Highlights only") else "${pieces.size}") },
-                leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
-                colors = FilterChipDefaults.filterChipColors(
+            Row(
+                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val chipColors = FilterChipDefaults.filterChipColors(
                     containerColor = Color(0x99000000), labelColor = Color.White,
                     selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
-                ),
-                modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
-            )
+                )
+                // Shown without marks too: pieces can be added by hand in the strip.
+                FilterChip(
+                    selected = film,
+                    onClick = { film = !film; if (!film) editing = false },
+                    label = { Text(if (film) tr("Отмеченное", "Highlights only") else "${pieces.size}") },
+                    leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
+                    colors = chipColors,
+                )
+                // Trimming: the whole video as one piece, its ends on handles in the timeline.
+                if (!editing) {
+                    FilterChip(
+                        selected = false,
+                        onClick = { if (pieces.isEmpty()) trimWhole() else askTrim = true },
+                        label = { Text(tr("Обрезать", "Trim")) },
+                        leadingIcon = { Icon(Icons.Filled.ContentCut, null, tint = Color.White) },
+                        colors = chipColors,
+                    )
+                }
+            }
         }
         if (film) {
             if (pieces.isNotEmpty() && !editing) {
