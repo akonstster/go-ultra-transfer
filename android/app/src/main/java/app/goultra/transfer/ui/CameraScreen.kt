@@ -657,14 +657,12 @@ private fun RecBadge(vm: CameraController, modifier: Modifier = Modifier) {
         vm.timeShiftNormal == false -> "● REC $real · " + tr("Авто", "Auto")
         else -> "● REC $real"
     }
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text,
-            color = Color.White,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
-        )
-    }
+    Text(
+        text,
+        color = Color.White,
+        fontWeight = FontWeight.Bold,
+        modifier = modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
+    )
 }
 
 /**

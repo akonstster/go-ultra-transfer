@@ -45,6 +45,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.drop
+import androidx.compose.runtime.derivedStateOf
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
@@ -254,7 +256,7 @@ class CameraController(private val app: Application) {
     var settingBusy by mutableStateOf<String?>(null)
         private set
 
-    private var powerReadAt = 0L
+    private var powerJob: Job? = null
     private val confFile = File(app.filesDir, "camera_conf.json")
 
     /** Bluetooth / Wi-Fi / VPN on the phone; the UI asks to fix what blocks the connection. */
@@ -293,8 +295,16 @@ class CameraController(private val app: Application) {
             // A camera file left open in the viewer can't play any more: close it.
             snapshotFlow { showsPhone && uiShown }.collect {
                 if (!it) return@collect
-                if (viewing?.isOnPhone == false) viewing = null
                 loadPhoneFiles()
+            }
+        }
+        scope.launch {
+            // The list changed between the card and the phone: a selection made for one must not act on the other
+            // (shared phone copies must not turn into «delete from camera»), and a viewer opened with the camera may
+            // hold camera files on other pages — close it.
+            snapshotFlow { showsPhone }.drop(1).collect {
+                selected.clear()
+                viewing = null
             }
         }
         scope.launch {
@@ -343,11 +353,11 @@ class CameraController(private val app: Application) {
         // Pod put on / taken off, charging started… : the batteries on screen follow (a burst of these is read once).
         session.onPowerChanged = {
             scope.launch {
-                val now = SystemClock.elapsedRealtime()
-                if (settingBusy == null && now - powerReadAt > 3_000) {
-                    powerReadAt = now
-                    delay(500)
-                    refreshSettings()
+                // Read once a second after the last one of a burst (the final state comes last).
+                powerJob?.cancel()
+                powerJob = scope.launch {
+                    delay(1_000)
+                    if (settingBusy == null) refreshSettings()
                 }
             }
         }
@@ -474,26 +484,26 @@ class CameraController(private val app: Application) {
     }
 
     /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
-    val listedFiles: List<CameraFile>
-        get() {
-            if (showsPhone) return phoneFiles
-            val paired = liveClips.values.map { it.name }.toSet()
-            val onCard = files.filter { it.name !in paired }
-            // With the camera there too: what is only on the phone — clips made here, files already deleted from the
-            // card — so they don't vanish from the app while connected.
-            val names = files.map { it.name }.toSet()
-            val phoneOnly = phoneFiles.filter { it.name !in names }
-            return if (phoneOnly.isEmpty()) onCard
-            else (onCard + phoneOnly).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
-        }
+    val listedFiles: List<CameraFile> by derivedStateOf {
+        if (showsPhone) return@derivedStateOf phoneFiles
+        val paired = liveClips.values.map { it.name }.toSet()
+        val onCard = files.filter { it.name !in paired }
+        // With the camera there too: what is only on the phone — clips made here, files already deleted from the
+        // card — so they don't vanish from the app while connected.
+        val names = files.map { it.name }.toSet()
+        val phoneOnly = phoneFiles.filter { it.name !in names }
+        if (phoneOnly.isEmpty()) onCard
+        else (onCard + phoneOnly).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+    }
 
-    val visibleFiles: List<CameraFile>
-        get() = when (filter) {
+    val visibleFiles: List<CameraFile> by derivedStateOf {
+        when (filter) {
             Filter.ALL -> listedFiles
             Filter.PHOTO -> listedFiles.filter { it.kind == MediaKind.PHOTO }
             Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
             Filter.FAVORITE -> listedFiles.filter { it.name in favorites }
         }
+    }
 
     /** Selected files of the list on screen: the camera's card, or the phone's copies (for sharing). */
     val selectedFiles: List<CameraFile> get() = listedFiles.filter { it.name in selected }
@@ -854,7 +864,7 @@ class CameraController(private val app: Application) {
                 log("снимок, изменилось: ${diff.ifEmpty { "ничего" }}")
             }
             lastSnapshots[fms] = snap
-            message = "Снимок готов"
+            message = "Настройки перечитаны с камеры"
         }
     }
 
@@ -1011,10 +1021,10 @@ class CameraController(private val app: Application) {
         }
     }
 
-    /** Capture status and, in a TimeShift recording, its speed (switchable on the camera too). */
     /** The last capture status request failed (logged once, until one succeeds again). */
     private var statusFailed = false
 
+    /** Capture status and, in a TimeShift recording, its speed (switchable on the camera too). */
     private suspend fun followCapture() {
         val status = runCatching { session.captureStatus() }.getOrNull()
         if (status == null) {
@@ -1673,13 +1683,9 @@ class CameraController(private val app: Application) {
     /** File shown in the in-app viewer: still on the camera (the link is kept alive while it is open) or a phone copy. */
     var viewing by mutableStateOf<CameraFile?>(null)
 
-    /** Gallery item of a downloaded file, to open it in the phone's own player / gallery. */
-    suspend fun galleryUri(file: CameraFile): android.net.Uri? =
-        if (file.localUri != null) android.net.Uri.parse(file.localUri) else if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
-
     /**
-     * A downloaded video opens from the phone even with the camera there: full quality, no Wi-Fi traffic. The item
-     * keeps the camera's uri, so its marks still come from the camera (they may have been edited there since).
+     * A downloaded file opens from the phone even with the camera there: full quality, no Wi-Fi traffic. The item
+     * keeps the camera's uri, so a video's marks still come from the camera (they may have been edited there since).
      */
     suspend fun withPhoneCopy(file: CameraFile): CameraFile {
         // A live photo stays the camera's while connected: its clip and the cover choice need the camera.
@@ -1748,7 +1754,7 @@ class CameraController(private val app: Application) {
         val bytes = (if (coverReplaced(file)) LiveCover.video(app, file.name)?.let { LiveCover.photoPart(app, it) } else null)
             ?: runCatching { session.fetchFile(session.previewUri(file)) }
                 .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
-        shownPhoto = file.name to bytes
+        shownPhoto = file.name to bytes.copyOf(minOf(bytes.size, 256 * 1024)) // the EXIF is at the start
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1

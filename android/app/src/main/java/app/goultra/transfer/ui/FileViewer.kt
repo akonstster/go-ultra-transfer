@@ -113,6 +113,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
 import app.goultra.transfer.camera.CameraFile
+import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.KeyFrames
@@ -155,158 +156,160 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
 @Composable
 private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, onClose: () -> Unit, onLock: (Boolean) -> Unit) {
     val context = LocalContext.current
-    run {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            val clip = vm.liveClipOf(file)
-            var playing by remember(file.uri) { mutableStateOf(false) }
-            // Video: the pieces to play, show in the film strip and download — the camera's marks as its film strip
-            // shows them (2 s pieces, nearby ones merged), or the pieces as edited on the phone.
-            val isVideo = file.kind == MediaKind.VIDEO
-            // The video's real length once the player knows it; until then the listed whole seconds + 1 s. A mark set
-            // just before the recording stopped must not reach past the end.
-            var exactMs by remember(file.uri) { mutableStateOf<Long?>(null) }
-            val limitMs = exactMs ?: file.durationSec?.let { (it + 1) * 1000L }
-            val marks by produceState(emptyList<Highlight>(), file.uri, file.localUri) { if (isVideo) value = vm.highlights(file) }
-            val cameraPieces = remember(marks, limitMs) { Highlights.pieces(marks, limitMs) }
-            var edited by remember(file.name) { mutableStateOf(vm.editedPieces(file)) }
-            val pieces = remember(edited, cameraPieces, limitMs) { Highlights.clip(edited ?: cameraPieces, limitMs) }
-            /** Saves an edit (null: back to the camera's marks); returns the pieces now in effect. */
-            fun edit(new: List<Highlight>?): List<Highlight> {
-                val tidy = new?.let { Highlights.normalize(it, limitMs) }
-                edited = tidy
-                vm.savePieces(file, tidy)
-                return tidy ?: cameraPieces
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        val clip = vm.liveClipOf(file)
+        var playing by remember(file.uri) { mutableStateOf(false) }
+        // Video: the pieces to play, show in the film strip and download — the camera's marks as its film strip
+        // shows them (2 s pieces, nearby ones merged), or the pieces as edited on the phone.
+        val isVideo = file.kind == MediaKind.VIDEO
+        // The video's real length once the player knows it; until then the listed whole seconds + 1 s. A mark set
+        // just before the recording stopped must not reach past the end.
+        var exactMs by remember(file.uri) { mutableStateOf<Long?>(null) }
+        val limitMs = exactMs ?: file.durationSec?.let { (it + 1) * 1000L }
+        val marks by produceState(emptyList<Highlight>(), file.uri, file.localUri) { if (isVideo) value = vm.highlights(file) }
+        val cameraPieces = remember(marks, limitMs) { Highlights.pieces(marks, limitMs) }
+        var edited by remember(file.name) { mutableStateOf(vm.editedPieces(file)) }
+        val pieces = remember(edited, cameraPieces, limitMs) { Highlights.clip(edited ?: cameraPieces, limitMs) }
+        /** Saves an edit (null: back to the camera's marks); returns the pieces now in effect. */
+        fun edit(new: List<Highlight>?): List<Highlight> {
+            val tidy = new?.let { Highlights.normalize(it, limitMs) }
+            edited = tidy
+            vm.savePieces(file, tidy)
+            return tidy ?: cameraPieces
+        }
+        var choose by remember(file.uri) { mutableStateOf(false) }
+        var info by remember(file.uri) { mutableStateOf(false) }
+        if (info) FileInfo(vm, file) { info = false }
+        // A clip of this video already in the gallery: replace it, or keep both (…_HL2.mp4).
+        val scope = rememberCoroutineScope()
+        var replaceClip by remember(file.uri) { mutableStateOf(false) }
+        fun startClip() {
+            scope.launch {
+                if (vm.clipExists(file)) replaceClip = true else { vm.saveClip(file, pieces); onClose() }
             }
-            var choose by remember(file.uri) { mutableStateOf(false) }
-            var info by remember(file.uri) { mutableStateOf(false) }
-            if (info) FileInfo(vm, file) { info = false }
-            // A clip of this video already in the gallery: replace it, or keep both (…_HL2.mp4).
-            val scope = rememberCoroutineScope()
-            var replaceClip by remember(file.uri) { mutableStateOf(false) }
-            fun startClip() {
-                scope.launch {
-                    if (vm.clipExists(file)) replaceClip = true else { vm.saveClip(file, pieces); onClose() }
-                }
-            }
-            if (replaceClip) {
-                AlertDialog(
-                    onDismissRequest = { replaceClip = false },
-                    title = { Text(tr("Клип уже есть", "The clip already exists")) },
-                    text = {
-                        Text(
-                            tr(
-                                "В галерее уже есть ${vm.clipName(file)}. Заменить его новым или сохранить новый отдельно?",
-                                "${vm.clipName(file)} is already in the gallery. Replace it, or save the new one separately?",
-                            ),
-                        )
-                    },
-                    confirmButton = {
-                        TextButton({ replaceClip = false; vm.saveClip(file, pieces); onClose() }) { Text(tr("Заменить", "Replace")) }
-                    },
-                    dismissButton = {
-                        TextButton({
-                            scope.launch {
-                                val name = vm.freeClipName(file)
-                                replaceClip = false
-                                vm.saveClip(file, pieces, name)
-                                onClose()
-                            }
-                        }) { Text(tr("Сохранить отдельно", "Save separately")) }
-                    },
-                )
-            }
-            when {
-                isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock) { exactMs = it }
-                clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
-                else -> PhotoPreview(vm, file)
-            }
-            // Live photo: its clip, where a frame can become the cover; and the way back to the camera's photo.
-            if (clip != null && !playing && vm.coverBusy == null) {
-                Column(
-                    Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button({ playing = true }) { Text(tr("▶ Живое фото · выбрать обложку", "▶ Live photo · pick the cover")) }
-                    if (vm.coverReplaced(file)) {
-                        OutlinedButton({ vm.restoreLiveCover(file) }) { Text(tr("Вернуть исходное фото", "Back to the original photo"), color = Color.White) }
-                    }
-                }
-            }
-            vm.coverBusy?.let { busy ->
-                Column(
-                    Modifier.align(Alignment.Center).background(Color(0xCC000000), RoundedCornerShape(12.dp)).padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    CircularProgressIndicator(color = Color.White)
-                    Spacer(Modifier.width(12.dp))
-                    Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
-                }
-            }
-            Row(
-                Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
-                    .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClose) { Icon(Icons.Filled.Close, tr("Закрыть", "Close"), tint = Color.White) }
-                Column(Modifier.weight(1f)) {
-                    Text(file.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (replaceClip) {
+            AlertDialog(
+                onDismissRequest = { replaceClip = false },
+                title = { Text(tr("Клип уже есть", "The clip already exists")) },
+                text = {
                     Text(
-                        if (file.isOnPhone) {
-                            tr("на телефоне", "on the phone")
-                        } else if (file.kind == MediaKind.VIDEO && vm.previewUrl(file).endsWith(".lrv")) {
-                            tr("с камеры · низкое качество", "from the camera · low quality")
-                        } else {
-                            tr("с камеры", "from the camera")
-                        },
-                        color = Color(0xCCFFFFFF),
-                        fontSize = 12.sp,
+                        tr(
+                            "В галерее уже есть ${vm.clipName(file)}. Заменить его новым или сохранить новый отдельно?",
+                            "${vm.clipName(file)} is already in the gallery. Replace it, or save the new one separately?",
+                        ),
                     )
-                }
-                Spacer(Modifier.width(8.dp))
-                if (!file.isOnPhone && file.name !in vm.downloaded) {
-                    // With pieces marked: the whole video or one clip of the pieces.
-                    Button(
-                        { if (isVideo && pieces.isNotEmpty()) choose = true else { vm.downloadOne(file); onClose() } },
-                        enabled = !vm.isDownloading,
-                    ) { Text(tr("Скачать", "Download")) }
-                } else if (isVideo && pieces.isNotEmpty()) {
-                    // Already on the phone: a clip of the pieces, made from the phone's copy.
-                    Button({ startClip() }, enabled = !vm.isDownloading) {
-                        Icon(Icons.Filled.ContentCut, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(tr("Клип", "Clip"))
-                    }
-                }
+                },
+                confirmButton = {
+                    TextButton({ replaceClip = false; vm.saveClip(file, pieces); onClose() }) { Text(tr("Заменить", "Replace")) }
+                },
+                dismissButton = {
+                    TextButton({
+                        scope.launch {
+                            val name = vm.freeClipName(file)
+                            replaceClip = false
+                            vm.saveClip(file, pieces, name)
+                            onClose()
+                        }
+                    }) { Text(tr("Сохранить отдельно", "Save separately")) }
+                },
+            )
+        }
+        when {
+            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock) { ms ->
+                // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
+                // from: never cut the pieces shorter than the listed whole seconds.
+                exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
             }
-            // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
+            clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
+            else -> PhotoPreview(vm, file)
+        }
+        // Live photo: its clip, where a frame can become the cover; and the way back to the camera's photo.
+        if (clip != null && !playing && vm.coverBusy == null) {
             Column(
-                Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val round = Modifier.background(Color(0x66000000), CircleShape)
-                IconButton({ vm.toggleFavorite(file) }, round) {
-                    val fav = file.name in vm.favorites
-                    Icon(
-                        if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        tr("Избранное", "Favorite"),
-                        tint = if (fav) Color(0xFFFF5252) else Color.White,
-                    )
-                }
-                IconButton({ info = true }, round) { Icon(Icons.Outlined.Info, tr("Сведения", "Info"), tint = Color.White) }
-                // Sharing needs the file on the phone.
-                if (file.localUri != null) {
-                    IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
+                Button({ playing = true }) { Text(tr("▶ Живое фото · выбрать обложку", "▶ Live photo · pick the cover")) }
+                if (vm.coverReplaced(file)) {
+                    OutlinedButton({ vm.restoreLiveCover(file) }) { Text(tr("Вернуть исходное фото", "Back to the original photo"), color = Color.White) }
                 }
             }
-            if (choose) {
-                DownloadChoice(
-                    file, pieces, vm.clipName(file),
-                    onWhole = { choose = false; vm.downloadOne(file); onClose() },
-                    onPieces = { choose = false; startClip() },
-                    onDismiss = { choose = false },
+        }
+        vm.coverBusy?.let { busy ->
+            Column(
+                Modifier.align(Alignment.Center).background(Color(0xCC000000), RoundedCornerShape(12.dp)).padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(color = Color.White)
+                Spacer(Modifier.width(12.dp))
+                Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
+                .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClose) { Icon(Icons.Filled.Close, tr("Закрыть", "Close"), tint = Color.White) }
+            Column(Modifier.weight(1f)) {
+                Text(file.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (file.isOnPhone) {
+                        tr("на телефоне", "on the phone")
+                    } else if (file.kind == MediaKind.VIDEO && vm.previewUrl(file).endsWith(".lrv")) {
+                        tr("с камеры · низкое качество", "from the camera · low quality")
+                    } else {
+                        tr("с камеры", "from the camera")
+                    },
+                    color = Color(0xCCFFFFFF),
+                    fontSize = 12.sp,
                 )
             }
+            Spacer(Modifier.width(8.dp))
+            if (!file.isOnPhone && file.name !in vm.downloaded) {
+                // With pieces marked: the whole video or one clip of the pieces.
+                Button(
+                    { if (isVideo && pieces.isNotEmpty()) choose = true else { vm.downloadOne(file); onClose() } },
+                    enabled = !vm.isDownloading,
+                ) { Text(tr("Скачать", "Download")) }
+            } else if (isVideo && pieces.isNotEmpty()) {
+                // Already on the phone: a clip of the pieces, made from the phone's copy.
+                Button({ startClip() }, enabled = !vm.isDownloading) {
+                    Icon(Icons.Filled.ContentCut, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(tr("Клип", "Clip"))
+                }
+            }
+        }
+        // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
+        Column(
+            Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            val round = Modifier.background(Color(0x66000000), CircleShape)
+            IconButton({ vm.toggleFavorite(file) }, round) {
+                val fav = file.name in vm.favorites
+                Icon(
+                    if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                    tr("Избранное", "Favorite"),
+                    tint = if (fav) Color(0xFFFF5252) else Color.White,
+                )
+            }
+            IconButton({ info = true }, round) { Icon(Icons.Outlined.Info, tr("Сведения", "Info"), tint = Color.White) }
+            // Sharing needs the file on the phone.
+            if (file.localUri != null) {
+                IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
+            }
+        }
+        if (choose) {
+            DownloadChoice(
+                file, pieces, vm.clipName(file),
+                onWhole = { choose = false; vm.downloadOne(file); onClose() },
+                onPieces = { choose = false; startClip() },
+                onDismiss = { choose = false },
+            )
         }
     }
 }
@@ -520,12 +523,12 @@ private fun VideoPreview(
                         val fingers = event.changes.count { it.pressed }
                         if (fingers >= 2) {
                             zoom = (zoom * event.calculateZoom()).coerceIn(1f, 5f)
-                            shift = clampShift(shift + event.calculatePan(), zoom, size.width.toFloat(), size.height.toFloat())
+                            shift = clampShift(shift + event.calculatePan(), zoom, size.width.toFloat(), size.height.toFloat(), player.videoSize)
                             event.changes.forEach { it.consume() }
                         } else if (fingers == 1 && zoom > 1f) {
                             val pan = event.calculatePan()
                             if (pan != Offset.Zero) {
-                                shift = clampShift(shift + pan, zoom, size.width.toFloat(), size.height.toFloat())
+                                shift = clampShift(shift + pan, zoom, size.width.toFloat(), size.height.toFloat(), player.videoSize)
                                 event.changes.forEach { it.consume() }
                             }
                         }
@@ -614,10 +617,15 @@ private fun VideoPreview(
     }
 }
 
-/** A zoomed picture may move only as far as its edges reach the frame's. */
-private fun clampShift(shift: Offset, zoom: Float, w: Float, h: Float): Offset {
-    val maxX = (zoom - 1f) * w / 2
-    val maxY = (zoom - 1f) * h / 2
+/**
+ * A zoomed picture may move only as far as its edges reach the frame's. The picture is fitted into the [w]×[h] box
+ * (black bars on two sides), so the room to move comes from its shown size, not the box's.
+ */
+private fun clampShift(shift: Offset, zoom: Float, w: Float, h: Float, video: androidx.media3.common.VideoSize): Offset {
+    val aspect = if (video.width > 0 && video.height > 0) video.width * video.pixelWidthHeightRatio / video.height else w / h
+    val (shownW, shownH) = if (aspect > w / h) w to w / aspect else h * aspect to h
+    val maxX = maxOf(0f, (zoom * shownW - w) / 2)
+    val maxY = maxOf(0f, (zoom * shownH - h) / 2)
     return Offset(shift.x.coerceIn(-maxX, maxX), shift.y.coerceIn(-maxY, maxY))
 }
 
@@ -1023,7 +1031,23 @@ private fun PhotoPreview(vm: CameraController, file: CameraFile) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val bmp = image
         if (bmp == null && failed) {
-            Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White, modifier = Modifier.padding(24.dp))
+            // E.g. a RAW .dng the phone can't decode here: offer the phone's own apps.
+            val context = LocalContext.current
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+                Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White)
+                file.localUri?.let { uri ->
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton({
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW)
+                                    .setDataAndType(android.net.Uri.parse(uri), Downloader.mimeType(file.name))
+                                    .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                            )
+                        }
+                    }) { Text(tr("Открыть в другом приложении", "Open in another app"), color = Color.White) }
+                }
+            }
         } else if (bmp == null) {
             CircularProgressIndicator(color = Color.White)
         } else {
