@@ -59,19 +59,19 @@ class ClipMakerTest {
 
     @Test
     fun onePieceStartsOnAKeyFrameAndEndsWhereMarked() {
-        // Frames every 33.3 ms: the first one at or after 4.2 s is at 4.233 s.
+        // Frames every 33.3 ms: the one at 4.199998 s is within the last ms of 4.2 s — the piece ends there.
         val (cut, written) = cut(listOf(Highlight(2500, 4200)))
-        assertEquals(listOf(Highlight(2000, 4233)), cut)
-        assertEquals(67, written.count { it.track == video })
-        assertSound(written, 2_233_332)
+        assertEquals(listOf(Highlight(2000, 4199)), cut)
+        assertEquals(66, written.count { it.track == video })
+        assertSound(written, 2_200_000)
     }
 
     @Test
     fun threeShortPiecesStayShort() {
         // The case from the phone: three short pieces must not grow to most of a 10 s video.
         val (cut, written) = cut(listOf(Highlight(1300, 1800), Highlight(4400, 4900), Highlight(7600, 8100)))
-        // Each ends on the first frame at or after its mark (frames every 33.3 ms).
-        assertEquals(listOf(Highlight(1000, 1833), Highlight(4000, 4933), Highlight(7000, 8133)), cut)
+        // Each ends on the frame at its mark (frames every 33.3 ms, so 1 µs short of it).
+        assertEquals(listOf(Highlight(1000, 1799), Highlight(4000, 4899), Highlight(7000, 8099)), cut)
         val clipUs = written.filter { it.track == video }.maxOf { it.clipUs }
         assertTrue("about 3 s, not 8: $clipUs", clipUs < 3_100_000)
         assertSound(written, 3_200_000)
@@ -81,15 +81,15 @@ class ClipMakerTest {
     fun aPieceStartingInsideThePreviousOneCarriesOn() {
         // The second piece's key frame (1 s) was already written: it goes on from where the first one ended.
         val (cut, written) = cut(listOf(Highlight(1200, 1800), Highlight(1900, 2600)))
-        assertEquals(listOf(Highlight(1000, 2633)), cut)
-        assertSound(written, 1_633_332)
-        assertEquals(49, written.count { it.track == video })
+        assertEquals(listOf(Highlight(1000, 2599)), cut)
+        assertSound(written, 1_600_000)
+        assertEquals(48, written.count { it.track == video })
     }
 
     @Test
     fun aPieceInsideWhatWasWrittenIsSkipped() {
         val (cut, _) = cut(listOf(Highlight(1200, 1900), Highlight(1500, 1800)))
-        assertEquals(listOf(Highlight(1000, 1933)), cut)
+        assertEquals(listOf(Highlight(1000, 1899)), cut)
     }
 
     @Test
@@ -99,6 +99,13 @@ class ClipMakerTest {
         assertSound(written, 2_500_000)
         // The second piece's key frame sits right after the first piece in the clip.
         assertTrue(written.any { it.track == video && it.sync && it.clipUs == 1_000_000L })
+    }
+
+    @Test
+    fun anEndSetOnAKeyFrameStopsThere() {
+        // With B-frames an end set on a key frame (as the editor does) stops there, not on the next one.
+        val (cut, _) = cut(listOf(Highlight(2000, 4000)), bFrames = true)
+        assertEquals(listOf(Highlight(2000, 4000)), cut)
     }
 
     @Test

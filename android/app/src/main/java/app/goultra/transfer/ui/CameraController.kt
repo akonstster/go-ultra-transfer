@@ -1887,14 +1887,17 @@ class CameraController(private val app: Application) {
      * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
      * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
      */
-    fun saveClip(file: CameraFile, pieces: List<Highlight>) {
-        if (isDownloading || pieces.isEmpty()) return
+    fun saveClip(file: CameraFile, marked: List<Highlight>) {
+        if (isDownloading || marked.isEmpty()) return
         val local = file.localUri
         if (local == null && conn != ConnState.Connected) {
             message = tr("Чтобы сделать клип с камеры, подключитесь", "Connect to make a clip from the camera")
             return
         }
         val name = clipName(file)
+        // Starts on the nearest key frame, as the editor sets them (camera marks never edited aren't there yet).
+        val keys = keyFrameCache[file.name]
+        var pieces = keys?.let { k -> marked.fold(emptyList<Highlight>()) { done, p -> done + k.snapStart(p, done) } } ?: marked
         val wantedUs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs } * 1000
         // Progress in bytes, as for downloads: the share of the file the pieces make up.
         val estimate = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * wantedUs / (it * 1_000_000L) } } ?: 0L
@@ -1904,6 +1907,10 @@ class CameraController(private val app: Application) {
             download = DownloadProgress(name, 1, 1, 0, estimate, 0)
             try {
                 var cut = emptyList<Highlight>()
+                // Without the key frames yet (never edited): read them first, then snap as above.
+                if (keys == null) {
+                    keyFrames(file)?.let { k -> pieces = marked.fold(emptyList()) { done, p -> done + k.snapStart(p, done) } }
+                }
                 withContext(Dispatchers.IO) {
                     val job = coroutineContext[Job]
                     val camera = if (local == null) session.clipSource(file) else null
@@ -1932,7 +1939,7 @@ class CameraController(private val app: Application) {
                 // Asked for vs cut (the starts move back to key frames: shows how far apart they are on this camera).
                 log(
                     "клип $name " + (if (local == null) "(с камеры)" else "(с телефона)") +
-                        ": отмечено " + pieces.joinToString { "${it.startMs}–${it.endMs}" } +
+                        ": отмечено " + marked.joinToString { "${it.startMs}–${it.endMs}" } +
                         "; вырезано " + cut.joinToString { "${it.startMs}–${it.endMs}" } + "; итого %.1f с".format(seconds) +
                         "; ключевые кадры " + keyFrames(file)?.ms.orEmpty()
                             .filter { k -> pieces.any { k >= it.startMs - 5_000 && k <= it.endMs!! } }.joinToString(),

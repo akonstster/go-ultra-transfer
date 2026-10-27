@@ -56,8 +56,11 @@ gallery.
   camera. Times are rounded up to ms so a start set on a key frame never falls before it. The start handle snaps to
   the nearest key frame (user's choice: nearest — we can't tell how far a mark missed one), «+ Кусок» too; the end
   is free unless ctts shows B-frames. Ticks over the scale show the key frames. The scale is the piece ± 5 s, so a
-  long video is edited at the same precision as a short one. Unedited camera pieces aren't snapped (the clip still
-  starts on the key frame before them).
+  long video is edited at the same precision as a short one. `saveClip` snaps every piece's start the same way before
+  cutting (camera marks never edited too), so the clip matches the editor's rule; ClipMaker counts a frame within the
+  last ms as reaching the end (key frame times are rounded up to ms).
+- Assumed, not verified: the camera's LRV (played while editing a camera file) and the original share a timeline; the
+  platform extractor applies the elst shift the same way as `Mp4Index` (both 0 on most camera files).
 - Unknowns to check on the phone: audio at the piece joins, B-frames (if the GO Ultra uses them), rotation.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /

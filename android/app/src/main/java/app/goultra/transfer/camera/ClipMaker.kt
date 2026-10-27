@@ -74,7 +74,9 @@ object ClipMaker {
                         if (t < from || (!carryOn && !src.isSync)) { src.advance(); continue }
                         cutStart = t
                     }
-                    if (cutEnd < 0 && t > cutStart && t >= endUs && (src.isSync || !reordered)) cutEnd = t
+                    // A frame within the last ms counts as reaching the end: ends are whole ms, key frame times are
+                    // rounded up to whole ms (an end set on a key frame must not skip to the next one).
+                    if (cutEnd < 0 && t > cutStart && t + 1000 > endUs && (src.isSync || !reordered)) cutEnd = t
                     if (cutEnd < 0) lastVideo = maxOf(lastVideo, t)
                 }
                 if (cutEnd >= 0 && t > cutEnd + TAIL_US) break
