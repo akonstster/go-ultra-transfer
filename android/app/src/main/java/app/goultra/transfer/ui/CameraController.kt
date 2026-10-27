@@ -972,7 +972,7 @@ class CameraController(private val app: Application) {
         }
         // To find out whether (and how) the camera reports the marks during a recording.
         if (status.keyPoints != null && status.keyPoints != capture?.keyPoints) log("отметки записи (keyTimePointDetail): ${status.keyPoints}")
-        if (debuggable && status.recording && status.fields != capture?.fields) log("DEBUG поля статуса записи: ${status.fields}")
+        if (status.recording && status.fields != capture?.fields) log("поля статуса записи: ${status.fields}")
         capture = status
         val now = SystemClock.elapsedRealtime()
         if (!status.recording) {
@@ -1015,8 +1015,17 @@ class CameraController(private val app: Application) {
     }
 
     /** Capture status and, in a TimeShift recording, its speed (switchable on the camera too). */
+    /** The last capture status request failed (logged once, until one succeeds again). */
+    private var statusFailed = false
+
     private suspend fun followCapture() {
-        val status = runCatching { session.captureStatus() }.getOrNull() ?: return
+        val status = runCatching { session.captureStatus() }.getOrNull()
+        if (status == null) {
+            if (!statusFailed) log("статус записи: нет ответа")
+            statusFailed = true
+            return
+        }
+        statusFailed = false
         updateCapture(status)
         if (status.state != CaptureStatus.TIMESHIFT) return
         val normal = runCatching { session.timeShiftNormal() }.getOrNull() ?: return
