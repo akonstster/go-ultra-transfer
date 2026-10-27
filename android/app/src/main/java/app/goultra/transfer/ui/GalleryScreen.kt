@@ -317,7 +317,7 @@ private fun FileGrid(vm: CameraController) {
     val scope = rememberCoroutineScope()
     /**
      * Downloaded: the phone's own player / gallery; still on the camera (or no app for it): the in-app viewer.
-     * Without the camera, videos open from the phone in the in-app viewer (marks and film strip read from the file).
+     * Downloaded videos open from the phone in the in-app viewer (marks and film strip), with or without the camera.
      */
     fun open(file: CameraFile) {
         if (file.isOnPhone && file.kind == MediaKind.VIDEO) {
@@ -330,6 +330,12 @@ private fun FileGrid(vm: CameraController) {
             return
         }
         scope.launch {
+            // A downloaded video: our viewer, from the phone (marks and film strip there too).
+            val copy = vm.withPhoneCopy(file)
+            if (copy.isOnPhone) {
+                vm.view(copy)
+                return@launch
+            }
             val uri = vm.galleryUri(file)
             val opened = uri != null && runCatching {
                 context.startActivity(

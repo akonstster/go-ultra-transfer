@@ -51,6 +51,9 @@ object Downloader {
         return names
     }
 
+    /** [CameraFile.uri] of a file listed from the phone (no camera path). */
+    const val PHONE_PREFIX = "/phone/"
+
     /**
      * Files this app saved to the gallery, as list items for the Files tab without the camera (newest first).
      * Date from the name like on the camera, else DATE_TAKEN; duration from MediaStore (videos only).
@@ -78,7 +81,7 @@ object Downloader {
                     val name = c.getString(1) ?: continue
                     val taken = if (c.isNull(3)) null else c.getLong(3)
                     out += CameraFile(
-                        uri = "/phone/$name",
+                        uri = "$PHONE_PREFIX$name",
                         size = if (c.isNull(2)) null else c.getLong(2),
                         durationSec = if (c.isNull(6)) null else ((c.getLong(6) + 500) / 1000).toInt(),
                         width = if (c.isNull(4)) null else c.getInt(4),

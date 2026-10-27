@@ -1629,6 +1629,16 @@ class CameraController(private val app: Application) {
     suspend fun galleryUri(file: CameraFile): android.net.Uri? =
         if (file.localUri != null) android.net.Uri.parse(file.localUri) else if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
 
+    /**
+     * A downloaded video opens from the phone even with the camera there: full quality, no Wi-Fi traffic. The item
+     * keeps the camera's uri, so its marks still come from the camera (they may have been edited there since).
+     */
+    suspend fun withPhoneCopy(file: CameraFile): CameraFile {
+        if (file.isOnPhone || file.kind != MediaKind.VIDEO || file.name !in downloaded) return file
+        val uri = withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) } ?: return file
+        return file.copy(localUri = uri.toString())
+    }
+
     fun view(file: CameraFile) {
         touch()
         if (file.isOnPhone || conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
@@ -1654,19 +1664,18 @@ class CameraController(private val app: Application) {
 
     /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
     suspend fun highlights(file: CameraFile): List<Highlight> {
-        val marks = if (file.localUri != null) {
-            // A downloaded copy keeps the camera's trailer: the same record, read from the end of the file.
+        // A camera file with a phone copy: the camera's record first (marks edited there after the download).
+        val onCard = !file.uri.startsWith(Downloader.PHONE_PREFIX) && conn == ConnState.Connected
+        val fromCamera = if (onCard) runCatching { session.highlights(file) }.getOrNull() else null
+        // Otherwise a downloaded copy keeps the camera's trailer: the same record, read from the end of the file.
+        val marks = fromCamera ?: file.localUri?.let { local ->
             withContext(Dispatchers.IO) {
                 runCatching {
-                    LocalTrailer.read(app, android.net.Uri.parse(file.localUri))?.let { t ->
+                    LocalTrailer.read(app, android.net.Uri.parse(local))?.let { t ->
                         t.highlight?.let { Highlights.parse(it, t.firstFrameUs, file.durationSec?.let { s -> (s + 1) * 1000L }) }
                     }
                 }.onFailure { log("отметки ${file.name} с телефона: ${it.message}") }.getOrNull()
             }
-        } else if (conn == ConnState.Connected) {
-            runCatching { session.highlights(file) }.getOrNull()
-        } else {
-            null
         }
         return marks.orEmpty()
             .also { if (debuggable) log("отметки ${file.name}: ${it.joinToString { h -> "${h.startMs}" + (h.endMs?.let { e -> "–$e" } ?: "") }}") }

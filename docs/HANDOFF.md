@@ -23,12 +23,18 @@ Local, untracked notes with device serials, adb ids and every past finding: `CLA
   LRV on the camera via `camera/RemoteFrames.kt` — MediaMetadataRetriever over HTTP Range (256 KB blocks), so only
   the index and a few key frames are read; loaded once, when the strip is first opened.
 
-**In progress (step 1 of 3, not yet tested on a phone):** the Files tab without the camera lists our gallery items
+**Step 1 of 3 — done, works on the phone (27.10):** the Files tab without the camera lists our gallery items
 (`Downloader.phoneFiles`, `CameraFile.localUri`, `CameraController.phoneFiles` / `showsPhone`) under a small connect
 bar; a video opens in our viewer from the phone, marks from its own trailer (`camera/LocalTrailer.kt`: the id-0 table
 of `[u16 id][u32 size][u32 offset]`, or a walk back through `data + [u16 id][u32 size]` footers, as ExifTool does;
 unit test with synthetic trailers), film-strip frames via `RemoteFrames.local`. Photos still open in the phone's
-gallery. Next: step 2 — downloaded files open from the phone while connected too; step 3 — piece editing and
+gallery.
+
+**Step 2 (not yet tested on a phone):** with the camera connected, a downloaded video also opens from the phone
+(`CameraController.withPhoneCopy`: the camera item plus `localUri`); its marks still come from the camera first
+(they may have been edited there after the download), the phone's trailer is the fallback.
+
+Next: step 3 — piece editing and
 «marked pieces only» download (one clip joined on key frames, only the needed bytes from the camera).
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
