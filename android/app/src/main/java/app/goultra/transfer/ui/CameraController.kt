@@ -1868,7 +1868,8 @@ class CameraController(private val app: Application) {
             var reportedAt = 0L
             download = DownloadProgress(name, 1, 1, 0, estimate, 0)
             try {
-                val cut = withContext(Dispatchers.IO) {
+                var cut = emptyList<Highlight>()
+                withContext(Dispatchers.IO) {
                     val job = coroutineContext[Job]
                     val camera = if (local == null) session.clipSource(file) else null
                     val open: (android.media.MediaExtractor) -> Unit = if (camera != null) {
@@ -1878,7 +1879,7 @@ class CameraController(private val app: Application) {
                         ({ ex -> ex.setDataSource(app, uri, null) })
                     }
                     Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
-                        ClipMaker.join(open, pieces, fd) { us ->
+                        cut = ClipMaker.join(open, pieces, fd) { us ->
                             if (job?.isActive == false) throw CancellationException("остановлено")
                             val now = System.currentTimeMillis()
                             if (now - reportedAt >= 250) {
