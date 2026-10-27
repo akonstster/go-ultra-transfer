@@ -79,11 +79,11 @@ Suggested design (agree with the user first — they review UI decisions; see th
 
 ## Open questions
 
-- Why the first mark from our app is stored as exactly 1 320 000 (relative). We send SET_KEY_TIME_POINT 60
-  `{1: whole seconds since start × 1000}` (`CameraController.markHighlight` → `recordSeconds()*1000`). Schema in the
-  proto: `SetKeyTimePoint {1 uint64 timestamp, 2 type INSTANT/START/END, 3 string typeDetail}`. Maybe the camera
-  expects a camera-clock timestamp, or ignores ours and uses its own; worth one experiment (mark at a known second,
-  read the record back).
+- **Answered (27.10, test video 121, 13 s):** the camera stamps a mark with **its own clock when SET_KEY_TIME_POINT
+  arrives**; the value we send (`{1: whole seconds since start × 1000}`) is not stored. Taps at ~0:05 and ~0:10 on our
+  timer → 4.36 s and 10.12 s in the file (our timer starts ~0.6 s before the first frame). No `1320000` this time —
+  that value appeared only in three earlier recordings (098/099/119), origin unknown (possibly marks sent over BLE in
+  an older build); just treat values < first_frame as relative.
 - Whether type 2 really is (start, end) — only one sample. Ask the user to add a second playback mark and read again.
 
 ## How to build / test
