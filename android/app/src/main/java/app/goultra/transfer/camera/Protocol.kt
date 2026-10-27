@@ -69,6 +69,9 @@ object Proto {
     const val NOTIFY_AUTHORIZATION_RESULT = 8209
     const val NOTIFY_CAM_WIFI_START = 8215
 
+    /** Sent when the camera's or the Action Pod's power changes (bodies not decoded: 8222 = option 85 again). */
+    val NOTIFY_POWER = setOf(8217, 8219, 8222)
+
     const val OPTION_WIFI_INFO = 36L
     const val MEDIA_VIDEO_AND_PHOTO = 2L
     const val EXTRA_TYPE_THUMBNAIL = 2L

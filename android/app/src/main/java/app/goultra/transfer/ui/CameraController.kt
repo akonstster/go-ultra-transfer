@@ -244,6 +244,8 @@ class CameraController(private val app: Application) {
         private set
     var settingBusy by mutableStateOf<String?>(null)
         private set
+
+    private var powerReadAt = 0L
     private val confFile = File(app.filesDir, "camera_conf.json")
 
     /** Bluetooth / Wi-Fi / VPN on the phone; the UI asks to fix what blocks the connection. */
@@ -267,6 +269,14 @@ class CameraController(private val app: Application) {
             while (true) {
                 delay(10_000)
                 disconnectIfIdle()
+            }
+        }
+        scope.launch {
+            // The batteries change slowly and the camera doesn't always say so: re-read once a minute while they are
+            // on screen (the camera tab).
+            while (true) {
+                delay(60_000)
+                if (tab == Tab.CAMERA && uiShown && isLinked && settingBusy == null) refreshSettings()
             }
         }
         scope.launch {
@@ -325,6 +335,17 @@ class CameraController(private val app: Application) {
         session.onModeChanged = { scope.launch { if (settingBusy == null) refreshSettings() } }
         // Paused / resumed (our button or the camera's): the time on screen stops and goes on with the camera's.
         session.onCapturePhase = { phase -> scope.launch { if (capture?.recording == true) applyPause(phase == 1) } }
+        // Pod put on / taken off, charging started… : the batteries on screen follow (a burst of these is read once).
+        session.onPowerChanged = {
+            scope.launch {
+                val now = SystemClock.elapsedRealtime()
+                if (settingBusy == null && now - powerReadAt > 3_000) {
+                    powerReadAt = now
+                    delay(500)
+                    refreshSettings()
+                }
+            }
+        }
         session.onLost = {
             scope.launch {
                 if (conn == ConnState.Connected) {
