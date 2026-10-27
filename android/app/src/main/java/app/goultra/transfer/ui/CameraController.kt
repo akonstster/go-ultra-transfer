@@ -306,6 +306,10 @@ class CameraController(private val app: Application) {
             }
         }
         scope.launch {
+            // Connected: the list also shows what is only on the phone (clips made here).
+            snapshotFlow { conn == ConnState.Connected && uiShown }.collect { if (it) loadPhoneFiles() }
+        }
+        scope.launch {
             // Camera tab opened (or the link came up while it is open): read the current settings.
             snapshotFlow { Triple(tab, conn, uiShown) }.collect { (t, c, shown) ->
                 if (t == Tab.CAMERA && shown && (c == ConnState.Connected || c == ConnState.Remote)) refreshSettings()
@@ -482,7 +486,13 @@ class CameraController(private val app: Application) {
         get() {
             if (showsPhone) return phoneFiles
             val paired = liveClips.values.map { it.name }.toSet()
-            return files.filter { it.name !in paired }
+            val onCard = files.filter { it.name !in paired }
+            // With the camera there too: what is only on the phone — clips made here, files already deleted from the
+            // card — so they don't vanish from the app while connected.
+            val names = files.map { it.name }.toSet()
+            val phoneOnly = phoneFiles.filter { it.name !in names }
+            return if (phoneOnly.isEmpty()) onCard
+            else (onCard + phoneOnly).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
         }
 
     val visibleFiles: List<CameraFile>
@@ -1835,7 +1845,7 @@ class CameraController(private val app: Application) {
 
     /** Deletes the selected files from the camera card (the UI asks for confirmation first). */
     fun deleteSelected() {
-        val files = selectedFiles
+        val files = selectedFiles.filter { !it.isOnPhone } // only what is on the card
         if (files.isEmpty() || deleting || conn != ConnState.Connected || isDownloading) return
         touch()
         deleting = true
@@ -1950,6 +1960,7 @@ class CameraController(private val app: Application) {
                 message = lastResult
                 downloadResult = lastResult
                 touch() // the idle / background countdown starts after the download
+                loadPhoneFiles()
             }
         }
         CameraService.start(app)
@@ -1972,7 +1983,17 @@ class CameraController(private val app: Application) {
         piecePrefs.edit().apply { if (pieces == null) remove(file.name) else putString(file.name, Highlights.encode(pieces)) }.apply()
     }
 
-    fun clipName(file: CameraFile): String = file.stem + "_HL.mp4"
+    fun clipName(file: CameraFile, n: Int = 1): String = file.stem + "_HL" + (if (n > 1) "$n" else "") + ".mp4"
+
+    /** A clip of [file] is already in the gallery (saving would replace it). */
+    suspend fun clipExists(file: CameraFile): Boolean = withContext(Dispatchers.IO) { Downloader.galleryUri(app, clipName(file)) != null }
+
+    /** The first clip name of [file] not taken yet: …_HL2.mp4, …_HL3.mp4 … */
+    suspend fun freeClipName(file: CameraFile): String = withContext(Dispatchers.IO) {
+        var n = 2
+        while (Downloader.galleryUri(app, clipName(file, n)) != null) n++
+        clipName(file, n)
+    }
 
     // ---------- the editor's timeline: frames along the whole video ----------
 
@@ -2049,14 +2070,13 @@ class CameraController(private val app: Application) {
      * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
      * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
      */
-    fun saveClip(file: CameraFile, marked: List<Highlight>) {
+    fun saveClip(file: CameraFile, marked: List<Highlight>, name: String = clipName(file)) {
         if (isDownloading || marked.isEmpty()) return
         val local = file.localUri
         if (local == null && conn != ConnState.Connected) {
             message = tr("Чтобы сделать клип с камеры, подключитесь", "Connect to make a clip from the camera")
             return
         }
-        val name = clipName(file)
         // Pieces moved together are one piece in the clip (no seam); starts on the nearest key frame, as the editor
         // sets them (camera marks never edited aren't there yet).
         val joined = Highlights.joinTouching(marked)

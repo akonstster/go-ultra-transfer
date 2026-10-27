@@ -29,6 +29,8 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -174,6 +176,41 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             var choose by remember(file.uri) { mutableStateOf(false) }
             var info by remember(file.uri) { mutableStateOf(false) }
             if (info) FileInfo(vm, file) { info = false }
+            // A clip of this video already in the gallery: replace it, or keep both (…_HL2.mp4).
+            val scope = rememberCoroutineScope()
+            var replaceClip by remember(file.uri) { mutableStateOf(false) }
+            fun startClip() {
+                scope.launch {
+                    if (vm.clipExists(file)) replaceClip = true else { vm.saveClip(file, pieces); onClose() }
+                }
+            }
+            if (replaceClip) {
+                AlertDialog(
+                    onDismissRequest = { replaceClip = false },
+                    title = { Text(tr("Клип уже есть", "The clip already exists")) },
+                    text = {
+                        Text(
+                            tr(
+                                "В галерее уже есть ${vm.clipName(file)}. Заменить его новым или сохранить новый отдельно?",
+                                "${vm.clipName(file)} is already in the gallery. Replace it, or save the new one separately?",
+                            ),
+                        )
+                    },
+                    confirmButton = {
+                        TextButton({ replaceClip = false; vm.saveClip(file, pieces); onClose() }) { Text(tr("Заменить", "Replace")) }
+                    },
+                    dismissButton = {
+                        TextButton({
+                            scope.launch {
+                                val name = vm.freeClipName(file)
+                                replaceClip = false
+                                vm.saveClip(file, pieces, name)
+                                onClose()
+                            }
+                        }) { Text(tr("Сохранить отдельно", "Save separately")) }
+                    },
+                )
+            }
             when {
                 isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock)
                 clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
@@ -243,7 +280,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                     ) { Text(tr("Скачать", "Download")) }
                 } else if (isVideo && pieces.isNotEmpty()) {
                     // Already on the phone: a clip of the pieces, made from the phone's copy.
-                    Button({ vm.saveClip(file, pieces); onClose() }, enabled = !vm.isDownloading) {
+                    Button({ startClip() }, enabled = !vm.isDownloading) {
                         Icon(Icons.Filled.ContentCut, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(tr("Клип", "Clip"))
@@ -254,7 +291,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 DownloadChoice(
                     file, pieces, vm.clipName(file),
                     onWhole = { choose = false; vm.downloadOne(file); onClose() },
-                    onPieces = { choose = false; vm.saveClip(file, pieces); onClose() },
+                    onPieces = { choose = false; startClip() },
                     onDismiss = { choose = false },
                 )
             }

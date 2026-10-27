@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -324,6 +325,7 @@ private fun FileGrid(vm: CameraController) {
         // From the camera: the phone's copy when downloaded (a live photo stays the camera's — its cover choice).
         scope.launch { vm.view(vm.withPhoneCopy(file)) }
     }
+    fun selectable(file: CameraFile) = vm.showsPhone || !file.isOnPhone
     vm.viewing?.let { FileViewer(vm, it) { vm.viewing = null } }
     val files = vm.visibleFiles
     val byDay = remember(files) { files.groupBy { it.created?.toLocalDate() } }
@@ -364,11 +366,13 @@ private fun FileGrid(vm: CameraController) {
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         favorite = file.name in vm.favorites,
+                        phoneOnly = file.isOnPhone && !vm.showsPhone,
                         loadThumbnail = vm::thumbnail,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
-                        // phone list a selection is for sharing.
-                        onClick = { if (vm.selected.isEmpty()) open(file) else vm.toggle(file) },
-                        onLongClick = { vm.toggle(file) },
+                        // phone list a selection is for sharing; with the camera it is for its card (download,
+                        // delete), so files only on the phone just open.
+                        onClick = { if (vm.selected.isEmpty() || !selectable(file)) open(file) else vm.toggle(file) },
+                        onLongClick = { if (selectable(file)) vm.toggle(file) },
                     )
                 }
             }
@@ -392,6 +396,7 @@ private fun FileTile(
     selected: Boolean,
     downloaded: Boolean,
     favorite: Boolean,
+    phoneOnly: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -436,6 +441,14 @@ private fun FileTile(
                 Modifier.align(Alignment.TopStart).padding(5.dp).size(18.dp),
                 tint = Color(0xFFFF5252),
             )
+        }
+        if (phoneOnly) {
+            // Only on the phone (a clip made here, or deleted from the card).
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.PhoneAndroid, tr("Только на телефоне", "On the phone only"), Modifier.size(12.dp), tint = Color.White) }
         }
         if (downloaded) {
             Box(
