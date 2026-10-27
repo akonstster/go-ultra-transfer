@@ -42,7 +42,8 @@ gallery.
   bands; tap selects, the selected one gets handles (start snaps to the nearest key frame, ticks on top; end free
   unless B-frames; neither crosses a neighbour). «+ Кусок» at the playhead, «Удалить», «Как на камере», «Готово».
   The film strip of piece cards stays for playback mode. Edits: SharedPreferences `pieces`, key = file name,
-  `start-end,…` ms, "" = all removed
+  `start-end,…` ms, "" = all removed (`Highlights.encode/decode/normalize`; edited pieces that only touch stay apart,
+  the camera's marks keep the camera's rule — touching ones merge); the camera file and its phone copy share them.
 - «Скачать» on a video with pieces → «Целиком» / «Только отмеченное». A downloaded one gets «Клип» instead.
 - `camera/ClipMaker.kt`: MediaExtractor → MediaMuxer, no re-encoding; each piece from the key frame at/before its
   start (sound from there too) to the first frame at/after its end — a key frame only if B-frames are seen (first
