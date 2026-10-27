@@ -10,17 +10,10 @@ class CamMessage(val code: Int, val seq: Int, val body: ByteArray) {
  * 10: phase}}; phase as field 7 of the 8208 notification: 0 running, 1 paused, 2 stopping (5 right at the start).
  */
 /**
- * [keyPoints]: CameraCaptureStatus.keyTimePointDetail (field 4, a string) — the recording's highlight marks as the
- * camera keeps them, maybe; its format is not known yet (logged and shown in debug builds to find out).
+ * GetCurrentCaptureStatus over BLE: {1: CameraCaptureStatus {1 state, 2 seconds, 10 phase}}. The GO Ultra sends only
+ * these three — not keyTimePointDetail (field 4), even with marks set (checked 28.10, fw 1.9.29).
  */
-data class CaptureStatus(
-    val state: Int,
-    val seconds: Int,
-    val phase: Int = 0,
-    val keyPoints: String? = null,
-    /** Field numbers present in the reply, e.g. "1,2,4,10" (debug: which fields the camera sends at all). */
-    val fields: String = "",
-) {
+data class CaptureStatus(val state: Int, val seconds: Int, val phase: Int = 0) {
     val paused: Boolean get() = recording && phase == 1
     val recording: Boolean get() = state != 0
 
@@ -34,8 +27,6 @@ data class CaptureStatus(
                 status.field(1)?.varint?.toInt() ?: 0,
                 status.field(2)?.varint?.toInt() ?: 0,
                 status.field(10)?.varint?.toInt() ?: 0,
-                status.field(4)?.string?.takeIf { it.isNotBlank() },
-                status.map { it.number }.distinct().sorted().joinToString(","),
             )
         }
     }

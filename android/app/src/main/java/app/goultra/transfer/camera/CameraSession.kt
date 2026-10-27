@@ -319,10 +319,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     suspend fun stopRecording(): Boolean = ble.request(Proto.CMD_STOP_CAPTURE, timeoutMs = 8_000)?.code == 200
 
-    /**
-     * Over BLE (the reply this parser is verified on; over Wi-Fi the same request didn't show the recording —
-     * 28.10, to be looked at before switching).
-     */
+    /** Over BLE: the reply [CaptureStatus.parse] is verified on (over Wi-Fi it didn't show the recording, 28.10). */
     suspend fun captureStatus(): CaptureStatus? =
         ble.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, timeoutMs = 3_000, quiet = true)
             ?.takeIf { it.code == 200 }

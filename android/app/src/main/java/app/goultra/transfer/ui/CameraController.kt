@@ -970,11 +970,6 @@ class CameraController(private val app: Application) {
                 if (!recordBusy) scope.launch { loadFiles() }
             }
         }
-        // To find out whether (and how) the camera reports the marks during a recording.
-        if (status.keyPoints != null && status.keyPoints != capture?.keyPoints) log("отметки записи (keyTimePointDetail): ${status.keyPoints}")
-        if (status.fields != capture?.fields || status.state != capture?.state) {
-            log("статус записи: состояние ${status.state}, поля ${status.fields}")
-        }
         capture = status
         val now = SystemClock.elapsedRealtime()
         if (!status.recording) {
