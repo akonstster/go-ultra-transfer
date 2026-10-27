@@ -98,7 +98,13 @@ object ClipMaker {
      * Writes the clip of [pieces] from the video [open] sets up on an extractor, as an mp4 into [out].
      * Returns the pieces as cut, or throws (IOException from the source, IllegalStateException from the muxer).
      */
-    fun join(open: (MediaExtractor) -> Unit, pieces: List<Highlight>, out: FileDescriptor, onProgress: (Long) -> Unit): List<Highlight> {
+    fun join(
+        open: (MediaExtractor) -> Unit,
+        pieces: List<Highlight>,
+        out: FileDescriptor,
+        onKeyFrames: (List<Long>) -> Unit = {},
+        onProgress: (Long) -> Unit,
+    ): List<Highlight> {
         val ex = MediaExtractor()
         var muxer: MediaMuxer? = null
         try {
@@ -116,6 +122,7 @@ object ClipMaker {
             if (vFormat.containsKey(MediaFormat.KEY_ROTATION)) m.setOrientationHint(vFormat.getInteger(MediaFormat.KEY_ROTATION))
             val tracks = mutableMapOf(video to m.addTrack(vFormat))
             ex.selectTrack(video)
+            onKeyFrames(keyFrames(ex, pieces))
             if (audio >= 0) {
                 tracks[audio] = m.addTrack(ex.getTrackFormat(audio))
                 ex.selectTrack(audio)
@@ -148,5 +155,24 @@ object ClipMaker {
             runCatching { muxer?.release() }
             ex.release()
         }
+    }
+
+    /**
+     * Key frames (ms) from a little before the first piece to the end of the last, for the log: how far a piece's start
+     * has to move back on this camera. Read from the file's index only (seeks, no frame data); video alone selected.
+     */
+    private fun keyFrames(ex: MediaExtractor, pieces: List<Highlight>): List<Long> {
+        val from = ((pieces.firstOrNull()?.startMs ?: 0L) - 5_000).coerceAtLeast(0) * 1000
+        val to = (pieces.lastOrNull()?.endMs ?: 0L) * 1000
+        val out = mutableListOf<Long>()
+        var t = from
+        while (out.size < 100) {
+            ex.seekTo(t, MediaExtractor.SEEK_TO_NEXT_SYNC)
+            val key = ex.sampleTime
+            if (key < 0 || key > to || (out.isNotEmpty() && key <= out.last() * 1000)) break
+            out += key / 1000
+            t = key + 1
+        }
+        return out
     }
 }

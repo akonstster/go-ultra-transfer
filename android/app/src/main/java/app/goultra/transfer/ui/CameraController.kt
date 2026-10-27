@@ -1869,6 +1869,7 @@ class CameraController(private val app: Application) {
             download = DownloadProgress(name, 1, 1, 0, estimate, 0)
             try {
                 var cut = emptyList<Highlight>()
+                var keys = emptyList<Long>()
                 withContext(Dispatchers.IO) {
                     val job = coroutineContext[Job]
                     val camera = if (local == null) session.clipSource(file) else null
@@ -1879,7 +1880,7 @@ class CameraController(private val app: Application) {
                         ({ ex -> ex.setDataSource(app, uri, null) })
                     }
                     Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
-                        cut = ClipMaker.join(open, pieces, fd) { us ->
+                        cut = ClipMaker.join(open, pieces, fd, onKeyFrames = { keys = it }) { us ->
                             if (job?.isActive == false) throw CancellationException("остановлено")
                             val now = System.currentTimeMillis()
                             if (now - reportedAt >= 250) {
@@ -1898,7 +1899,8 @@ class CameraController(private val app: Application) {
                 log(
                     "клип $name " + (if (local == null) "(с камеры)" else "(с телефона)") +
                         ": отмечено " + pieces.joinToString { "${it.startMs}–${it.endMs}" } +
-                        "; вырезано " + cut.joinToString { "${it.startMs}–${it.endMs}" } + "; итого %.1f с".format(seconds),
+                        "; вырезано " + cut.joinToString { "${it.startMs}–${it.endMs}" } + "; итого %.1f с".format(seconds) +
+                        "; ключевые кадры " + keys.joinToString(),
                 )
                 loadPhoneFiles()
             } catch (e: CancellationException) {
