@@ -49,5 +49,17 @@ class CameraRangeSource(
         return null
     }
 
+    /** [n] bytes at [position] (for parsing the file's index); shorter only at the end of the file. */
+    fun bytes(position: Long, n: Int): ByteArray {
+        val out = ByteArray(n)
+        var done = 0
+        while (done < n) {
+            val got = readAt(position + done, out, done, n - done)
+            if (got <= 0) break
+            done += got
+        }
+        return if (done == n) out else out.copyOf(done)
+    }
+
     override fun close() = blocks.clear()
 }

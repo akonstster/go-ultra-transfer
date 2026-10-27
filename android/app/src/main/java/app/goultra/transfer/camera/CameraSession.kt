@@ -284,6 +284,13 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return CameraRangeSource(cam, file.uri, size, block = 2L * 1024 * 1024, keep = 6, strict = true)
     }
 
+    /** The full-quality file for reading its index ([Mp4Index]): small blocks, only what is asked for travels. */
+    suspend fun indexSource(file: CameraFile): CameraRangeSource {
+        val cam = link
+        val size = Downloader.contentLength(cam, file.uri) ?: file.size ?: error(tr("нет размера файла", "no file size"))
+        return CameraRangeSource(cam, file.uri, size, block = 64L * 1024, keep = 16)
+    }
+
     /** [liveVideo]: the clip of a live photo, saved together with it as one gallery file ([LivePhoto]). */
     suspend fun download(
         file: CameraFile,

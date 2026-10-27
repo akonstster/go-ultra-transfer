@@ -50,6 +50,14 @@ gallery.
   (`ClipMakerTest`). From the camera: `CameraSession.clipSource` → `CameraRangeSource` (2 MB Range blocks, strict:
   a failed block throws instead of ending the clip). Saved by `Downloader.saveClip` as `<stem>_HL.mp4` in
   DCIM/Camera (pending while written, deleted on failure/«Стоп»); runs as a download job (bottom progress, «Стоп»).
+- Key frames in the editor (`camera/Mp4Index.kt`, `KeyFrames`): read from the mp4 index alone (stss/stts/ctts/elst)
+  of the full-quality file — the phone's copy, or the camera's original over Range (not the LRV, its key frames may
+  differ). `MediaExtractor.seekTo` would read a whole key frame per seek — hundreds of MB for a long video from the
+  camera. Times are rounded up to ms so a start set on a key frame never falls before it. The start handle snaps to
+  the nearest key frame (user's choice: nearest — we can't tell how far a mark missed one), «+ Кусок» too; the end
+  is free unless ctts shows B-frames. Ticks over the scale show the key frames. The scale is the piece ± 5 s, so a
+  long video is edited at the same precision as a short one. Unedited camera pieces aren't snapped (the clip still
+  starts on the key frame before them).
 - Unknowns to check on the phone: audio at the piece joins, B-frames (if the GO Ultra uses them), rotation.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /

@@ -89,6 +89,7 @@ import androidx.compose.material3.TextButton
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.KeyFrames
 import app.goultra.transfer.camera.LivePhoto
 import app.goultra.transfer.camera.MediaKind
 
@@ -301,6 +302,10 @@ private fun VideoPreview(
             framesOf = pieces
         }
     }
+    // Key frames of the full-quality file: a piece's start snaps to the nearest one (the clip starts on a key frame),
+    // so the strip shows what the clip will be. Read from the file's index when editing first starts.
+    var keys by remember(file.uri) { mutableStateOf<KeyFrames?>(null) }
+    LaunchedEffect(editing) { if (editing && keys == null) keys = vm.keyFrames(file) }
     /** An edit: the pieces in effect come back; [focusMs] picks the piece to keep selected. */
     fun commit(new: List<Highlight>?, focusMs: Long?) {
         val now = onEdit(new)
@@ -336,11 +341,12 @@ private fun VideoPreview(
             }
             if (editing || pieces.isEmpty()) {
                 PieceEditor(
-                    player, pieces, current, durationMs, edited,
+                    player, pieces, current, durationMs, edited, keys,
                     onChange = { i, piece -> commit(pieces.toMutableList().also { it[i] = piece }, piece.startMs) },
                     onAdd = { at ->
                         // Not on top of another piece: into the free gap there (Highlights.pieceAt).
                         val added = Highlights.pieceAt(pieces, at, durationMs.takeIf { it > 0 })
+                            ?.let { p -> keys?.snapStart(p, pieces) ?: p }
                         if (added == null) {
                             android.widget.Toast.makeText(context, tr("Здесь нет места для куска", "No room for a piece here"), android.widget.Toast.LENGTH_SHORT).show()
                         } else {
@@ -412,6 +418,7 @@ private fun PieceEditor(
     current: Int,
     durationMs: Long,
     edited: Boolean,
+    keys: KeyFrames?,
     onChange: (Int, Highlight) -> Unit,
     onAdd: (Long) -> Unit,
     onDelete: (Int) -> Unit,
@@ -433,13 +440,30 @@ private fun PieceEditor(
                 maxOf(0L, piece.startMs - EDIT_MARGIN_MS).toFloat()..minOf(last, end + EDIT_MARGIN_MS).toFloat()
             }
             val window = minOf(base.start, piece.startMs.toFloat())..maxOf(base.endInclusive, end.toFloat())
+            // Key frames on the scale: where the start can stand.
+            val ticks = remember(keys, window) { keys?.ms.orEmpty().filter { it.toFloat() in window } }
+            if (ticks.isNotEmpty()) KeyFrameTicks(ticks, window)
             RangeSlider(
                 value = range,
                 onValueChange = { r ->
-                    val moved = if (r.start != range.start) r.start else r.endInclusive
-                    range = r
+                    // The start jumps between key frames (the nearest one); the end is free — unless the video has
+                    // B-frames, then it snaps too. Neither crosses the other or the piece before.
+                    val minLen = Highlights.MIN_PIECE_MS
+                    val startMoved = r.start != range.start
+                    val start = if (startMoved && keys != null) {
+                        val lo = pieces.filter { it.endMs!! <= piece.startMs }.maxOfOrNull { it.endMs!! } ?: 0L
+                        keys.nearest(r.start.toLong(), maxOf(lo, window.start.toLong()), r.endInclusive.toLong() - minLen).toFloat()
+                    } else {
+                        r.start
+                    }
+                    val end = if (!startMoved && keys?.bFrames == true) {
+                        keys.nearest(r.endInclusive.toLong(), start.toLong() + minLen, window.endInclusive.toLong()).toFloat()
+                    } else {
+                        r.endInclusive
+                    }
+                    range = start..maxOf(start, end)
                     player.pause()
-                    player.seekTo(moved.toLong())
+                    player.seekTo((if (startMoved) start else end).toLong())
                 },
                 onValueChangeFinished = { onChange(current, Highlight(range.start.toLong(), range.endInclusive.toLong())) },
                 valueRange = window,
@@ -469,6 +493,19 @@ private fun PieceEditor(
             TextButton({ onAdd(player.currentPosition) }) { Text(tr("+ Кусок", "+ Piece"), color = Color.White) }
             if (piece != null) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
             if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
+        }
+    }
+}
+
+/** Thin marks over the piece's scale where the video has key frames (the slider's track is inset by its thumbs). */
+@Composable
+private fun KeyFrameTicks(ticks: List<Long>, window: ClosedFloatingPointRange<Float>) {
+    androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(8.dp).padding(horizontal = 10.dp)) {
+        val span = window.endInclusive - window.start
+        if (span <= 0f) return@Canvas
+        for (t in ticks) {
+            val x = (t - window.start) / span * size.width
+            drawLine(Color(0x99FFFFFF), androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x, size.height), 2f)
         }
     }
 }

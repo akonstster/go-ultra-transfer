@@ -22,6 +22,8 @@ import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.ClipMaker
+import app.goultra.transfer.camera.KeyFrames
+import app.goultra.transfer.camera.Mp4Index
 import app.goultra.transfer.camera.LocalTrailer
 import app.goultra.transfer.camera.RemoteFrames
 import app.goultra.transfer.camera.CameraTcp
@@ -1848,6 +1850,39 @@ class CameraController(private val app: Application) {
 
     fun clipName(file: CameraFile): String = file.stem + "_HL.mp4"
 
+    private val keyFrameCache = mutableMapOf<String, KeyFrames>()
+
+    /**
+     * Key frames of the full-quality video (the one clips are cut from — not the camera's light copy): from the
+     * phone's copy, or the index of the camera's file over Range reads. Null when they couldn't be read.
+     */
+    suspend fun keyFrames(file: CameraFile): KeyFrames? {
+        keyFrameCache[file.name]?.let { return it }
+        val keys = withContext(Dispatchers.IO) {
+            runCatching {
+                val local = file.localUri
+                if (local != null) {
+                    app.contentResolver.openFileDescriptor(android.net.Uri.parse(local), "r")?.use { pfd ->
+                        java.io.FileInputStream(pfd.fileDescriptor).channel.use { ch ->
+                            Mp4Index.keyFrames(ch.size()) { at, n ->
+                                val buf = java.nio.ByteBuffer.allocate(n)
+                                while (buf.hasRemaining() && ch.read(buf, at + buf.position()) > 0) Unit
+                                buf.array()
+                            }
+                        }
+                    }
+                } else if (conn == ConnState.Connected) {
+                    val src = session.indexSource(file)
+                    Mp4Index.keyFrames(src.getSize()) { at, n -> src.bytes(at, n) }.also { log("индекс ${file.name}: прочитано ${src.fetched / 1024} КБ") }
+                } else {
+                    null
+                }
+            }.onFailure { log("ключевые кадры ${file.name}: ${it.message}") }.getOrNull()
+        } ?: return null
+        keyFrameCache[file.name] = keys
+        return keys
+    }
+
     /**
      * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
      * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
@@ -1869,7 +1904,6 @@ class CameraController(private val app: Application) {
             download = DownloadProgress(name, 1, 1, 0, estimate, 0)
             try {
                 var cut = emptyList<Highlight>()
-                var keys = emptyList<Long>()
                 withContext(Dispatchers.IO) {
                     val job = coroutineContext[Job]
                     val camera = if (local == null) session.clipSource(file) else null
@@ -1880,7 +1914,7 @@ class CameraController(private val app: Application) {
                         ({ ex -> ex.setDataSource(app, uri, null) })
                     }
                     Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
-                        cut = ClipMaker.join(open, pieces, fd, onKeyFrames = { keys = it }) { us ->
+                        cut = ClipMaker.join(open, pieces, fd) { us ->
                             if (job?.isActive == false) throw CancellationException("остановлено")
                             val now = System.currentTimeMillis()
                             if (now - reportedAt >= 250) {
@@ -1900,7 +1934,8 @@ class CameraController(private val app: Application) {
                     "клип $name " + (if (local == null) "(с камеры)" else "(с телефона)") +
                         ": отмечено " + pieces.joinToString { "${it.startMs}–${it.endMs}" } +
                         "; вырезано " + cut.joinToString { "${it.startMs}–${it.endMs}" } + "; итого %.1f с".format(seconds) +
-                        "; ключевые кадры " + keys.joinToString(),
+                        "; ключевые кадры " + keyFrames(file)?.ms.orEmpty()
+                            .filter { k -> pieces.any { k >= it.startMs - 5_000 && k <= it.endMs!! } }.joinToString(),
                 )
                 loadPhoneFiles()
             } catch (e: CancellationException) {
