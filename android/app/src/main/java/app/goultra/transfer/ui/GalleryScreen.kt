@@ -200,6 +200,11 @@ fun GalleryScreen(
                 when {
                     vm.tab == Tab.CAMERA -> CameraTab(vm, onConnect, onRecord)
                     vm.conn == ConnState.Connected -> FileGrid(vm)
+                    // No camera: what is already on the phone, with the way to connect above it.
+                    vm.phoneFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
+                        ConnectBar(vm.conn, onConnect)
+                        FileGrid(vm)
+                    }
                     else -> ConnectPanel(vm.conn, onConnect, onRecord)
                 }
             }
@@ -274,12 +279,51 @@ private fun ConnectPanel(state: ConnState, onConnect: () -> Unit, onRecord: () -
     }
 }
 
+/** Above the phone's files while the camera isn't connected: the link state and «Подключиться». */
+@Composable
+private fun ConnectBar(state: ConnState, onConnect: () -> Unit) {
+    Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    when (state) {
+                        is ConnState.Working -> state.step
+                        ConnState.Remote -> tr("Подключено только по Bluetooth", "Connected over Bluetooth only")
+                        else -> tr("Камера не подключена", "Camera not connected")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    if (state is ConnState.Failed) state.message else tr("Показаны файлы на телефоне", "Showing the files on the phone"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state is ConnState.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (state is ConnState.Working) {
+                CircularProgressIndicator(Modifier.padding(end = 8.dp).size(22.dp), strokeWidth = 2.dp)
+            } else {
+                TextButton(onConnect) { Text(if (state == ConnState.Remote) tr("Подключиться по Wi-Fi", "Connect over Wi-Fi") else tr("Подключиться", "Connect")) }
+            }
+        }
+    }
+}
+
 @Composable
 private fun FileGrid(vm: CameraController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    /** Downloaded: the phone's own player / gallery; still on the camera (or no app for it): the in-app viewer. */
+    /**
+     * Downloaded: the phone's own player / gallery; still on the camera (or no app for it): the in-app viewer.
+     * Without the camera, videos open from the phone in the in-app viewer (marks and film strip read from the file).
+     */
     fun open(file: CameraFile) {
+        if (file.isOnPhone && file.kind == MediaKind.VIDEO) {
+            vm.view(file)
+            return
+        }
         // A live photo opens in our viewer while the camera is there: its clip plays and the cover is chosen there.
         if (vm.liveClipOf(file) != null && vm.conn == ConnState.Connected) {
             vm.view(file)
@@ -329,11 +373,13 @@ private fun FileGrid(vm: CameraController) {
                     FileTile(
                         file = file,
                         selected = file.name in vm.selected,
-                        downloaded = file.name in vm.downloaded,
+                        // On the phone list everything is downloaded: no mark needed.
+                        downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         loadThumbnail = vm::thumbnail,
-                        // Tap opens; long press starts selecting, then taps add / remove (like a gallery).
+                        // Tap opens; long press starts selecting, then taps add / remove (like a gallery). Nothing to
+                        // select on the phone list (download and delete are about the camera's card).
                         onClick = { if (vm.selected.isEmpty()) open(file) else vm.toggle(file) },
-                        onLongClick = { vm.toggle(file) },
+                        onLongClick = { if (!file.isOnPhone) vm.toggle(file) },
                     )
                 }
             }

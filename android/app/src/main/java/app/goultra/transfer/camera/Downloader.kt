@@ -52,6 +52,50 @@ object Downloader {
     }
 
     /**
+     * Files this app saved to the gallery, as list items for the Files tab without the camera (newest first).
+     * Date from the name like on the camera, else DATE_TAKEN; duration from MediaStore (videos only).
+     */
+    fun phoneFiles(context: Context): List<CameraFile> {
+        val out = mutableListOf<CameraFile>()
+        for (video in listOf(false, true)) {
+            val collection = collection(video)
+            context.contentResolver.query(
+                collection,
+                arrayOf(
+                    MediaStore.MediaColumns._ID,
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.SIZE,
+                    MediaStore.MediaColumns.DATE_TAKEN,
+                    MediaStore.MediaColumns.WIDTH,
+                    MediaStore.MediaColumns.HEIGHT,
+                    MediaStore.MediaColumns.DURATION,
+                ),
+                OUR_FOLDERS,
+                null,
+                null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    val taken = if (c.isNull(3)) null else c.getLong(3)
+                    out += CameraFile(
+                        uri = "/phone/$name",
+                        size = if (c.isNull(2)) null else c.getLong(2),
+                        durationSec = if (c.isNull(6)) null else ((c.getLong(6) + 500) / 1000).toInt(),
+                        width = if (c.isNull(4)) null else c.getInt(4),
+                        height = if (c.isNull(5)) null else c.getInt(5),
+                        fps = null,
+                        created = CameraFile.createdFromName(name) ?: taken?.let {
+                            java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
+                        },
+                        localUri = ContentUris.withAppendedId(collection, c.getLong(0)).toString(),
+                    )
+                }
+            }
+        }
+        return out.sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+    }
+
+    /**
      * One-time cleanup after versions that saved to Pictures|Movies/GO Ultra and created "name (1).jpg" duplicates:
      * duplicates are deleted, originals move to DCIM/Camera. Only our own items are visible here.
      */

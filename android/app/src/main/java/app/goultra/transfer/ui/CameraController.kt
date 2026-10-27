@@ -20,6 +20,9 @@ import app.goultra.transfer.camera.CameraInfo
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
+import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.LocalTrailer
+import app.goultra.transfer.camera.RemoteFrames
 import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
@@ -87,6 +90,13 @@ class CameraController(private val app: Application) {
     var files by mutableStateOf<List<CameraFile>>(emptyList())
         private set
     var filter by mutableStateOf(Filter.ALL)
+
+    /** Downloaded files in the phone's gallery: the Files tab shows them while the camera isn't connected. */
+    var phoneFiles by mutableStateOf<List<CameraFile>>(emptyList())
+        private set
+
+    /** The Files tab lists the phone's copies (no camera), not the camera's card. */
+    val showsPhone: Boolean get() = conn != ConnState.Connected
     var downloaded by mutableStateOf<Set<String>>(emptySet())
         private set
     var download by mutableStateOf<DownloadProgress?>(null)
@@ -262,6 +272,16 @@ class CameraController(private val app: Application) {
             if (confFile.exists()) runCatching { CameraConf(confFile.readText()) }.getOrNull()?.let { conf = it }
         }
         scope.launch {
+            // Without the camera the Files tab lists the phone's copies: re-read on start, after a disconnect and
+            // when the app comes back (files may have been deleted in the gallery meanwhile).
+            // A camera file left open in the viewer can't play any more: close it.
+            snapshotFlow { showsPhone && uiShown }.collect {
+                if (!it) return@collect
+                if (viewing?.isOnPhone == false) viewing = null
+                loadPhoneFiles()
+            }
+        }
+        scope.launch {
             // Camera tab opened (or the link came up while it is open): read the current settings.
             snapshotFlow { Triple(tab, conn, uiShown) }.collect { (t, c, shown) ->
                 if (t == Tab.CAMERA && shown && (c == ConnState.Connected || c == ConnState.Remote)) refreshSettings()
@@ -422,9 +442,10 @@ class CameraController(private val app: Application) {
         memCache.put(file.name, small.asImageBitmap())
     }
 
-    /** The file list without live-photo clips (they belong to their photo's tile). */
+    /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
     val listedFiles: List<CameraFile>
         get() {
+            if (showsPhone) return phoneFiles
             val paired = liveClips.values.map { it.name }.toSet()
             return files.filter { it.name !in paired }
         }
@@ -570,6 +591,16 @@ class CameraController(private val app: Application) {
             debugSnapshot()
         } else if (conn == ConnState.Connected) {
             scope.launch { loadFiles() }
+        } else {
+            loadPhoneFiles()
+        }
+    }
+
+    private fun loadPhoneFiles() {
+        scope.launch {
+            phoneFiles = withContext(Dispatchers.IO) {
+                runCatching { Downloader.phoneFiles(app) }.onFailure { log("файлы на телефоне: ${it.message}") }.getOrNull()
+            } ?: return@launch
         }
     }
 
@@ -1591,16 +1622,16 @@ class CameraController(private val app: Application) {
 
     // ---------- viewing ----------
 
-    /** File shown in the in-app viewer (not downloaded yet); the link is kept alive while it is open. */
+    /** File shown in the in-app viewer: still on the camera (the link is kept alive while it is open) or a phone copy. */
     var viewing by mutableStateOf<CameraFile?>(null)
 
     /** Gallery item of a downloaded file, to open it in the phone's own player / gallery. */
     suspend fun galleryUri(file: CameraFile): android.net.Uri? =
-        if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
+        if (file.localUri != null) android.net.Uri.parse(file.localUri) else if (file.name !in downloaded) null else withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
 
     fun view(file: CameraFile) {
         touch()
-        if (conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
+        if (file.isOnPhone || conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
     }
 
     /** Player data source for the in-app viewer, or null without the camera Wi-Fi. */
@@ -1611,15 +1642,33 @@ class CameraController(private val app: Application) {
 
     /** Film strip frames: one per piece (its middle), small; null where a frame couldn't be read. */
     suspend fun pieceFrames(file: CameraFile, pieces: List<Highlight>): List<ImageBitmap?> {
-        if (conn != ConnState.Connected || pieces.isEmpty()) return pieces.map { null }
         val times = pieces.map { (it.startMs + (it.endMs ?: it.startMs)) / 2 }
+        file.localUri?.let { uri ->
+            return withContext(Dispatchers.IO) {
+                RemoteFrames.local(app, android.net.Uri.parse(uri), times, 320).map { it?.asImageBitmap() }
+            }
+        }
+        if (conn != ConnState.Connected || pieces.isEmpty()) return pieces.map { null }
         return runCatching { session.frames(file, times, 320) }.getOrElse { times.map { null } }.map { it?.asImageBitmap() }
     }
 
     /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
     suspend fun highlights(file: CameraFile): List<Highlight> {
-        if (conn != ConnState.Connected) return emptyList()
-        return runCatching { session.highlights(file) }.getOrNull().orEmpty()
+        val marks = if (file.localUri != null) {
+            // A downloaded copy keeps the camera's trailer: the same record, read from the end of the file.
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    LocalTrailer.read(app, android.net.Uri.parse(file.localUri))?.let { t ->
+                        t.highlight?.let { Highlights.parse(it, t.firstFrameUs, file.durationSec?.let { s -> (s + 1) * 1000L }) }
+                    }
+                }.onFailure { log("отметки ${file.name} с телефона: ${it.message}") }.getOrNull()
+            }
+        } else if (conn == ConnState.Connected) {
+            runCatching { session.highlights(file) }.getOrNull()
+        } else {
+            null
+        }
+        return marks.orEmpty()
             .also { if (debuggable) log("отметки ${file.name}: ${it.joinToString { h -> "${h.startMs}" + (h.endMs?.let { e -> "–$e" } ?: "") }}") }
     }
 
@@ -1684,7 +1733,12 @@ class CameraController(private val app: Application) {
         val bitmap = withContext(Dispatchers.IO) {
             cached.takeIf { it.exists() }?.let { f ->
                 BitmapFactory.decodeFile(f.path) ?: null.also { f.delete() } // corrupt cache entry: refetch
-            } ?: if (conn == ConnState.Connected) {
+            } ?: if (file.localUri != null) {
+                // A phone copy whose camera thumbnail was never cached: the gallery's own (cached by MediaStore).
+                runCatching { app.contentResolver.loadThumbnail(android.net.Uri.parse(file.localUri), android.util.Size(320, 320), null) }
+                    .onFailure { log("миниатюра ${file.name} с телефона: ${it.message}") }
+                    .getOrNull()
+            } else if (conn == ConnState.Connected) {
                 thumbPermits.withPermit {
                     runCatching { session.thumbnail(file) }
                         .onFailure { log("thumbnail ${file.name}: ${it.message}") }

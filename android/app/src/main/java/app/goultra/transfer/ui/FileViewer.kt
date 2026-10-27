@@ -87,6 +87,7 @@ import app.goultra.transfer.camera.MediaKind
 /**
  * Quick look at a file that is still on the camera: video plays its low-res LRV copy (or the file itself if there is
  * none) in the built-in player, photos open full size with pinch zoom. «Скачать» takes just this file.
+ * A video already on the phone ([CameraFile.isOnPhone]) plays from there, full quality, marks read from the file.
  */
 @Composable
 fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
@@ -134,7 +135,9 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
                 Column(Modifier.weight(1f)) {
                     Text(file.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        if (file.kind == MediaKind.VIDEO && vm.previewUrl(file).endsWith(".lrv")) {
+                        if (file.isOnPhone) {
+                            tr("на телефоне", "on the phone")
+                        } else if (file.kind == MediaKind.VIDEO && vm.previewUrl(file).endsWith(".lrv")) {
                             tr("с камеры · низкое качество", "from the camera · low quality")
                         } else {
                             tr("с камеры", "from the camera")
@@ -144,7 +147,7 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
                     )
                 }
                 Spacer(Modifier.width(8.dp))
-                if (file.name !in vm.downloaded) {
+                if (!file.isOnPhone && file.name !in vm.downloaded) {
                     Button({ vm.downloadOne(file); onClose() }, enabled = !vm.isDownloading) { Text(tr("Скачать", "Download")) }
                 }
             }
@@ -156,14 +159,18 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
 @Composable
 private fun VideoPreview(vm: CameraController, file: CameraFile) {
     val context = LocalContext.current
-    val source = remember { vm.previewSource() }
-    if (source == null) {
+    val source = remember { if (file.isOnPhone) null else vm.previewSource() }
+    if (source == null && !file.isOnPhone) {
         Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White, modifier = Modifier.padding(24.dp))
         return
     }
     val player = remember(file.uri) {
         ExoPlayer.Builder(context).build().apply {
-            setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(file))))
+            if (source == null) {
+                setMediaItem(MediaItem.fromUri(file.localUri!!)) // the phone's copy: the default (content://) source
+            } else {
+                setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(file))))
+            }
             playWhenReady = true
             prepare()
         }
@@ -195,7 +202,7 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
             delay(40)
         }
     }
-    // Frames for the strip: read once, when the strip is first opened (Range reads of the light copy).
+    // Frames for the strip: read once, when the strip is first opened (Range reads of the light copy, or the phone's file).
     var frames by remember(file.uri) { mutableStateOf<List<ImageBitmap?>>(emptyList()) }
     LaunchedEffect(film, pieces) {
         if (film && frames.size != pieces.size) frames = vm.pieceFrames(file, pieces)
