@@ -274,7 +274,7 @@ Layout: blocks `[type u8][count u32 LE][values u64 LE, µs]`. No marks → eight
 | Type | Meaning | Values |
 |---|---|---|
 | 1 | marked while recording (app or camera button) | one u64 per mark |
-| 2 | added in the camera's playback | two u64 per mark (start, end) |
+| 2 | added in the camera's playback | two u64 per mark (start, end) — a 2 s segment starting just before the chosen point |
 
 Values are on the camera clock: seconds from the start = (value − metadata field 24 `first_frame_timestamp`) / 10⁶.
 A value **smaller** than `first_frame_timestamp` is already relative (seen as exactly 1 320 000 = 1.32 s). The camera

@@ -84,7 +84,9 @@ Suggested design (agree with the user first — they review UI decisions; see th
   timer → 4.36 s and 10.12 s in the file (our timer starts ~0.6 s before the first frame). No `1320000` this time —
   that value appeared only in three earlier recordings (098/099/119), origin unknown (possibly marks sent over BLE in
   an older build); just treat values < first_frame as relative.
-- Whether type 2 really is (start, end) — only one sample. Ask the user to add a second playback mark and read again.
+- **Answered (27.10, test video 122, 10 s):** type 2 is (start, end). Two marks added in the camera's playback at
+  ~3 s and ~7 s → `02 02 00 00 00` + 4 × u64 → 2.68–4.68 s and 6.93–8.93 s: each playback mark is a **2-second
+  segment** starting slightly before the chosen point. Metadata got 87 = 1, 90 = 1 again.
 
 ## How to build / test
 
