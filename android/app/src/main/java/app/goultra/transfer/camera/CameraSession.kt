@@ -319,10 +319,13 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     suspend fun stopRecording(): Boolean = ble.request(Proto.CMD_STOP_CAPTURE, timeoutMs = 8_000)?.code == 200
 
-    suspend fun captureStatus(): CaptureStatus? =
-        ble.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, timeoutMs = 3_000, quiet = true)
-            ?.takeIf { it.code == 200 }
-            ?.let { CaptureStatus.parse(it.body) }
+    /** Over Wi-Fi when it is there (BLE replies can get lost while the live view runs), else over BLE. */
+    suspend fun captureStatus(): CaptureStatus? {
+        val t = tcp
+        val r = if (t != null) t.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, ByteArray(0), 3_000)
+        else ble.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, timeoutMs = 3_000, quiet = true)
+        return r?.takeIf { it.code == 200 }?.let { CaptureStatus.parse(it.body) }
+    }
 
     /** TimeShift recording: normal speed now? (PhotographyOptions 37 of its function mode). */
     suspend fun timeShiftNormal(): Boolean? {
@@ -535,6 +538,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
      */
     suspend fun markHighlight(recordingMs: Long): Boolean =
         recordingCommand(Proto.CMD_SET_KEY_TIME_POINT, PbWriter().varint(1, recordingMs).toByteArray())
+            .also { log("отметка на ${recordingMs / 1000} с: ${if (it) "поставлена" else "не принята"}") }
 
     private suspend fun recordingCommand(code: Int, body: ByteArray = ByteArray(0)): Boolean {
         val r = send(code, body, timeoutMs = 5_000)

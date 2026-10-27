@@ -281,14 +281,6 @@ class CameraController(private val app: Application) {
             }
         }
         scope.launch {
-            // The batteries change slowly and the camera doesn't always say so: re-read once a minute while they are
-            // on screen (the camera tab).
-            while (true) {
-                delay(60_000)
-                if (tab == Tab.CAMERA && uiShown && isLinked && settingBusy == null) refreshSettings()
-            }
-        }
-        scope.launch {
             // Connections are made from the visible app, so the foreground service may start here.
             snapshotFlow { isLinked }.collect { if (it) CameraService.start(app) }
         }
