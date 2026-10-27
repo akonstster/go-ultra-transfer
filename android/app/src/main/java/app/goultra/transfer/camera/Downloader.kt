@@ -242,6 +242,42 @@ object Downloader {
         item
     }
 
+    /**
+     * A clip made on the phone ([ClipMaker]) saved as [name] in DCIM/Camera: a pending item while [write] fills it,
+     * removed if that fails or is stopped. A clip of the same name is overwritten in place.
+     */
+    fun saveClip(context: Context, name: String, takenAtMillis: Long?, write: (java.io.FileDescriptor) -> Unit): Uri {
+        val resolver = context.contentResolver
+        val collection = collection(video = true)
+        val pending = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) }
+        val item = findExisting(resolver, collection, name)?.uri?.also { resolver.update(it, pending, null, null) }
+            ?: resolver.insert(
+                collection,
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, TARGET)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                },
+            ) ?: error("MediaStore insert failed")
+        try {
+            resolver.openFileDescriptor(item, "rwt")!!.use { write(it.fileDescriptor) }
+        } catch (e: Throwable) {
+            runCatching { resolver.delete(item, null, null) }
+            throw e
+        }
+        resolver.update(
+            item,
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+                takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+            },
+            null,
+            null,
+        )
+        return item
+    }
+
     /** Truncates the item to [at] and writes [bytes] there (live photo: its photo part). */
     private fun writeAt(resolver: ContentResolver, item: Uri, at: Long, bytes: ByteArray) {
         resolver.openFileDescriptor(item, "rw")!!.use { pfd ->

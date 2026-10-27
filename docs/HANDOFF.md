@@ -34,8 +34,20 @@ gallery.
 (`CameraController.withPhoneCopy`: the camera item plus `localUri`); its marks still come from the camera first
 (they may have been edited there after the download), the phone's trailer is the fallback.
 
-Next: step 3 — piece editing and
-«marked pieces only» download (one clip joined on key frames, only the needed bytes from the camera).
+**Step 3 (written together with step 2, not yet tested on a phone):**
+- Editing in the film strip (`ui/FileViewer.kt` → `PieceEditor`): «Править куски» → the selected piece as a
+  RangeSlider (the piece ± 5 s, re-centred after each drag, the picture follows the handle), «+ Кусок здесь» (2 s at
+  the player position), «Удалить», «Как на камере». The flag chip is shown for every video (pieces can be added to an
+  unmarked one). Edits: SharedPreferences `pieces`, key = file name, `start-end,…` ms, "" = all removed
+  (`Highlights.encode/decode/normalize`); the camera file and its phone copy share them.
+- «Скачать» on a video with pieces → «Целиком» / «Только отмеченное». A downloaded one gets «Клип» instead.
+- `camera/ClipMaker.kt`: MediaExtractor → MediaMuxer, no re-encoding; each piece from the key frame at/before its
+  start to the first key frame at/after its end; pieces meeting after that join without repeated frames; video +
+  first audio track only. `cut()` is pure (a `Samples` interface) and unit-tested on a made-up 30 fps file
+  (`ClipMakerTest`). From the camera: `CameraSession.clipSource` → `CameraRangeSource` (2 MB Range blocks, strict:
+  a failed block throws instead of ending the clip). Saved by `Downloader.saveClip` as `<stem>_HL.mp4` in
+  DCIM/Camera (pending while written, deleted on failure/«Стоп»); runs as a download job (bottom progress, «Стоп»).
+- Unknowns to check on the phone: audio at the piece joins, B-frames (if the GO Ultra uses them), rotation.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.

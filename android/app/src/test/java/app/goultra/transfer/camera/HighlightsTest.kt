@@ -57,4 +57,17 @@ class HighlightsTest {
     fun truncatedRecordKeepsWhatParsed() {
         assertEquals(listOf(Highlight(1320)), Highlights.parse(bytes("01 01 00 00 00 40 24 14 00 00 00 00 00 02 05 00 00 00 01"), null))
     }
+
+    @Test
+    fun editedPiecesAreTidied() {
+        val edited = listOf(Highlight(5000, 7000), Highlight(-200, 900), Highlight(6500, 8000), Highlight(9000, 9100))
+        assertEquals(listOf(Highlight(0, 900), Highlight(5000, 8000)), Highlights.normalize(edited, 9_500))
+    }
+
+    @Test
+    fun editsSurviveStorage() {
+        val pieces = listOf(Highlight(0, 900), Highlight(5000, 8000))
+        assertEquals(pieces, Highlights.decode(Highlights.encode(pieces)))
+        assertEquals(emptyList<Highlight>(), Highlights.decode(Highlights.encode(emptyList())))
+    }
 }

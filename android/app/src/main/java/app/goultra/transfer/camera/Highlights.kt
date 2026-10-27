@@ -56,4 +56,22 @@ object Highlights {
             }
         return out
     }
+
+    /** Shortest piece kept after an edit (a handle dragged onto the other one). */
+    const val MIN_PIECE_MS = 300L
+
+    /** Edited pieces made tidy: inside the video, in order, overlapping ones merged, slivers dropped. */
+    fun normalize(pieces: List<Highlight>, durationMs: Long? = null): List<Highlight> =
+        this.pieces(pieces.map { p -> Highlight(maxOf(0, p.startMs), p.endMs ?: (p.startMs + AROUND_MS)) }, durationMs)
+            .filter { it.endMs!! - it.startMs >= MIN_PIECE_MS }
+
+    /** Pieces as text for the phone's storage: `start-end,start-end` (ms); "" = all removed. */
+    fun encode(pieces: List<Highlight>): String = pieces.joinToString(",") { "${it.startMs}-${it.endMs}" }
+
+    fun decode(text: String): List<Highlight> = text.split(',').mapNotNull { part ->
+        val (a, b) = part.split('-').takeIf { it.size == 2 } ?: return@mapNotNull null
+        val start = a.toLongOrNull() ?: return@mapNotNull null
+        val end = b.toLongOrNull() ?: return@mapNotNull null
+        Highlight(start, end)
+    }
 }

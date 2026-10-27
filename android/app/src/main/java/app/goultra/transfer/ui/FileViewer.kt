@@ -78,6 +78,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RangeSlider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.TextButton
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
@@ -98,8 +106,24 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             val clip = vm.liveClipOf(file)
             var playing by remember(file.uri) { mutableStateOf(false) }
+            // Video: the pieces to play, show in the film strip and download — the camera's marks as its film strip
+            // shows them (2 s pieces, nearby ones merged), or the pieces as edited on the phone.
+            val isVideo = file.kind == MediaKind.VIDEO
+            val limitMs = file.durationSec?.let { (it + 1) * 1000L }
+            val marks by produceState(emptyList<Highlight>(), file.uri, file.localUri) { if (isVideo) value = vm.highlights(file) }
+            val cameraPieces = remember(marks) { Highlights.pieces(marks, limitMs) }
+            var edited by remember(file.name) { mutableStateOf(vm.editedPieces(file)) }
+            val pieces = edited ?: cameraPieces
+            /** Saves an edit (null: back to the camera's marks); returns the pieces now in effect. */
+            fun edit(new: List<Highlight>?): List<Highlight> {
+                val tidy = new?.let { Highlights.normalize(it, limitMs) }
+                edited = tidy
+                vm.savePieces(file, tidy)
+                return tidy ?: cameraPieces
+            }
+            var choose by remember(file.uri) { mutableStateOf(false) }
             when {
-                file.kind == MediaKind.VIDEO -> VideoPreview(vm, file)
+                isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit)
                 clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
                 else -> PhotoPreview(vm, file)
             }
@@ -148,16 +172,75 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
                 }
                 Spacer(Modifier.width(8.dp))
                 if (!file.isOnPhone && file.name !in vm.downloaded) {
-                    Button({ vm.downloadOne(file); onClose() }, enabled = !vm.isDownloading) { Text(tr("Скачать", "Download")) }
+                    // With pieces marked: the whole video or one clip of the pieces.
+                    Button(
+                        { if (isVideo && pieces.isNotEmpty()) choose = true else { vm.downloadOne(file); onClose() } },
+                        enabled = !vm.isDownloading,
+                    ) { Text(tr("Скачать", "Download")) }
+                } else if (isVideo && pieces.isNotEmpty()) {
+                    // Already on the phone: a clip of the pieces, made from the phone's copy.
+                    Button({ vm.saveClip(file, pieces); onClose() }, enabled = !vm.isDownloading) {
+                        Icon(Icons.Filled.ContentCut, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(tr("Клип", "Clip"))
+                    }
                 }
+            }
+            if (choose) {
+                DownloadChoice(
+                    file, pieces, vm.clipName(file),
+                    onWhole = { choose = false; vm.downloadOne(file); onClose() },
+                    onPieces = { choose = false; vm.saveClip(file, pieces); onClose() },
+                    onDismiss = { choose = false },
+                )
             }
         }
     }
 }
 
+/** «Скачать» for a video with marked pieces: the whole file, or one clip of just the pieces. */
+@Composable
+private fun DownloadChoice(
+    file: CameraFile,
+    pieces: List<Highlight>,
+    clipName: String,
+    onWhole: () -> Unit,
+    onPieces: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val piecesMs = pieces.sumOf { it.endMs!! - it.startMs }
+    val clipBytes = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * piecesMs / (it * 1000L) } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("Скачать видео", "Download the video")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(tr("Целиком", "Whole video") + (file.size?.let { " — ${formatSize(it)}" } ?: ""))
+                Text(
+                    tr("Только отмеченное", "Marked pieces only") + " — ${pieces.size} · " + "%.1f ".format(piecesMs / 1000.0) +
+                        tr("с", "s") + (clipBytes?.let { ", ~${formatSize(it)}" } ?: "") + "\n" +
+                        tr(
+                            "Одним клипом $clipName. Куски режутся по ключевым кадрам (бывают чуть длиннее), с камеры читаются только они.",
+                            "One clip, $clipName. Pieces are cut on key frames (may come out a bit longer); only they are read from the camera.",
+                        ),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = { TextButton(onPieces) { Text(tr("Только отмеченное", "Marked only")) } },
+        dismissButton = { TextButton(onWhole) { Text(tr("Целиком", "Whole")) } },
+    )
+}
+
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoPreview(vm: CameraController, file: CameraFile) {
+private fun VideoPreview(
+    vm: CameraController,
+    file: CameraFile,
+    pieces: List<Highlight>,
+    edited: Boolean,
+    onEdit: (List<Highlight>?) -> List<Highlight>,
+) {
     val context = LocalContext.current
     val source = remember { if (file.isOnPhone) null else vm.previewSource() }
     if (source == null && !file.isOnPhone) {
@@ -176,15 +259,21 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
         }
     }
     DisposableEffect(player) { onDispose { player.release() } }
-    // Highlight marks from the camera, as its film strip shows them: 2 s pieces, nearby ones merged. Ticks on the seek
-    // bar; the flag switches to the film strip — only the pieces play, the rest is skipped.
-    val marks by produceState(emptyList<Highlight>(), file.uri) { value = vm.highlights(file) }
-    val pieces = remember(marks) { Highlights.pieces(marks, file.durationSec?.let { (it + 1) * 1000L }) }
+    var durationMs by remember(file.uri) { mutableLongStateOf(file.durationSec?.let { it * 1000L } ?: 0L) }
+    LaunchedEffect(player) {
+        while (true) {
+            if (player.duration > 0) durationMs = player.duration
+            delay(500)
+        }
+    }
+    // Ticks on the seek bar at the pieces; the flag switches to the film strip — only the pieces play, the rest is
+    // skipped. In the strip the pieces can be edited (kept on the phone): then playback is free, for finding spots.
     var film by remember(file.uri) { mutableStateOf(false) }
+    var editing by remember(file.uri) { mutableStateOf(false) }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
-    LaunchedEffect(player, film, pieces) {
+    LaunchedEffect(player, film, editing, pieces) {
+        if (!film || editing || pieces.isEmpty()) return@LaunchedEffect
         current = -1
-        if (!film || pieces.isEmpty()) return@LaunchedEffect
         player.seekTo(pieces[0].startMs)
         player.play()
         while (true) {
@@ -202,10 +291,20 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
             delay(40)
         }
     }
-    // Frames for the strip: read once, when the strip is first opened (Range reads of the light copy, or the phone's file).
+    // Frames for the strip: read when the strip is open and the pieces change (Range reads of the light copy, or the
+    // phone's file).
     var frames by remember(file.uri) { mutableStateOf<List<ImageBitmap?>>(emptyList()) }
+    var framesOf by remember(file.uri) { mutableStateOf<List<Highlight>?>(null) }
     LaunchedEffect(film, pieces) {
-        if (film && frames.size != pieces.size) frames = vm.pieceFrames(file, pieces)
+        if (film && framesOf != pieces) {
+            frames = vm.pieceFrames(file, pieces)
+            framesOf = pieces
+        }
+    }
+    /** An edit: the pieces in effect come back; [focusMs] picks the piece to keep selected. */
+    fun commit(new: List<Highlight>?, focusMs: Long?) {
+        val now = onEdit(new)
+        current = focusMs?.let { f -> now.indexOfFirst { f in it.startMs..it.endMs!! } } ?: -1
     }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -214,22 +313,51 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
                 update = { view -> view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size)) },
                 modifier = Modifier.fillMaxSize(),
             )
-            if (pieces.isNotEmpty()) {
-                FilterChip(
-                    selected = film,
-                    onClick = { film = !film },
-                    label = { Text(if (film) tr("Отмеченное", "Highlights only") else "${pieces.size}") },
-                    leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        containerColor = Color(0x99000000), labelColor = Color.White,
-                        selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
-                    ),
-                    modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
-                )
-            }
+            // Shown without marks too: pieces can be added by hand in the strip.
+            FilterChip(
+                selected = film,
+                onClick = { film = !film; if (!film) editing = false },
+                label = { Text(if (film) tr("Отмеченное", "Highlights only") else "${pieces.size}") },
+                leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Color(0x99000000), labelColor = Color.White,
+                    selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
+                ),
+                modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
+            )
         }
-        if (film && pieces.isNotEmpty()) {
-            FilmStrip(pieces, frames, current) { i -> player.seekTo(pieces[i].startMs); player.play() }
+        if (film) {
+            if (pieces.isNotEmpty()) {
+                FilmStrip(pieces, frames, current) { i ->
+                    current = i
+                    player.seekTo(pieces[i].startMs)
+                    if (!editing) player.play()
+                }
+            }
+            if (editing || pieces.isEmpty()) {
+                PieceEditor(
+                    player, pieces, current, durationMs, edited,
+                    onChange = { i, piece -> commit(pieces.toMutableList().also { it[i] = piece }, piece.startMs) },
+                    onAdd = { at ->
+                        val end = if (durationMs > 0) minOf(durationMs, at + Highlights.AROUND_MS) else at + Highlights.AROUND_MS
+                        commit(pieces + Highlight(maxOf(0, at - Highlights.AROUND_MS), end), at)
+                    },
+                    onDelete = { i -> commit(pieces.filterIndexed { j, _ -> j != i }, null) },
+                    onReset = { commit(null, null) },
+                    onDone = { editing = false },
+                )
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton({ editing = true; player.pause() }) {
+                        Icon(Icons.Filled.Edit, null, Modifier.size(18.dp), tint = MARK_COLOR)
+                        Spacer(Modifier.width(6.dp))
+                        Text(tr("Править куски", "Edit pieces"), color = MARK_COLOR)
+                    }
+                }
+            }
         }
     }
 }
@@ -265,6 +393,82 @@ private fun FilmStrip(pieces: List<Highlight>, frames: List<ImageBitmap?>, curre
         }
     }
 }
+
+/**
+ * Editing the pieces under the film strip: the selected piece's start and end as two handles (the slider spans the
+ * piece and [EDIT_MARGIN_MS] either side, re-centred after each drag; the picture follows the handle), a new 2 s piece
+ * where the video stands, deleting the selected one, and going back to the camera's marks.
+ */
+@kotlin.OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PieceEditor(
+    player: ExoPlayer,
+    pieces: List<Highlight>,
+    current: Int,
+    durationMs: Long,
+    edited: Boolean,
+    onChange: (Int, Highlight) -> Unit,
+    onAdd: (Long) -> Unit,
+    onDelete: (Int) -> Unit,
+    onReset: () -> Unit,
+    onDone: () -> Unit,
+) {
+    val piece = pieces.getOrNull(current)
+    Column(
+        Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+        if (piece != null) {
+            val end = piece.endMs!!
+            val window = remember(piece, durationMs) {
+                val last = if (durationMs > 0) durationMs else end + EDIT_MARGIN_MS
+                maxOf(0L, piece.startMs - EDIT_MARGIN_MS).toFloat()..minOf(last, end + EDIT_MARGIN_MS).toFloat()
+            }
+            var range by remember(piece) { mutableStateOf(piece.startMs.toFloat()..end.toFloat()) }
+            RangeSlider(
+                value = range,
+                onValueChange = { r ->
+                    val moved = if (r.start != range.start) r.start else r.endInclusive
+                    range = r
+                    player.pause()
+                    player.seekTo(moved.toLong())
+                },
+                onValueChangeFinished = { onChange(current, Highlight(range.start.toLong(), range.endInclusive.toLong())) },
+                valueRange = window,
+                colors = SliderDefaults.colors(
+                    thumbColor = MARK_COLOR, activeTrackColor = MARK_COLOR, inactiveTrackColor = Color(0x55FFFFFF),
+                ),
+            )
+            Text(
+                "${clockTenths(range.start.toLong())} – ${clockTenths(range.endInclusive.toLong())} · " +
+                    "%.1f ".format((range.endInclusive - range.start) / 1000.0) + tr("с", "s"),
+                color = MARK_COLOR,
+                fontSize = 13.sp,
+            )
+        } else {
+            Text(
+                if (pieces.isEmpty()) {
+                    tr("Отмеченных кусков нет — добавьте кусок там, где стоит видео", "No marked pieces — add one where the video stands")
+                } else {
+                    tr("Выберите кусок в ленте или добавьте новый", "Pick a piece in the strip or add a new one")
+                },
+                color = Color(0xCCFFFFFF),
+                fontSize = 13.sp,
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton({ onAdd(player.currentPosition) }) { Text(tr("+ Кусок здесь", "+ Piece here"), color = Color.White) }
+            if (piece != null) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
+            if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
+            Spacer(Modifier.weight(1f))
+            if (pieces.isNotEmpty()) Button(onDone) { Text(tr("Готово", "Done")) }
+        }
+    }
+}
+
+/** The slider for a piece spans it and this much either side. */
+private const val EDIT_MARGIN_MS = 5_000L
+
+private fun clockTenths(ms: Long): String = "%d:%02d.%d".format(ms / 60_000, ms / 1000 % 60, ms / 100 % 10)
 
 /** A seek can land a little before the piece's start (key frames); don't bounce on that. */
 private const val SKIP_SLACK_MS = 300L

@@ -21,6 +21,7 @@ import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.ClipMaker
 import app.goultra.transfer.camera.LocalTrailer
 import app.goultra.transfer.camera.RemoteFrames
 import app.goultra.transfer.camera.CameraTcp
@@ -1831,4 +1832,82 @@ class CameraController(private val app: Application) {
     fun cancelDownload() {
         downloadJob?.cancel()
     }
+
+    // ---------- pieces: edits and clips ----------
+
+    /** Pieces edited in the film strip, per file name (the camera's file and its phone copy share them). */
+    private val piecePrefs = app.getSharedPreferences("pieces", 0)
+
+    /** The pieces as edited on the phone; null = never edited (the camera's marks apply). */
+    fun editedPieces(file: CameraFile): List<Highlight>? = piecePrefs.getString(file.name, null)?.let(Highlights::decode)
+
+    /** [pieces] null: back to the camera's marks. */
+    fun savePieces(file: CameraFile, pieces: List<Highlight>?) {
+        piecePrefs.edit().apply { if (pieces == null) remove(file.name) else putString(file.name, Highlights.encode(pieces)) }.apply()
+    }
+
+    fun clipName(file: CameraFile): String = file.stem + "_HL.mp4"
+
+    /**
+     * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
+     * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
+     */
+    fun saveClip(file: CameraFile, pieces: List<Highlight>) {
+        if (isDownloading || pieces.isEmpty()) return
+        val local = file.localUri
+        if (local == null && conn != ConnState.Connected) {
+            message = tr("Чтобы сделать клип с камеры, подключитесь", "Connect to make a clip from the camera")
+            return
+        }
+        val name = clipName(file)
+        val wantedUs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs } * 1000
+        // Progress in bytes, as for downloads: the share of the file the pieces make up.
+        val estimate = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * wantedUs / (it * 1_000_000L) } } ?: 0L
+        downloadJob = scope.launch {
+            val startedAt = System.currentTimeMillis()
+            var reportedAt = 0L
+            download = DownloadProgress(name, 1, 1, 0, estimate, 0)
+            try {
+                val cut = withContext(Dispatchers.IO) {
+                    val job = coroutineContext[Job]
+                    val camera = if (local == null) session.clipSource(file) else null
+                    val open: (android.media.MediaExtractor) -> Unit = if (camera != null) {
+                        { ex -> ex.setDataSource(camera) }
+                    } else {
+                        val uri = android.net.Uri.parse(local!!)
+                        ({ ex -> ex.setDataSource(app, uri, null) })
+                    }
+                    Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
+                        ClipMaker.join(open, pieces, fd) { us ->
+                            if (job?.isActive == false) throw CancellationException("остановлено")
+                            val now = System.currentTimeMillis()
+                            if (now - reportedAt >= 250) {
+                                reportedAt = now
+                                val done = camera?.fetched ?: if (wantedUs > 0) estimate * us / wantedUs else 0L
+                                val sec = (now - startedAt) / 1000.0
+                                val speed = if (camera != null && sec > 0.5) (done / sec).toLong() else 0L
+                                scope.launch { download = DownloadProgress(name, 1, 1, done, maxOf(estimate, done), speed) }
+                            }
+                        }
+                    }
+                }
+                val seconds = cut.sumOf { it.endMs!! - it.startMs } / 1000.0
+                lastResult = tr("Клип сохранён: $name · ", "Clip saved: $name · ") + "%.1f ".format(seconds) + tr("с", "s")
+                log("клип $name: " + cut.joinToString { "${it.startMs}–${it.endMs}" } + if (local == null) " (с камеры)" else " (с телефона)")
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Клип не сохранён: остановлено", "Clip not saved: stopped")
+                throw e
+            } catch (e: Exception) {
+                log("клип $name: ${e.message}")
+                lastResult = tr("Не удалось сделать клип", "Couldn't make the clip") + (e.message?.let { ": $it" } ?: "")
+            } finally {
+                download = null
+                message = lastResult
+                touch()
+            }
+        }
+        if (local == null) CameraService.start(app)
+    }
+
 }
