@@ -396,7 +396,7 @@ private fun FilmStrip(pieces: List<Highlight>, frames: List<ImageBitmap?>, curre
 
 /**
  * Editing the pieces under the film strip: the selected piece's start and end as two handles (the slider spans the
- * piece and [EDIT_MARGIN_MS] either side, re-centred after each drag; the picture follows the handle), a new 2 s piece
+ * piece and [EDIT_MARGIN_MS] either side as it was when selected; the picture follows the handle), a new 2 s piece
  * where the video stands, deleting the selected one, and going back to the camera's marks.
  */
 @kotlin.OptIn(ExperimentalMaterial3Api::class)
@@ -421,10 +421,13 @@ private fun PieceEditor(
         var range by remember(piece) { mutableStateOf((piece?.startMs ?: 0L).toFloat()..(piece?.endMs ?: 0L).toFloat()) }
         if (piece != null) {
             val end = piece.endMs!!
-            val window = remember(piece, durationMs) {
+            // The scale stays put while this piece is selected (re-scaling it after a drag made the other handle
+            // look moved); it only widens when the piece no longer fits (e.g. merged with a neighbour).
+            val base = remember(current, durationMs) {
                 val last = if (durationMs > 0) durationMs else end + EDIT_MARGIN_MS
                 maxOf(0L, piece.startMs - EDIT_MARGIN_MS).toFloat()..minOf(last, end + EDIT_MARGIN_MS).toFloat()
             }
+            val window = minOf(base.start, piece.startMs.toFloat())..maxOf(base.endInclusive, end.toFloat())
             RangeSlider(
                 value = range,
                 onValueChange = { r ->

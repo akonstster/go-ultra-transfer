@@ -36,7 +36,7 @@ gallery.
 
 **Step 3 (written together with step 2, not yet tested on a phone):**
 - Editing in the film strip (`ui/FileViewer.kt` → `PieceEditor`): «Править куски» → the selected piece as a
-  RangeSlider (the piece ± 5 s, re-centred after each drag, the picture follows the handle), «+ Кусок здесь» (2 s at
+  RangeSlider (the piece ± 5 s as selected — the scale must not change under the user's hands, it only widens if the piece outgrows it; the picture follows the handle), «+ Кусок здесь» (2 s at
   the player position), «Удалить», «Как на камере». The flag chip is shown for every video (pieces can be added to an
   unmarked one). Edits: SharedPreferences `pieces`, key = file name, `start-end,…` ms, "" = all removed
   (`Highlights.encode/decode/normalize`); the camera file and its phone copy share them.
