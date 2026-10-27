@@ -417,13 +417,14 @@ private fun PieceEditor(
     Column(
         Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
+        // The handles' positions while dragging (committed when the drag ends).
+        var range by remember(piece) { mutableStateOf((piece?.startMs ?: 0L).toFloat()..(piece?.endMs ?: 0L).toFloat()) }
         if (piece != null) {
             val end = piece.endMs!!
             val window = remember(piece, durationMs) {
                 val last = if (durationMs > 0) durationMs else end + EDIT_MARGIN_MS
                 maxOf(0L, piece.startMs - EDIT_MARGIN_MS).toFloat()..minOf(last, end + EDIT_MARGIN_MS).toFloat()
             }
-            var range by remember(piece) { mutableStateOf(piece.startMs.toFloat()..end.toFloat()) }
             RangeSlider(
                 value = range,
                 onValueChange = { r ->
@@ -438,29 +439,28 @@ private fun PieceEditor(
                     thumbColor = MARK_COLOR, activeTrackColor = MARK_COLOR, inactiveTrackColor = Color(0x55FFFFFF),
                 ),
             )
+        }
+        // «Готово» on the line with the piece's times: the actions below need the whole width on a phone held upright.
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "${clockTenths(range.start.toLong())} – ${clockTenths(range.endInclusive.toLong())} · " +
-                    "%.1f ".format((range.endInclusive - range.start) / 1000.0) + tr("с", "s"),
-                color = MARK_COLOR,
-                fontSize = 13.sp,
-            )
-        } else {
-            Text(
-                if (pieces.isEmpty()) {
-                    tr("Отмеченных кусков нет — добавьте кусок там, где стоит видео", "No marked pieces — add one where the video stands")
+                if (piece != null) {
+                    "${clockTenths(range.start.toLong())} – ${clockTenths(range.endInclusive.toLong())} · " +
+                        "%.1f ".format((range.endInclusive - range.start) / 1000.0) + tr("с", "s")
+                } else if (pieces.isEmpty()) {
+                    tr("Кусков нет — добавьте там, где стоит видео", "No pieces — add one where the video stands")
                 } else {
                     tr("Выберите кусок в ленте или добавьте новый", "Pick a piece in the strip or add a new one")
                 },
-                color = Color(0xCCFFFFFF),
+                color = if (piece != null) MARK_COLOR else Color(0xCCFFFFFF),
                 fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
             )
+            if (pieces.isNotEmpty()) Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton({ onAdd(player.currentPosition) }) { Text(tr("+ Кусок здесь", "+ Piece here"), color = Color.White) }
+            TextButton({ onAdd(player.currentPosition) }) { Text(tr("+ Кусок", "+ Piece"), color = Color.White) }
             if (piece != null) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
             if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
-            Spacer(Modifier.weight(1f))
-            if (pieces.isNotEmpty()) Button(onDone) { Text(tr("Готово", "Done")) }
         }
     }
 }
