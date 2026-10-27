@@ -72,6 +72,12 @@ gallery.
   platform extractor applies the elst shift the same way as `Mp4Index` (both 0 on most camera files).
 - Unknowns to check on the phone: audio at the piece joins, B-frames (if the GO Ultra uses them), rotation.
 
+**Live marks during a recording — not available (checked 28.10, fw 1.9.29):** the capture status reply
+(GetCurrentCaptureStatus over BLE) carries only fields 1 state, 2 seconds, 10 phase — no keyTimePointDetail (field 4
+in the proto) even with marks set from the app; the marks appear only in the finished file. Over Wi-Fi the same
+request's reply didn't show the recording at all — the status stays on BLE. Each mark from the app is logged
+(«отметка на N с: поставлена»). JPG + DNG stay separate tiles (user's choice).
+
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
 

@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -31,6 +34,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -62,8 +68,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
-import android.content.Intent
-import app.goultra.transfer.camera.Downloader
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -313,39 +317,17 @@ private fun ConnectBar(state: ConnState, onConnect: () -> Unit) {
 
 @Composable
 private fun FileGrid(vm: CameraController) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    /**
-     * Downloaded: the phone's own player / gallery; still on the camera (or no app for it): the in-app viewer.
-     * Downloaded videos open from the phone in the in-app viewer (marks and film strip), with or without the camera.
-     */
+    /** Everything opens in the in-app viewer: the phone's copy when there is one, otherwise from the camera. */
     fun open(file: CameraFile) {
-        if (file.isOnPhone && file.kind == MediaKind.VIDEO) {
+        if (file.isOnPhone) {
             vm.view(file)
             return
         }
-        // A live photo opens in our viewer while the camera is there: its clip plays and the cover is chosen there.
-        if (vm.liveClipOf(file) != null && vm.conn == ConnState.Connected) {
-            vm.view(file)
-            return
-        }
-        scope.launch {
-            // A downloaded video: our viewer, from the phone (marks and film strip there too).
-            val copy = vm.withPhoneCopy(file)
-            if (copy.isOnPhone) {
-                vm.view(copy)
-                return@launch
-            }
-            val uri = vm.galleryUri(file)
-            val opened = uri != null && runCatching {
-                context.startActivity(
-                    Intent(Intent.ACTION_VIEW).setDataAndType(uri, Downloader.mimeType(file.name))
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                )
-            }.isSuccess
-            if (!opened) vm.view(file)
-        }
+        // From the camera: the phone's copy when downloaded (a live photo stays the camera's — its cover choice).
+        scope.launch { vm.view(vm.withPhoneCopy(file)) }
     }
+    fun selectable(file: CameraFile) = vm.showsPhone || !file.isOnPhone
     vm.viewing?.let { FileViewer(vm, it) { vm.viewing = null } }
     val files = vm.visibleFiles
     val byDay = remember(files) { files.groupBy { it.created?.toLocalDate() } }
@@ -354,7 +336,11 @@ private fun FileGrid(vm: CameraController) {
         snapshotFlow { gridState.firstVisibleItemIndex }.collect { vm.touch() } // scrolling counts as activity
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Scrolls sideways when the chips don't fit (narrow screens, large font).
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             val listed = vm.listedFiles
             val photos = listed.count { it.kind == MediaKind.PHOTO }
             val videos = listed.size - photos
@@ -362,6 +348,10 @@ private fun FileGrid(vm: CameraController) {
             FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${listed.size}", "All ${listed.size}")) })
             FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото $photos", "Photos $photos")) })
             FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео $videos", "Videos $videos")) })
+            val favorites = listed.count { it.name in vm.favorites }
+            if (favorites > 0 || vm.filter == Filter.FAVORITE) {
+                FilterChip(vm.filter == Filter.FAVORITE, { pick(Filter.FAVORITE) }, { Text("♥ $favorites") })
+            }
         }
         LazyVerticalGrid(
             state = gridState,
@@ -381,11 +371,14 @@ private fun FileGrid(vm: CameraController) {
                         selected = file.name in vm.selected,
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
+                        favorite = file.name in vm.favorites,
+                        phoneOnly = file.isOnPhone && !vm.showsPhone,
                         loadThumbnail = vm::thumbnail,
-                        // Tap opens; long press starts selecting, then taps add / remove (like a gallery). Nothing to
-                        // select on the phone list (download and delete are about the camera's card).
-                        onClick = { if (vm.selected.isEmpty()) open(file) else vm.toggle(file) },
-                        onLongClick = { if (!file.isOnPhone) vm.toggle(file) },
+                        // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
+                        // phone list a selection is for sharing; with the camera it is for its card (download,
+                        // delete), so files only on the phone just open.
+                        onClick = { if (vm.selected.isEmpty() || !selectable(file)) open(file) else vm.toggle(file) },
+                        onLongClick = { if (selectable(file)) vm.toggle(file) },
                     )
                 }
             }
@@ -408,6 +401,8 @@ private fun FileTile(
     file: CameraFile,
     selected: Boolean,
     downloaded: Boolean,
+    favorite: Boolean,
+    phoneOnly: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -446,6 +441,21 @@ private fun FileTile(
             else -> null
         }
         label?.let { Badge(it, Modifier.align(Alignment.BottomStart)) }
+        if (favorite) {
+            Icon(
+                Icons.Filled.Favorite, tr("Избранное", "Favorite"),
+                Modifier.align(Alignment.TopStart).padding(5.dp).size(18.dp),
+                tint = Color(0xFFFF5252),
+            )
+        }
+        if (phoneOnly) {
+            // Only on the phone (a clip made here, or deleted from the card).
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.PhoneAndroid, tr("Только на телефоне", "On the phone only"), Modifier.size(12.dp), tint = Color.White) }
+        }
         if (downloaded) {
             Box(
                 Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
@@ -484,6 +494,25 @@ private fun Badge(text: String, modifier: Modifier) {
 private fun BottomPanel(vm: CameraController) {
     val progress = vm.download
     val selection = vm.selectedFiles
+    if (progress == null && vm.showsPhone) {
+        // The phone list: a selection can be shared.
+        if (selection.isEmpty()) return
+        val context = LocalContext.current
+        Surface(tonalElevation = 3.dp) {
+            Row(
+                Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
+                Button({ share(context, selection); vm.clearSelection() }) {
+                    Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(tr("Поделиться", "Share"))
+                }
+            }
+        }
+        return
+    }
     if (progress == null && (vm.conn != ConnState.Connected)) return
     Surface(tonalElevation = 3.dp) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {

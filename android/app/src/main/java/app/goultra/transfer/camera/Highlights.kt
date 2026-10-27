@@ -95,6 +95,12 @@ object Highlights {
         return if (end - start >= MIN_PIECE_MS) Highlight(start, end) else null
     }
 
+    /** [pieces] cut at the video's end [durationMs] (a piece left shorter than [MIN_PIECE_MS] goes). */
+    fun clip(pieces: List<Highlight>, durationMs: Long?): List<Highlight> =
+        if (durationMs == null) pieces
+        else pieces.map { it.copy(endMs = minOf(it.endMs ?: (it.startMs + AROUND_MS), durationMs)) }
+            .filter { it.endMs!! - it.startMs >= MIN_PIECE_MS }
+
     /** Pieces that meet (one ends where the next starts) as one: the clip has no seam there. */
     fun joinTouching(pieces: List<Highlight>): List<Highlight> {
         val out = mutableListOf<Highlight>()

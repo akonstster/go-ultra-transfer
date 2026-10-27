@@ -243,32 +243,33 @@ object Downloader {
     }
 
     /**
-     * A clip made on the phone ([ClipMaker]) saved as [name] in DCIM/Camera: a pending item while [write] fills it,
-     * removed if that fails or is stopped. A clip of the same name is overwritten in place.
+     * A clip made on the phone ([ClipMaker]) saved as [name] in DCIM/Camera. Written into a new pending item under a
+     * temporary name, removed if that fails or is stopped; only then does an older clip of the same name go and the
+     * new one take its name — a replace that fails leaves the old clip as it was.
      */
     fun saveClip(context: Context, name: String, takenAtMillis: Long?, write: (java.io.FileDescriptor) -> Unit): Uri {
         val resolver = context.contentResolver
         val collection = collection(video = true)
-        val pending = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) }
-        val item = findExisting(resolver, collection, name)?.uri?.also { resolver.update(it, pending, null, null) }
-            ?: resolver.insert(
-                collection,
-                ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, TARGET)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                },
-            ) ?: error("MediaStore insert failed")
+        val item = resolver.insert(
+            collection,
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name.removeSuffix(".mp4") + ".part.mp4")
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, TARGET)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            },
+        ) ?: error("MediaStore insert failed")
         try {
             resolver.openFileDescriptor(item, "rwt")!!.use { write(it.fileDescriptor) }
         } catch (e: Throwable) {
             runCatching { resolver.delete(item, null, null) }
             throw e
         }
+        findExisting(resolver, collection, name)?.let { old -> runCatching { resolver.delete(old.uri, null, null) } }
         resolver.update(
             item,
             ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
                 takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
             },

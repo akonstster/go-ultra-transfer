@@ -101,4 +101,11 @@ class HighlightsTest {
         val pieces = listOf(Highlight(1000, 2000), Highlight(2000, 3500), Highlight(5000, 6000))
         assertEquals(listOf(Highlight(1000, 3500), Highlight(5000, 6000)), Highlights.joinTouching(pieces))
     }
+
+    @Test
+    fun piecesStopAtTheVideosEnd() {
+        // A mark set just before the recording stopped: its 2 s piece reaches past the end of a 9.4 s video.
+        val pieces = listOf(Highlight(1000, 3000), Highlight(8400, 10_400), Highlight(9300, 11_300))
+        assertEquals(listOf(Highlight(1000, 3000), Highlight(8400, 9400)), Highlights.clip(pieces, 9_400))
+    }
 }

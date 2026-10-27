@@ -319,6 +319,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     suspend fun stopRecording(): Boolean = ble.request(Proto.CMD_STOP_CAPTURE, timeoutMs = 8_000)?.code == 200
 
+    /** Over BLE: the reply [CaptureStatus.parse] is verified on (over Wi-Fi it didn't show the recording, 28.10). */
     suspend fun captureStatus(): CaptureStatus? =
         ble.request(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, timeoutMs = 3_000, quiet = true)
             ?.takeIf { it.code == 200 }
@@ -535,6 +536,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
      */
     suspend fun markHighlight(recordingMs: Long): Boolean =
         recordingCommand(Proto.CMD_SET_KEY_TIME_POINT, PbWriter().varint(1, recordingMs).toByteArray())
+            .also { log("отметка на ${recordingMs / 1000} с: ${if (it) "поставлена" else "не принята"}") }
 
     private suspend fun recordingCommand(code: Int, body: ByteArray = ByteArray(0)): Boolean {
         val r = send(code, body, timeoutMs = 5_000)
@@ -567,6 +569,9 @@ class CameraSession(private val context: Context, private val log: (String) -> U
     /** The recording's phase from 8208 (0 running, 1 paused — from the app or the camera's own button). */
     @Volatile var onCapturePhase: ((Int) -> Unit)? = null
 
+    /** Battery / Action Pod state changed (connected, charging, level): the settings are worth re-reading. */
+    @Volatile var onPowerChanged: (() -> Unit)? = null
+
     /** Starts the preview stream (empty StartLiveStream → 1080p30 H.265); packets go to [onPacket]. */
     suspend fun startLive(onPacket: (ByteArray) -> Unit): Boolean {
         val t = tcp ?: return false
@@ -577,6 +582,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
                 Proto.NOTIFY_SUB_MODE -> onModeChanged?.invoke()
                 // CAPTURE_STATUS {1 state, 2 seconds, 7 phase: 0 running, 1 paused, 2 stopping, 3 finishing}.
                 Proto.NOTIFY_CAPTURE_STATUS -> m.body.pbFields().field(7)?.varint?.let { onCapturePhase?.invoke(it.toInt()) }
+                in Proto.NOTIFY_POWER -> onPowerChanged?.invoke()
             }
         }
         val r = t.request(Proto.CMD_START_LIVE_STREAM, ByteArray(0))

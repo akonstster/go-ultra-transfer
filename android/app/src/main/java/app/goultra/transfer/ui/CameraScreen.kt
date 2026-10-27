@@ -324,10 +324,15 @@ internal fun encodable(param: String, value: String): Boolean = when (param) {
 
 /**
  * Depends on the mode only, so tiles keep their places while settings change.
- * record_duration is verified only for loop / interval / starlapse (fields 29 + 54).
+ * record_duration: fields 29 + 54 — verified for loop / interval / starlapse, the video modes use the same fields
+ * (CONF offers the setting there; the value is read back after writing). Timelapse and TimeShift keep their length in
+ * the timelapse options instead — not shown there yet.
  */
 internal fun shown(mode: String, param: String): Boolean =
-    param != "record_duration" || mode in setOf("VIDEO_LOOPRECORDING", "PHOTO_INTERVAL", "PHOTO_STARLAPSE")
+    param != "record_duration" || mode in setOf(
+        "VIDEO_LOOPRECORDING", "PHOTO_INTERVAL", "PHOTO_STARLAPSE",
+        "VIDEO_NORMAL", "VIDEO_PURE", "VIDEO_SUPER", "VIDEO_SLOW_MOTION", "VIDEO_BABYVIEW",
+    )
 
 /**
  * ISO and shutter are set only in manual exposure (greyed «Авто» otherwise), like the camera menu.

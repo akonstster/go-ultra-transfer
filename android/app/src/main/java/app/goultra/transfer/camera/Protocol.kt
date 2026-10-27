@@ -9,6 +9,10 @@ class CamMessage(val code: Int, val seq: Int, val body: ByteArray) {
  * GET_CURRENT_CAPTURE_STATUS → {1: {1: state (0 idle, 1 recording, 13 TimeShift, 24 Pure Video…), 2: seconds,
  * 10: phase}}; phase as field 7 of the 8208 notification: 0 running, 1 paused, 2 stopping (5 right at the start).
  */
+/**
+ * GetCurrentCaptureStatus over BLE: {1: CameraCaptureStatus {1 state, 2 seconds, 10 phase}}. The GO Ultra sends only
+ * these three — not keyTimePointDetail (field 4), even with marks set (checked 28.10, fw 1.9.29).
+ */
 data class CaptureStatus(val state: Int, val seconds: Int, val phase: Int = 0) {
     val paused: Boolean get() = recording && phase == 1
     val recording: Boolean get() = state != 0
@@ -68,6 +72,9 @@ object Proto {
 
     const val NOTIFY_AUTHORIZATION_RESULT = 8209
     const val NOTIFY_CAM_WIFI_START = 8215
+
+    /** Sent when the camera's or the Action Pod's power changes (bodies not decoded: 8222 = option 85 again). */
+    val NOTIFY_POWER = setOf(8217, 8219, 8222)
 
     const val OPTION_WIFI_INFO = 36L
     const val MEDIA_VIDEO_AND_PHOTO = 2L
