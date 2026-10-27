@@ -994,6 +994,7 @@ private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFil
     }
 }
 
+@kotlin.OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class) // transformable(canPan)
 @Composable
 private fun PhotoPreview(vm: CameraController, file: CameraFile) {
     val config = LocalConfiguration.current

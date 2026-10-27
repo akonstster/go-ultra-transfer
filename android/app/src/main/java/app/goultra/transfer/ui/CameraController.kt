@@ -1827,7 +1827,8 @@ class CameraController(private val app: Application) {
                 add("Фокусное", "Focal length", exif.getAttributeDouble(android.media.ExifInterface.TAG_FOCAL_LENGTH, 0.0).takeIf { it > 0 }?.let { "%.1f ".format(it) + tr("мм", "mm") })
                 add("Баланс белого", "White balance", tag(android.media.ExifInterface.TAG_WHITE_BALANCE)?.let { if (it == "0") tr("авто", "auto") else tr("ручной", "manual") })
                 add("Программа", "Software", tag(android.media.ExifInterface.TAG_SOFTWARE))
-                exif.latLong?.let { (lat, lon) -> add("Место", "Location", "%.5f, %.5f".format(lat, lon)) }
+                val latLong = FloatArray(2)
+                if (exif.getLatLong(latLong)) add("Место", "Location", "%.5f, %.5f".format(latLong[0], latLong[1]))
             }
             add("Живое фото", "Live photo", if (file.isLive) tr("да", "yes") else null)
         }
