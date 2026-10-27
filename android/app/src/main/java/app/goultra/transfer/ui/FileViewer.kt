@@ -96,6 +96,19 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.ui.input.pointer.PointerEventPass
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
@@ -104,9 +117,10 @@ import app.goultra.transfer.camera.LivePhoto
 import app.goultra.transfer.camera.MediaKind
 
 /**
- * Quick look at a file that is still on the camera: video plays its low-res LRV copy (or the file itself if there is
- * none) in the built-in player, photos open full size with pinch zoom. «Скачать» takes just this file.
- * A video already on the phone ([CameraFile.isOnPhone]) plays from there, full quality, marks read from the file.
+ * The in-app viewer. A file still on the camera: video plays its low-res LRV copy (or the file itself if there is
+ * none), photos open full size; «Скачать» takes just this file. A file on the phone ([CameraFile.isOnPhone]) shows
+ * from there, full quality (a video's marks read from the file). Pinch to zoom; swipe up / down for the next file;
+ * ♥ favorite, «i» info, share (files on the phone).
  */
 @Composable
 fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
@@ -114,6 +128,31 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        // Swipe up / down: the next / previous file of the gallery as it is listed (filter included). The list is
+        // taken when the viewer opens; each page shows the phone's copy of a file when there is one.
+        val list = remember { vm.visibleFiles.takeIf { l -> l.any { it.name == file.name } } ?: listOf(file) }
+        val pager = rememberPagerState(initialPage = list.indexOfFirst { it.name == file.name }.coerceAtLeast(0)) { list.size }
+        var locked by remember { mutableStateOf(false) } // editing pieces: the timeline owns the gestures
+        VerticalPager(
+            pager,
+            Modifier.fillMaxSize().background(Color.Black),
+            userScrollEnabled = !locked,
+            key = { list[it].name },
+        ) { page ->
+            val listed = list[page]
+            val shown by produceState(if (listed.name == file.name) file else null, listed.name) {
+                if (value == null) value = vm.withPhoneCopy(listed)
+            }
+            shown?.let { FilePage(vm, it, active = pager.settledPage == page, onClose = onClose, onLock = { l -> locked = l }) }
+        }
+    }
+}
+
+/** One file in the viewer: video, photo or live photo, with its top bar. [active]: the page on screen (plays). */
+@Composable
+private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, onClose: () -> Unit, onLock: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    run {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             val clip = vm.liveClipOf(file)
             var playing by remember(file.uri) { mutableStateOf(false) }
@@ -133,8 +172,10 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
                 return tidy ?: cameraPieces
             }
             var choose by remember(file.uri) { mutableStateOf(false) }
+            var info by remember(file.uri) { mutableStateOf(false) }
+            if (info) FileInfo(vm, file) { info = false }
             when {
-                isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit)
+                isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock)
                 clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
                 else -> PhotoPreview(vm, file)
             }
@@ -181,7 +222,19 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
                         fontSize = 12.sp,
                     )
                 }
-                Spacer(Modifier.width(8.dp))
+                IconButton({ vm.toggleFavorite(file) }) {
+                    val fav = file.name in vm.favorites
+                    Icon(
+                        if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                        tr("Избранное", "Favorite"),
+                        tint = if (fav) Color(0xFFFF5252) else Color.White,
+                    )
+                }
+                IconButton({ info = true }) { Icon(Icons.Outlined.Info, tr("Сведения", "Info"), tint = Color.White) }
+                // Sharing needs the file on the phone.
+                if (file.localUri != null) {
+                    IconButton({ share(context, listOf(file)) }) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
+                }
                 if (!file.isOnPhone && file.name !in vm.downloaded) {
                     // With pieces marked: the whole video or one clip of the pieces.
                     Button(
@@ -207,6 +260,51 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
             }
         }
     }
+}
+
+/** «i»: what is known about the file (EXIF for photos, the stream for videos). */
+@Composable
+private fun FileInfo(vm: CameraController, file: CameraFile, onDismiss: () -> Unit) {
+    val rows by produceState<List<Pair<String, String>>?>(null, file.uri, file.localUri) { value = vm.fileInfo(file) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("Сведения", "Info")) },
+        text = {
+            val list = rows
+            if (list == null) {
+                CircularProgressIndicator()
+            } else {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for ((name, value) in list) {
+                        Row {
+                            Text(name, Modifier.width(120.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                            Text(value, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("OK") } },
+    )
+}
+
+/** The phone's share sheet for files on the phone (one or several). */
+fun share(context: android.content.Context, files: List<CameraFile>) {
+    val uris = files.mapNotNull { f -> f.localUri?.let(android.net.Uri::parse) }
+    if (uris.isEmpty()) return
+    val kinds = files.map { it.kind }.toSet()
+    val type = when {
+        kinds == setOf(MediaKind.VIDEO) -> "video/*"
+        kinds == setOf(MediaKind.PHOTO) -> "image/*"
+        else -> "*/*"
+    }
+    val intent = if (uris.size == 1) {
+        android.content.Intent(android.content.Intent.ACTION_SEND).putExtra(android.content.Intent.EXTRA_STREAM, uris[0])
+    } else {
+        android.content.Intent(android.content.Intent.ACTION_SEND_MULTIPLE)
+            .putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, ArrayList(uris))
+    }.setType(type).addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    runCatching { context.startActivity(android.content.Intent.createChooser(intent, tr("Поделиться", "Share"))) }
 }
 
 /** «Скачать» for a video with marked pieces: the whole file, or one clip of just the pieces. */
@@ -251,6 +349,8 @@ private fun VideoPreview(
     pieces: List<Highlight>,
     edited: Boolean,
     onEdit: (List<Highlight>?) -> List<Highlight>,
+    active: Boolean,
+    onLock: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val source = remember { if (file.isOnPhone) null else vm.previewSource() }
@@ -265,11 +365,17 @@ private fun VideoPreview(
             } else {
                 setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(file))))
             }
-            playWhenReady = true
+            playWhenReady = active
             prepare()
         }
     }
     DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
+    // Swiped away: stop; swiped back: play on.
+    LaunchedEffect(active) { if (active) player.play() else player.pause() }
+    // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
+    // so the player's own taps (controls, seek bar) still work when not zooming.
+    var zoom by remember(file.uri) { mutableFloatStateOf(1f) }
+    var shift by remember(file.uri) { mutableStateOf(Offset.Zero) }
     var durationMs by remember(file.uri) { mutableLongStateOf(file.durationSec?.let { it * 1000L } ?: 0L) }
     LaunchedEffect(player) {
         while (true) {
@@ -281,6 +387,7 @@ private fun VideoPreview(
     // skipped. In the strip the pieces can be edited (kept on the phone): then playback is free, for finding spots.
     var film by remember(file.uri) { mutableStateOf(false) }
     var editing by remember(file.uri) { mutableStateOf(false) }
+    LaunchedEffect(editing) { onLock(editing) }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
     LaunchedEffect(player, film, editing, pieces) {
         if (!film || editing || pieces.isEmpty()) return@LaunchedEffect
@@ -349,10 +456,36 @@ private fun VideoPreview(
         )
     }
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+            Modifier.weight(1f).fillMaxWidth().pointerInput(file.uri) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    do {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val fingers = event.changes.count { it.pressed }
+                        if (fingers >= 2) {
+                            zoom = (zoom * event.calculateZoom()).coerceIn(1f, 5f)
+                            shift = clampShift(shift + event.calculatePan(), zoom, size.width.toFloat(), size.height.toFloat())
+                            event.changes.forEach { it.consume() }
+                        } else if (fingers == 1 && zoom > 1f) {
+                            val pan = event.calculatePan()
+                            if (pan != Offset.Zero) {
+                                shift = clampShift(shift + pan, zoom, size.width.toFloat(), size.height.toFloat())
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                        if (zoom == 1f) shift = Offset.Zero
+                    } while (event.changes.any { it.pressed })
+                }
+            },
+        ) {
             AndroidView(
                 factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
-                update = { view -> view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size)) },
+                update = { view ->
+                    view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size))
+                    // Only the picture zooms, not the player's controls.
+                    view.videoSurfaceView?.apply { scaleX = zoom; scaleY = zoom; translationX = shift.x; translationY = shift.y }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
             Row(
@@ -424,6 +557,13 @@ private fun VideoPreview(
             }
         }
     }
+}
+
+/** A zoomed picture may move only as far as its edges reach the frame's. */
+private fun clampShift(shift: Offset, zoom: Float, w: Float, h: Float): Offset {
+    val maxX = (zoom - 1f) * w / 2
+    val maxY = (zoom - 1f) * h / 2
+    return Offset(shift.x.coerceIn(-maxX, maxX), shift.y.coerceIn(-maxY, maxY))
 }
 
 /** The camera-style film strip: a frame per marked piece with its length; the playing one framed in yellow. */
@@ -813,8 +953,11 @@ private fun PhotoPreview(vm: CameraController, file: CameraFile) {
     val config = LocalConfiguration.current
     val maxSide = with(LocalDensity.current) { (maxOf(config.screenWidthDp, config.screenHeightDp).dp.toPx() * 1.5f).toInt() }
     // Reloaded after a cover change (the photo is then the chosen frame).
-    val image by produceState<ImageBitmap?>(null, file.uri, vm.coverVersion) { value = vm.previewPhoto(file, maxSide) }
-    var loaded by remember(file.uri) { mutableStateOf(false) }
+    var failed by remember(file.uri) { mutableStateOf(false) }
+    val image by produceState<ImageBitmap?>(null, file.uri, file.localUri, vm.coverVersion) {
+        value = vm.previewPhoto(file, maxSide)
+        failed = value == null
+    }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     val zoom = rememberTransformableState { zoomChange, pan, _ ->
@@ -823,10 +966,11 @@ private fun PhotoPreview(vm: CameraController, file: CameraFile) {
     }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val bmp = image
-        if (bmp == null) {
+        if (bmp == null && failed) {
+            Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White, modifier = Modifier.padding(24.dp))
+        } else if (bmp == null) {
             CircularProgressIndicator(color = Color.White)
         } else {
-            loaded = true
             Image(
                 bmp,
                 file.name,
@@ -838,7 +982,8 @@ private fun PhotoPreview(vm: CameraController, file: CameraFile) {
                             if (scale > 1f) { scale = 1f; offset = Offset.Zero } else scale = 2.5f
                         })
                     }
-                    .transformable(zoom)
+                    // One finger moves the photo only when zoomed in; otherwise the swipe goes to the next file.
+                    .transformable(zoom, canPan = { scale > 1f })
                     .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
             )
         }

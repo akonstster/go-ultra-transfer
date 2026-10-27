@@ -60,7 +60,7 @@ sealed interface ConnState {
     data class Failed(val message: String) : ConnState
 }
 
-enum class Filter { ALL, PHOTO, VIDEO }
+enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 
 enum class Tab { FILES, CAMERA }
 
@@ -95,6 +95,15 @@ class CameraController(private val app: Application) {
     var files by mutableStateOf<List<CameraFile>>(emptyList())
         private set
     var filter by mutableStateOf(Filter.ALL)
+
+    /** Files marked with the heart, by name (the camera's file and its phone copy share it); kept on the phone. */
+    var favorites by mutableStateOf(prefs.getStringSet("favorites", emptySet())!!.toSet())
+        private set
+
+    fun toggleFavorite(file: CameraFile) {
+        favorites = if (file.name in favorites) favorites - file.name else favorites + file.name
+        prefs.edit().putStringSet("favorites", favorites).apply()
+    }
 
     /** Downloaded files in the phone's gallery: the Files tab shows them while the camera isn't connected. */
     var phoneFiles by mutableStateOf<List<CameraFile>>(emptyList())
@@ -481,9 +490,11 @@ class CameraController(private val app: Application) {
             Filter.ALL -> listedFiles
             Filter.PHOTO -> listedFiles.filter { it.kind == MediaKind.PHOTO }
             Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
+            Filter.FAVORITE -> listedFiles.filter { it.name in favorites }
         }
 
-    val selectedFiles: List<CameraFile> get() = files.filter { it.name in selected }
+    /** Selected files of the list on screen: the camera's card, or the phone's copies (for sharing). */
+    val selectedFiles: List<CameraFile> get() = listedFiles.filter { it.name in selected }
 
     // ---------- camera info (menu ⋮ → «Камера») ----------
 
@@ -1660,7 +1671,8 @@ class CameraController(private val app: Application) {
      * keeps the camera's uri, so its marks still come from the camera (they may have been edited there since).
      */
     suspend fun withPhoneCopy(file: CameraFile): CameraFile {
-        if (file.isOnPhone || file.kind != MediaKind.VIDEO || file.name !in downloaded) return file
+        // A live photo stays the camera's while connected: its clip and the cover choice need the camera.
+        if (file.isOnPhone || file.name !in downloaded || (liveClipOf(file) != null && conn == ConnState.Connected)) return file
         val uri = withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) } ?: return file
         return file.copy(localUri = uri.toString())
     }
@@ -1709,16 +1721,105 @@ class CameraController(private val app: Application) {
 
     /** Photo for the viewer, decoded to about screen size (a 50 MP JPEG must not be decoded in full). */
     suspend fun previewPhoto(file: CameraFile, maxSide: Int): ImageBitmap? = withContext(Dispatchers.IO) {
+        // A copy on the phone: decoded from there (ImageDecoder also reads RAW .dng where the phone supports it).
+        file.localUri?.let { local ->
+            return@withContext runCatching {
+                val source = android.graphics.ImageDecoder.createSource(app.contentResolver, android.net.Uri.parse(local))
+                android.graphics.ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    val side = maxOf(info.size.width, info.size.height)
+                    var sample = 1
+                    while (side / (sample * 2) >= maxSide) sample *= 2
+                    decoder.setTargetSampleSize(sample)
+                }.asImageBitmap()
+            }.onFailure { log("просмотр ${file.name} с телефона: ${it.message}") }.getOrNull()
+        }
         // A live photo with a frame as its cover: show that (the gallery file), not the camera's photo.
         val bytes = (if (coverReplaced(file)) LiveCover.video(app, file.name)?.let { LiveCover.photoPart(app, it) } else null)
             ?: runCatching { session.fetchFile(session.previewUri(file)) }
                 .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
+        shownPhoto = file.name to bytes
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) sample *= 2
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
             ?.asImageBitmap()
+    }
+
+    /** The last camera photo shown in the viewer, for its EXIF in «i» without fetching it again. */
+    private var shownPhoto: Pair<String, ByteArray>? = null
+
+    /**
+     * «i» in the viewer: what is known about [file] — name, place, size, date; a photo's EXIF (camera, exposure,
+     * place); a video's resolution, frame rate, length, bit rate. From the phone's copy when there is one.
+     */
+    suspend fun fileInfo(file: CameraFile): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<Pair<String, String>>()
+        fun add(ru: String, en: String, value: Any?) {
+            value?.toString()?.takeIf { it.isNotBlank() }?.let { out += tr(ru, en) to it }
+        }
+        add("Файл", "File", file.name)
+        add("Где", "Where", if (file.isOnPhone) tr("на телефоне (DCIM/Camera)", "on the phone (DCIM/Camera)") else tr("на камере", "on the camera"))
+        add("Дата", "Date", file.created?.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")))
+        add("Размер", "Size", file.size?.let(::formatSize))
+        add("Избранное", "Favorite", if (file.name in favorites) "♥" else null)
+        val local = file.localUri?.let(android.net.Uri::parse)
+        if (file.kind == MediaKind.VIDEO) {
+            if (local != null) {
+                val r = android.media.MediaMetadataRetriever()
+                try {
+                    r.setDataSource(app, local)
+                    fun meta(key: Int) = r.extractMetadata(key)
+                    val w = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    val h = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    if (w != null && h != null) add("Разрешение", "Resolution", "$w × $h")
+                    add("Кадров/с", "Frame rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()?.let { "%.2f".format(it) } ?: file.fps)
+                    add("Длительность", "Length", meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { formatDuration((it / 1000).toInt()) })
+                    add("Битрейт", "Bit rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") })
+                    add("Поворот", "Rotation", meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.takeIf { it != "0" }?.let { "$it°" })
+                    add("Место", "Location", meta(android.media.MediaMetadataRetriever.METADATA_KEY_LOCATION))
+                } catch (e: RuntimeException) {
+                    log("сведения ${file.name}: ${e.message}")
+                } finally {
+                    r.release()
+                }
+            } else {
+                if (file.width != null && file.height != null) add("Разрешение", "Resolution", "${file.width} × ${file.height}")
+                add("Кадров/с", "Frame rate", file.fps)
+                add("Длительность", "Length", file.durationSec?.let(::formatDuration))
+            }
+            add("Отметок", "Highlights", highlights(file).size.takeIf { it > 0 })
+        } else {
+            val exif = runCatching {
+                when {
+                    local != null -> app.contentResolver.openInputStream(local)?.use { android.media.ExifInterface(it) }
+                    shownPhoto?.first == file.name -> android.media.ExifInterface(java.io.ByteArrayInputStream(shownPhoto!!.second))
+                    else -> null
+                }
+            }.getOrNull()
+            if (exif == null) {
+                if (file.width != null && file.height != null) add("Разрешение", "Resolution", "${file.width} × ${file.height}")
+            } else {
+                fun tag(t: String) = exif.getAttribute(t)
+                val w = tag(android.media.ExifInterface.TAG_IMAGE_WIDTH) ?: tag(android.media.ExifInterface.TAG_PIXEL_X_DIMENSION)
+                val h = tag(android.media.ExifInterface.TAG_IMAGE_LENGTH) ?: tag(android.media.ExifInterface.TAG_PIXEL_Y_DIMENSION)
+                if (w != null && h != null) add("Разрешение", "Resolution", "$w × $h")
+                add("Камера", "Camera", listOfNotNull(tag(android.media.ExifInterface.TAG_MAKE), tag(android.media.ExifInterface.TAG_MODEL)).joinToString(" "))
+                add("Снято", "Taken", tag(android.media.ExifInterface.TAG_DATETIME_ORIGINAL))
+                add("Выдержка", "Shutter", exif.getAttributeDouble(android.media.ExifInterface.TAG_EXPOSURE_TIME, 0.0).takeIf { it > 0 }?.let {
+                    if (it >= 1) "%.1f ".format(it) + tr("с", "s") else "1/${Math.round(1 / it)} " + tr("с", "s")
+                })
+                add("Диафрагма", "Aperture", tag(android.media.ExifInterface.TAG_F_NUMBER)?.let { "f/$it" })
+                add("ISO", "ISO", tag(android.media.ExifInterface.TAG_ISO_SPEED_RATINGS))
+                add("Экспокоррекция", "Exposure bias", tag(android.media.ExifInterface.TAG_EXPOSURE_BIAS_VALUE)?.takeIf { it != "0/1" && it != "0/10" && it != "0" })
+                add("Фокусное", "Focal length", exif.getAttributeDouble(android.media.ExifInterface.TAG_FOCAL_LENGTH, 0.0).takeIf { it > 0 }?.let { "%.1f ".format(it) + tr("мм", "mm") })
+                add("Баланс белого", "White balance", tag(android.media.ExifInterface.TAG_WHITE_BALANCE)?.let { if (it == "0") tr("авто", "auto") else tr("ручной", "manual") })
+                add("Программа", "Software", tag(android.media.ExifInterface.TAG_SOFTWARE))
+                exif.latLong?.let { (lat, lon) -> add("Место", "Location", "%.5f, %.5f".format(lat, lon)) }
+            }
+            add("Живое фото", "Live photo", if (file.isLive) tr("да", "yes") else null)
+        }
+        out
     }
 
     /** «Скачать» from the viewer: just this file. */
