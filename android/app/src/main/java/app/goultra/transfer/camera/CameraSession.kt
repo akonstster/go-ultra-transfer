@@ -284,6 +284,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return CameraRangeSource(cam, file.uri, size, block = 2L * 1024 * 1024, keep = 6, strict = true)
     }
 
+    /** Frames of the light copy (the one the viewer plays) for the editor's timeline; null without Wi-Fi. */
+    suspend fun frameReader(file: CameraFile): FrameReader? = withContext(Dispatchers.IO) {
+        val cam = wifiLink ?: return@withContext null
+        val uri = previewUri(file)
+        val size = Downloader.contentLength(cam, uri) ?: return@withContext null
+        RemoteFrames.reader(cam, uri, size)
+    }
+
     /** The full-quality file for reading its index ([Mp4Index]): small blocks, only what is asked for travels. */
     suspend fun indexSource(file: CameraFile): CameraRangeSource {
         val cam = link

@@ -81,11 +81,20 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RangeSlider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
@@ -259,7 +268,7 @@ private fun VideoPreview(
             prepare()
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+    DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
     var durationMs by remember(file.uri) { mutableLongStateOf(file.durationSec?.let { it * 1000L } ?: 0L) }
     LaunchedEffect(player) {
         while (true) {
@@ -332,7 +341,7 @@ private fun VideoPreview(
             )
         }
         if (film) {
-            if (pieces.isNotEmpty()) {
+            if (pieces.isNotEmpty() && !editing) {
                 FilmStrip(pieces, frames, current) { i ->
                     current = i
                     player.seekTo(pieces[i].startMs)
@@ -340,8 +349,9 @@ private fun VideoPreview(
                 }
             }
             if (editing || pieces.isEmpty()) {
-                PieceEditor(
-                    player, pieces, current, durationMs, edited, keys,
+                TimelineEditor(
+                    vm, file, player, pieces, current, durationMs, edited, keys,
+                    onSelect = { current = it },
                     onChange = { i, piece -> commit(pieces.toMutableList().also { it[i] = piece }, piece.startMs) },
                     onAdd = { at ->
                         // Not on top of another piece: into the free gap there (Highlights.pieceAt).
@@ -406,112 +416,244 @@ private fun FilmStrip(pieces: List<Highlight>, frames: List<ImageBitmap?>, curre
 }
 
 /**
- * Editing the pieces under the film strip: the selected piece's start and end as two handles (the slider spans the
- * piece and [EDIT_MARGIN_MS] either side as it was when selected; the picture follows the handle), a new 2 s piece
- * where the video stands (or in the free gap next to it), deleting the selected one, back to the camera's marks.
+ * Editing the pieces as in a video editor: frames along the whole video under a fixed playhead in the middle — drag
+ * the strip to move through the video (the picture follows), pinch to zoom from the whole video to a couple of
+ * seconds. Pieces are yellow bands over the frames; a tap selects one, its edges get handles: the start snaps to the
+ * nearest key frame (ticks at the top), the end is free (snaps too if the video has B-frames), neither crosses a
+ * neighbour. «+ Кусок» adds one at the playhead (into the free gap there).
  */
-@kotlin.OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PieceEditor(
+private fun TimelineEditor(
+    vm: CameraController,
+    file: CameraFile,
     player: ExoPlayer,
     pieces: List<Highlight>,
     current: Int,
     durationMs: Long,
     edited: Boolean,
     keys: KeyFrames?,
+    onSelect: (Int) -> Unit,
     onChange: (Int, Highlight) -> Unit,
     onAdd: (Long) -> Unit,
     onDelete: (Int) -> Unit,
     onReset: () -> Unit,
     onDone: () -> Unit,
 ) {
-    val piece = pieces.getOrNull(current)
-    Column(
-        Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 6.dp),
-    ) {
-        // The handles' positions while dragging (committed when the drag ends).
-        var range by remember(piece) { mutableStateOf((piece?.startMs ?: 0L).toFloat()..(piece?.endMs ?: 0L).toFloat()) }
-        if (piece != null) {
-            val end = piece.endMs!!
-            // The scale stays put while this piece is selected (re-scaling it after a drag made the other handle
-            // look moved); it only widens when the piece no longer fits (e.g. merged with a neighbour).
-            val base = remember(current, durationMs) {
-                val last = if (durationMs > 0) durationMs else end + EDIT_MARGIN_MS
-                maxOf(0L, piece.startMs - EDIT_MARGIN_MS).toFloat()..minOf(last, end + EDIT_MARGIN_MS).toFloat()
-            }
-            val window = minOf(base.start, piece.startMs.toFloat())..maxOf(base.endInclusive, end.toFloat())
-            // Key frames on the scale: where the start can stand.
-            val ticks = remember(keys, window) { keys?.ms.orEmpty().filter { it.toFloat() in window } }
-            if (ticks.isNotEmpty()) KeyFrameTicks(ticks, window)
-            RangeSlider(
-                value = range,
-                onValueChange = { r ->
-                    // The start jumps between key frames (the nearest one); the end is free — unless the video has
-                    // B-frames, then it snaps too. Neither crosses the other or the piece before.
-                    val minLen = Highlights.MIN_PIECE_MS
-                    val startMoved = r.start != range.start
-                    val start = if (startMoved && keys != null) {
-                        val lo = pieces.filter { it.endMs!! <= piece.startMs }.maxOfOrNull { it.endMs!! } ?: 0L
-                        keys.nearest(r.start.toLong(), maxOf(lo, window.start.toLong()), r.endInclusive.toLong() - minLen).toFloat()
-                    } else {
-                        r.start
-                    }
-                    val end = if (!startMoved && keys?.bFrames == true) {
-                        keys.nearest(r.endInclusive.toLong(), start.toLong() + minLen, window.endInclusive.toLong()).toFloat()
-                    } else {
-                        r.endInclusive
-                    }
-                    range = start..maxOf(start, end)
-                    player.pause()
-                    player.seekTo((if (startMoved) start else end).toLong())
-                },
-                onValueChangeFinished = { onChange(current, Highlight(range.start.toLong(), range.endInclusive.toLong())) },
-                valueRange = window,
-                colors = SliderDefaults.colors(
-                    thumbColor = MARK_COLOR, activeTrackColor = MARK_COLOR, inactiveTrackColor = Color(0x55FFFFFF),
-                ),
-            )
+    val density = LocalDensity.current
+    val tilePx = with(density) { TILE_WIDTH.toPx() }
+    val handlePx = with(density) { HANDLE_WIDTH.toPx() }
+    val duration = maxOf(durationMs, 1L)
+    var widthPx by remember { mutableIntStateOf(0) }
+    // Zoom (px per ms; 0 until the width is known) and the time under the playhead.
+    var pxPerMs by remember(file.uri) { mutableFloatStateOf(0f) }
+    var pos by remember(file.uri) { mutableLongStateOf(player.currentPosition) }
+    val minPpm = if (widthPx > 0) widthPx.toFloat() / duration else 0f
+    val maxPpm = if (widthPx > 0) maxOf(minPpm, widthPx / MIN_SPAN_MS) else 0f
+    LaunchedEffect(widthPx, duration) {
+        if (widthPx > 0) pxPerMs = if (pxPerMs == 0f) widthPx / minOf(duration, START_SPAN_MS).toFloat() else pxPerMs.coerceIn(minPpm, maxPpm)
+    }
+    // While the strip is being dragged (and a moment after) it leads and the player follows; otherwise the strip
+    // follows the playing video.
+    var touchedAt by remember { mutableLongStateOf(0L) }
+    var drag by remember { mutableStateOf<Highlight?>(null) } // the selected piece while a handle is dragged
+    LaunchedEffect(player) {
+        while (true) {
+            if (drag == null && android.os.SystemClock.uptimeMillis() - touchedAt > 400) pos = player.currentPosition
+            delay(30)
         }
-        // «Готово» on the line with the piece's times: the actions below need the whole width on a phone held upright.
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    }
+    val shown = if (drag != null && current in pieces.indices) pieces.toMutableList().also { it[current] = drag!! } else pieces
+    val latestShown by rememberUpdatedState(shown)
+    val latestSelect by rememberUpdatedState(onSelect)
+
+    // Frames: one per tile, at multiples of 2 s (the camera's key frame spacing), wider steps when zoomed out —
+    // the same times at every zoom, so loaded frames are reused. Nearest the playhead first.
+    val frames = remember(file.uri) { mutableStateMapOf<Long, ImageBitmap>() }
+    val step = if (pxPerMs > 0f) tileStep(pxPerMs, tilePx) else 0L
+    val half = if (pxPerMs > 0f) (widthPx / 2f / pxPerMs).toLong() else 0L
+    val firstTile = if (step > 0) maxOf(0L, (pos - 2 * half) / step) else 0L
+    val lastTile = if (step > 0) minOf((duration - 1) / step, (pos + 2 * half) / step) else -1L
+    LaunchedEffect(file.uri, step, firstTile, lastTile) {
+        if (step <= 0) return@LaunchedEffect
+        val wanted = (firstTile..lastTile).map { it * step }.filter { it !in frames }.sortedBy { abs(it - pos) }
+        for (t in wanted) vm.timelineFrame(file, t)?.let { frames[t] = it }
+    }
+
+    Column(Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(vertical = 6.dp)) {
+        // Where the playhead is, and the selected piece.
+        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            val sel = shown.getOrNull(current)
+            Text(clockTenths(pos), color = Color.White, fontSize = 13.sp)
             Text(
-                if (piece != null) {
-                    "${clockTenths(range.start.toLong())} – ${clockTenths(range.endInclusive.toLong())} · " +
-                        "%.1f ".format((range.endInclusive - range.start) / 1000.0) + tr("с", "s")
+                if (sel != null) {
+                    "   ${clockTenths(sel.startMs)} – ${clockTenths(sel.endMs!!)} · " + "%.1f ".format((sel.endMs - sel.startMs) / 1000.0) + tr("с", "s")
                 } else if (pieces.isEmpty()) {
-                    tr("Кусков нет — добавьте там, где стоит видео", "No pieces — add one where the video stands")
+                    "   " + tr("Кусков нет — добавьте у линии", "No pieces — add one at the line")
                 } else {
-                    tr("Выберите кусок в ленте или добавьте новый", "Pick a piece in the strip or add a new one")
+                    "   " + tr("Коснитесь куска, чтобы править", "Tap a piece to edit it")
                 },
-                color = if (piece != null) MARK_COLOR else Color(0xCCFFFFFF),
+                color = if (sel != null) MARK_COLOR else Color(0xCCFFFFFF),
                 fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             if (pieces.isNotEmpty()) Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton({ onAdd(player.currentPosition) }) { Text(tr("+ Кусок", "+ Piece"), color = Color.White) }
-            if (piece != null) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
+        Box(
+            Modifier.fillMaxWidth().height(TIMELINE_HEIGHT).onSizeChanged { widthPx = it.width }
+                .pointerInput(Unit) {
+                    detectTapGestures { o ->
+                        if (pxPerMs <= 0f) return@detectTapGestures
+                        val ms = pos + ((o.x - size.width / 2f) / pxPerMs).toLong()
+                        latestSelect(latestShown.indexOfFirst { ms >= it.startMs && ms < it.endMs!! })
+                    }
+                }
+                .pointerInput(widthPx, duration) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        if (pxPerMs <= 0f) return@detectTransformGestures
+                        pxPerMs = (pxPerMs * zoom).coerceIn(minPpm, maxPpm)
+                        if (pan.x != 0f) {
+                            pos = (pos - (pan.x / pxPerMs).toLong()).coerceIn(0L, duration)
+                            touchedAt = android.os.SystemClock.uptimeMillis()
+                            player.pause()
+                            player.seekTo(pos)
+                        }
+                    }
+                },
+        ) {
+            androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
+                val ppm = pxPerMs
+                if (ppm <= 0f || step <= 0) return@Canvas
+                val cx = size.width / 2f
+                fun x(ms: Long) = cx + (ms - pos) * ppm
+                val stripTop = KEY_TICKS_PX
+                val stripH = size.height - stripTop
+                for (k in firstTile..lastTile) {
+                    val t = k * step
+                    val left = x(t)
+                    val right = x(minOf(t + step, duration))
+                    if (right < 0 || left > size.width) continue
+                    val img = frames[t]
+                    if (img == null) {
+                        drawRect(Color(0xFF262626), Offset(left, stripTop), Size(right - left - 1, stripH))
+                    } else {
+                        drawCover(img, left, stripTop, right - left - 1, stripH)
+                    }
+                }
+                // Key frames: where a piece can start (only when they aren't packed too tight to see).
+                keys?.ms?.let { ks ->
+                    if (ks.size > 1 && (ks[1] - ks[0]) * ppm >= 6f) {
+                        for (k in ks) {
+                            val kx = x(k)
+                            if (kx in 0f..size.width) drawLine(Color(0xCCFFFFFF), Offset(kx, 0f), Offset(kx, stripTop - 2), 2f)
+                        }
+                    }
+                }
+                for ((i, p) in shown.withIndex()) {
+                    val left = x(p.startMs)
+                    val right = x(p.endMs!!)
+                    if (right < 0 || left > size.width) continue
+                    drawRect(MARK_COLOR.copy(alpha = 0.35f), Offset(left, stripTop), Size(right - left, stripH))
+                    if (i == current) drawRect(MARK_COLOR, Offset(left, stripTop), Size(right - left, stripH), style = Stroke(3f))
+                }
+                drawLine(Color.White, Offset(cx, 0f), Offset(cx, size.height), 4f)
+            }
+            // Handles on the selected piece's edges.
+            val sel = shown.getOrNull(current)
+            if (sel != null) {
+                for (edge in listOf(Edge.START, Edge.END)) {
+                    Box(
+                        Modifier
+                            .offset {
+                                val ms = if (edge == Edge.START) sel.startMs else sel.endMs!!
+                                val cx = widthPx / 2f
+                                IntOffset((cx + (ms - pos) * pxPerMs - handlePx / 2).roundToInt(), 0)
+                            }
+                            .size(HANDLE_WIDTH, TIMELINE_HEIGHT)
+                            .pointerInput(current, edge, pieces, keys, duration) {
+                                var raw = 0f
+                                detectHorizontalDragGestures(
+                                    onDragStart = {
+                                        val p = pieces.getOrNull(current) ?: return@detectHorizontalDragGestures
+                                        drag = p
+                                        raw = (if (edge == Edge.START) p.startMs else p.endMs!!).toFloat()
+                                        player.pause()
+                                    },
+                                    onDragEnd = {
+                                        drag?.let { p -> onChange(current, p); pos = if (edge == Edge.START) p.startMs else p.endMs!! }
+                                        drag = null
+                                    },
+                                    onDragCancel = { drag = null },
+                                ) { change, dx ->
+                                    change.consume()
+                                    val p = drag ?: return@detectHorizontalDragGestures
+                                    raw += dx / pxPerMs
+                                    val before = pieces.take(current).maxOfOrNull { it.endMs!! } ?: 0L
+                                    val after = pieces.drop(current + 1).minOfOrNull { it.startMs } ?: duration
+                                    val minLen = Highlights.MIN_PIECE_MS
+                                    val moved = if (edge == Edge.START) {
+                                        val hi = p.endMs!! - minLen
+                                        (keys?.nearest(raw.toLong(), before, hi) ?: raw.toLong()).coerceIn(before, maxOf(before, hi))
+                                    } else {
+                                        val lo = p.startMs + minLen
+                                        val free = raw.toLong()
+                                        (if (keys?.bFrames == true) keys.nearest(free, lo, after) else free).coerceIn(minOf(lo, after), after)
+                                    }
+                                    drag = if (edge == Edge.START) p.copy(startMs = moved) else p.copy(endMs = moved)
+                                    player.seekTo(moved)
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(Modifier.size(HANDLE_WIDTH - 6.dp, TIMELINE_HEIGHT - 6.dp).background(MARK_COLOR, RoundedCornerShape(4.dp)))
+                        Box(Modifier.size(2.dp, 18.dp).background(Color.Black))
+                    }
+                }
+            }
+        }
+        Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton({ onAdd(pos) }) { Text(tr("+ Кусок", "+ Piece"), color = Color.White) }
+            if (current in pieces.indices) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
             if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
         }
     }
 }
 
-/** Thin marks over the piece's scale where the video has key frames (the slider's track is inset by its thumbs). */
-@Composable
-private fun KeyFrameTicks(ticks: List<Long>, window: ClosedFloatingPointRange<Float>) {
-    androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(8.dp).padding(horizontal = 10.dp)) {
-        val span = window.endInclusive - window.start
-        if (span <= 0f) return@Canvas
-        for (t in ticks) {
-            val x = (t - window.start) / span * size.width
-            drawLine(Color(0x99FFFFFF), androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x, size.height), 2f)
-        }
-    }
+private enum class Edge { START, END }
+
+/** A frame fills its tile, cropped to the tile's shape. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCover(img: ImageBitmap, left: Float, top: Float, w: Float, h: Float) {
+    if (w <= 0f || h <= 0f) return
+    val tileAspect = w / h
+    val imgAspect = img.width.toFloat() / img.height
+    val (sw, sh) = if (imgAspect > tileAspect) (img.height * tileAspect).toInt() to img.height else img.width to (img.width / tileAspect).toInt()
+    drawImage(
+        img,
+        srcOffset = IntOffset((img.width - sw) / 2, (img.height - sh) / 2),
+        srcSize = IntSize(maxOf(1, sw), maxOf(1, sh)),
+        dstOffset = IntOffset(left.roundToInt(), top.roundToInt()),
+        dstSize = IntSize(maxOf(1, w.roundToInt()), maxOf(1, h.roundToInt())),
+    )
 }
 
-/** The slider for a piece spans it and this much either side. */
-private const val EDIT_MARGIN_MS = 5_000L
+/** Time per frame tile: 2 s (the key frame spacing), doubled until a tile is at least [tilePx] wide. */
+private fun tileStep(pxPerMs: Float, tilePx: Float): Long {
+    var step = 2_000L
+    while (step * pxPerMs < tilePx) step *= 2
+    return step
+}
+
+private val TIMELINE_HEIGHT = 64.dp
+private val TILE_WIDTH = 56.dp
+private val HANDLE_WIDTH = 22.dp
+
+/** Room above the frames for the key frame ticks. */
+private const val KEY_TICKS_PX = 14f
+
+/** The timeline opens showing this much (or the whole video if shorter) and zooms in to [MIN_SPAN_MS] per screen. */
+private const val START_SPAN_MS = 20_000L
+private const val MIN_SPAN_MS = 1_500f
 
 private fun clockTenths(ms: Long): String = "%d:%02d.%d".format(ms / 60_000, ms / 1000 % 60, ms / 100 % 10)
 

@@ -23,6 +23,7 @@ import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.ClipMaker
 import app.goultra.transfer.camera.KeyFrames
+import app.goultra.transfer.camera.FrameReader
 import app.goultra.transfer.camera.Mp4Index
 import app.goultra.transfer.camera.LocalTrailer
 import app.goultra.transfer.camera.RemoteFrames
@@ -45,6 +46,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -1849,6 +1851,44 @@ class CameraController(private val app: Application) {
     }
 
     fun clipName(file: CameraFile): String = file.stem + "_HL.mp4"
+
+    // ---------- the editor's timeline: frames along the whole video ----------
+
+    private val timelineLock = kotlinx.coroutines.sync.Mutex()
+    private var timelineReader: Pair<String, FrameReader>? = null
+    private val timelineFrames = LruCache<String, ImageBitmap>(600)
+
+    /** A small frame of [file] near [ms] (its key frame), from the phone's copy or the camera's light copy. */
+    suspend fun timelineFrame(file: CameraFile, ms: Long): ImageBitmap? {
+        val key = "${file.name}@$ms"
+        timelineFrames.get(key)?.let { return it }
+        return timelineLock.withLock {
+            withContext(Dispatchers.IO) {
+                timelineFrames.get(key) ?: run {
+                    val id = file.localUri ?: file.uri
+                    val reader = timelineReader?.takeIf { it.first == id }?.second
+                        ?: openFrameReader(file)?.also { r -> timelineReader?.second?.close(); timelineReader = id to r }
+                        ?: return@withContext null
+                    reader.frame(ms, 192)?.asImageBitmap()?.also { timelineFrames.put(key, it) }
+                }
+            }
+        }
+    }
+
+    private suspend fun openFrameReader(file: CameraFile): FrameReader? = runCatching {
+        file.localUri?.let { RemoteFrames.localReader(app, android.net.Uri.parse(it)) }
+            ?: if (conn == ConnState.Connected) session.frameReader(file) else null
+    }.onFailure { log("лента ${file.name}: ${it.message}") }.getOrNull()
+
+    /** The viewer closed: let the video go. */
+    fun closeTimeline() {
+        scope.launch {
+            timelineLock.withLock {
+                timelineReader?.second?.close()
+                timelineReader = null
+            }
+        }
+    }
 
     private val keyFrameCache = mutableMapOf<String, KeyFrames>()
 

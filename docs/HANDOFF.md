@@ -35,12 +35,14 @@ gallery.
 (they may have been edited there after the download), the phone's trailer is the fallback.
 
 **Step 3 (written together with step 2, not yet tested on a phone):**
-- Editing in the film strip (`ui/FileViewer.kt` → `PieceEditor`): «Править куски» → the selected piece as a
-  RangeSlider (the piece ± 5 s as selected — the scale must not change under the user's hands, it only widens if the piece outgrows it; the picture follows the handle), «+ Кусок» (2 s at the
-  player position, moved into the free gap: inside a piece → right after it, up to the next; `Highlights.pieceAt`), «Удалить», «Как на камере». The flag chip is shown for every video (pieces can be added to an
-  unmarked one). Edits: SharedPreferences `pieces`, key = file name, `start-end,…` ms, "" = all removed
-  (`Highlights.encode/decode/normalize`; edited pieces that only touch stay apart, the camera's marks keep
-  the camera's rule — touching ones merge); the camera file and its phone copy share them.
+- Editing (`ui/FileViewer.kt` → `TimelineEditor`, replaced the RangeSlider editor): a video-editor timeline under
+  the picture — frames along the whole video (key frames of the phone's copy or the camera's LRV, `FrameReader` kept
+  open, tiles at multiples of 2 s, cached in `CameraController.timelineFrame`), a fixed white playhead in the middle;
+  drag the strip to scrub (the player follows), pinch to zoom (whole video … 1.5 s per screen). Pieces are yellow
+  bands; tap selects, the selected one gets handles (start snaps to the nearest key frame, ticks on top; end free
+  unless B-frames; neither crosses a neighbour). «+ Кусок» at the playhead, «Удалить», «Как на камере», «Готово».
+  The film strip of piece cards stays for playback mode. Edits: SharedPreferences `pieces`, key = file name,
+  `start-end,…` ms, "" = all removed
 - «Скачать» on a video with pieces → «Целиком» / «Только отмеченное». A downloaded one gets «Клип» instead.
 - `camera/ClipMaker.kt`: MediaExtractor → MediaMuxer, no re-encoding; each piece from the key frame at/before its
   start (sound from there too) to the first frame at/after its end — a key frame only if B-frames are seen (first

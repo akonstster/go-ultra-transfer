@@ -36,4 +36,39 @@ object RemoteFrames {
             retriever.release()
         }
     }
+
+    /** [FrameReader] of a camera file over Range reads (only the index and the key frames asked for travel). */
+    fun reader(link: CameraLink, uri: String, size: Long): FrameReader? =
+        FrameReader.open { it.setDataSource(CameraRangeSource(link, uri, size)) }
+
+    /** [FrameReader] of a copy on the phone. */
+    fun localReader(context: Context, uri: Uri): FrameReader? = FrameReader.open { it.setDataSource(context, uri) }
+}
+
+/**
+ * One video kept open for many single frames — the editor's timeline asks for them one by one as it scrolls.
+ * Nearest key frame (quick); not thread-safe: one caller at a time, [close] when done.
+ */
+class FrameReader private constructor(private val retriever: MediaMetadataRetriever) {
+    private val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 16
+    private val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 9
+
+    fun frame(ms: Long, width: Int): Bitmap? = runCatching {
+        retriever.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, width, width * h / w)
+    }.getOrNull()
+
+    fun close() = retriever.release()
+
+    companion object {
+        fun open(setup: (MediaMetadataRetriever) -> Unit): FrameReader? {
+            val retriever = MediaMetadataRetriever()
+            return try {
+                setup(retriever)
+                FrameReader(retriever)
+            } catch (e: RuntimeException) {
+                retriever.release()
+                null
+            }
+        }
+    }
 }
