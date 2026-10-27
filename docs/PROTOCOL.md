@@ -261,6 +261,28 @@ ERASE_SD_CARD 24, RESTORE_FACTORY_SETTINGS 57.
 FreeFrame: the FOV setting doesn't change the camera's stream or video (always the full frame); the official app
 re-projects the preview itself (GyroFilter, per-FOV view angle).
 
+### Highlight marks in a file (*verified* 27.10 on 12 videos)
+
+Stored in the mp4 itself: Insta360 trailer record **0x000a** (`EXTRA_TYPE_HIGHLIGHT`; record ids = the `ExtraType`
+enum, full proto in `iliakonnov/insta360-nas`). Read it with **GetFileExtra 11 `{1: uri, 2: 10}` over Wi-Fi** (over BLE
+the camera answers with a different message). The trailer index has empty slots — don't stop at the first one; GO
+Ultra videos carry records 0x0101, 2, 3, 4, 9, 0x0a, 0x0b, 0x1d.
+
+Layout: blocks `[type u8][count u32 LE][values u64 LE, µs]`. No marks → eight empty blocks (types 1, 2, 3, 4, 0x10,
+0x11, 0x12, 0x15, count 0).
+
+| Type | Meaning | Values |
+|---|---|---|
+| 1 | marked while recording (app or camera button) | one u64 per mark |
+| 2 | added in the camera's playback | two u64 per mark (start, end) |
+
+Values are on the camera clock: seconds from the start = (value − metadata field 24 `first_frame_timestamp`) / 10⁶.
+A value **smaller** than `first_frame_timestamp` is already relative (seen as exactly 1 320 000 = 1.32 s). The camera
+groups nearby marks into one piece on its timeline. After an edit in playback the record holds only types 1–2 and the
+metadata gains 87 `bHighLightEidted` = 1 and 90 `edit_version` = 1. The official app keeps marks edited on the phone in
+its own database; they don't reach the camera. GET_EDITINFO_LIST 201 = favourites / AI analysis (not marks);
+PLAYBACK_GET_HIGHLIGHT_INFO 203 with the uri → 400.
+
 ### Camera info
 
 Options 48 model (`Insta360 GO Ultra`), 30 firmware (`v1.9.29`), 15 serial number — strings, one request each.

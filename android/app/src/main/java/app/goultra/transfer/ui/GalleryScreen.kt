@@ -47,6 +47,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -188,7 +189,6 @@ fun GalleryScreen(
             )
         },
         bottomBar = { if (vm.tab == Tab.FILES) BottomPanel(vm) },
-        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             TabRow(selectedTabIndex = vm.tab.ordinal) {
@@ -206,10 +206,19 @@ fun GalleryScreen(
         }
     }
     // Phone turned sideways on the camera tab: full-screen live view (the tilt sensor runs only here).
+    var sideways = 0
     if (vm.tab == Tab.CAMERA && vm.conn == ConnState.Connected) {
-        val rotation = rememberSidewaysRotation()
-        if (rotation != 0) LandscapeLive(vm, rotation, onRecord)
+        sideways = rememberSidewaysRotation()
+        if (sideways != 0) LandscapeLive(vm, sideways, onRecord)
     }
+    // Messages away from the controls (they are at the bottom): under the tabs, or mid-screen turned with the
+    // picture when the phone is sideways.
+    SnackbarHost(
+        snackbar,
+        Modifier.align(if (sideways != 0) Alignment.Center else Alignment.TopCenter)
+            .padding(top = if (sideways != 0) 0.dp else 150.dp)
+            .graphicsLayer { rotationZ = sideways.toFloat() },
+    )
     }
 }
 

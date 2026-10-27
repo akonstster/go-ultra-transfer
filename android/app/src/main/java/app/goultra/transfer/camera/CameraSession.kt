@@ -363,9 +363,12 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         // Read-only commands only: capture status, and the reads that check the newer code table (OpenInstaCine)
         // on GO Ultra — 166 GET_STORAGE, 171 GET_ZOOM, 242 GET_FIRMWARE_VERSIONS. Never anything else: 24 / 232 / 134
         // erase or format the card, 32 reboots, 12 deletes files, 81 runs shell commands.
-        require(code in setOf(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, 166, 171, 242)) { "command $code not allowed" }
-        val r = ble.request(code, body, timeoutMs = 3_000, quiet = true)
-        return "${r?.code} ${r?.body?.hex(120)}"
+        // + 201 GET_EDITINFO_LIST and 203 PLAYBACK_GET_HIGHLIGHT_INFO (reads; where the highlight marks may be),
+        // 11 GET_FILE_EXTRA (read; extra type 10 = HIGHLIGHT).
+        require(code in setOf(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, 166, 171, 242, 201, 203, 11)) { "command $code not allowed" }
+        // Wi-Fi only: over BLE the camera answers 11 with a different message (24579), not the reply.
+        val r = (tcp ?: return "нет Wi-Fi").request(code, body, 5_000)
+        return "${r?.code} ${r?.body?.hex(100_000)}"
     }
 
     /** Debug: log every nearby advertiser (camera module, Action Pod…). */
@@ -420,6 +423,23 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             if (r?.code == 200) flattenPb(r.body, "t$mode.", out)
         }
         return out
+    }
+
+    /** Debug: every metadata field of the newest video in GetFileInfoList (looking for the highlight marks). */
+    suspend fun debugNewestVideoInfo(nameContains: String? = null): String = tcpLock.withLock {
+        val meta = tcp?.fileInfoList() ?: return@withLock "нет списка файлов"
+        val uri = meta.keys.filter { it.endsWith(".mp4", ignoreCase = true) && (nameContains == null || nameContains in it) }
+            .maxByOrNull { Regex("""\d{8}_\d{6}""").find(it)?.value ?: "" } ?: return@withLock "нет видео"
+        val out = sortedMapOf<String, String>()
+        for (f in meta.getValue(uri)) {
+            val d = f.data
+            when {
+                f.wireType == 0 -> out["${f.number}"] = f.varint.toString()
+                d != null && !runCatching { d.pbFields() }.getOrNull().isNullOrEmpty() -> flattenPb(d, "${f.number}.", out)
+                d != null -> out["${f.number}"] = d.hex(48)
+            }
+        }
+        "$uri: $out"
     }
 
     private fun flattenPb(data: ByteArray, prefix: String, out: MutableMap<String, String>) {

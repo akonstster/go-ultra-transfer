@@ -623,6 +623,12 @@ class CameraController(private val app: Application) {
         }
     }
 
+    /** Debug: the newest video's metadata, field by field (where are the highlight marks?). */
+    fun debugVideoInfo(nameContains: String? = null) {
+        if (!debuggable || conn != ConnState.Connected) return
+        scope.launch { log("DEBUG видео: " + runCatching { session.debugNewestVideoInfo(nameContains) }.getOrElse { "ошибка: ${it.message}" }) }
+    }
+
     /** Debug: unfiltered BLE scan into the log (works without a connection). */
     fun debugScan() {
         if (debuggable) scope.launch { runCatching { session.scanAll() }.onFailure { log("скан: ${it.message}") } }
