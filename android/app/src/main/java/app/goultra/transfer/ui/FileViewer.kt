@@ -161,11 +161,14 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             // Video: the pieces to play, show in the film strip and download — the camera's marks as its film strip
             // shows them (2 s pieces, nearby ones merged), or the pieces as edited on the phone.
             val isVideo = file.kind == MediaKind.VIDEO
-            val limitMs = file.durationSec?.let { (it + 1) * 1000L }
+            // The video's real length once the player knows it; until then the listed whole seconds + 1 s. A mark set
+            // just before the recording stopped must not reach past the end.
+            var exactMs by remember(file.uri) { mutableStateOf<Long?>(null) }
+            val limitMs = exactMs ?: file.durationSec?.let { (it + 1) * 1000L }
             val marks by produceState(emptyList<Highlight>(), file.uri, file.localUri) { if (isVideo) value = vm.highlights(file) }
-            val cameraPieces = remember(marks) { Highlights.pieces(marks, limitMs) }
+            val cameraPieces = remember(marks, limitMs) { Highlights.pieces(marks, limitMs) }
             var edited by remember(file.name) { mutableStateOf(vm.editedPieces(file)) }
-            val pieces = edited ?: cameraPieces
+            val pieces = remember(edited, cameraPieces, limitMs) { Highlights.clip(edited ?: cameraPieces, limitMs) }
             /** Saves an edit (null: back to the camera's marks); returns the pieces now in effect. */
             fun edit(new: List<Highlight>?): List<Highlight> {
                 val tidy = new?.let { Highlights.normalize(it, limitMs) }
@@ -212,7 +215,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 )
             }
             when {
-                isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock)
+                isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock) { exactMs = it }
                 clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
                 else -> PhotoPreview(vm, file)
             }
@@ -388,6 +391,7 @@ private fun VideoPreview(
     onEdit: (List<Highlight>?) -> List<Highlight>,
     active: Boolean,
     onLock: (Boolean) -> Unit,
+    onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
     val source = remember { if (file.isOnPhone) null else vm.previewSource() }
@@ -415,8 +419,13 @@ private fun VideoPreview(
     var shift by remember(file.uri) { mutableStateOf(Offset.Zero) }
     var durationMs by remember(file.uri) { mutableLongStateOf(file.durationSec?.let { it * 1000L } ?: 0L) }
     LaunchedEffect(player) {
+        var reported = false
         while (true) {
-            if (player.duration > 0) durationMs = player.duration
+            if (player.duration > 0 && (!reported || player.duration != durationMs)) {
+                durationMs = player.duration
+                onDuration(durationMs)
+                reported = true
+            }
             delay(500)
         }
     }
