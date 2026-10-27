@@ -9,7 +9,11 @@ class CamMessage(val code: Int, val seq: Int, val body: ByteArray) {
  * GET_CURRENT_CAPTURE_STATUS → {1: {1: state (0 idle, 1 recording, 13 TimeShift, 24 Pure Video…), 2: seconds,
  * 10: phase}}; phase as field 7 of the 8208 notification: 0 running, 1 paused, 2 stopping (5 right at the start).
  */
-data class CaptureStatus(val state: Int, val seconds: Int, val phase: Int = 0) {
+/**
+ * [keyPoints]: CameraCaptureStatus.keyTimePointDetail (field 4, a string) — the recording's highlight marks as the
+ * camera keeps them, maybe; its format is not known yet (logged and shown in debug builds to find out).
+ */
+data class CaptureStatus(val state: Int, val seconds: Int, val phase: Int = 0, val keyPoints: String? = null) {
     val paused: Boolean get() = recording && phase == 1
     val recording: Boolean get() = state != 0
 
@@ -23,6 +27,7 @@ data class CaptureStatus(val state: Int, val seconds: Int, val phase: Int = 0) {
                 status.field(1)?.varint?.toInt() ?: 0,
                 status.field(2)?.varint?.toInt() ?: 0,
                 status.field(10)?.varint?.toInt() ?: 0,
+                status.field(4)?.string?.takeIf { it.isNotBlank() },
             )
         }
     }

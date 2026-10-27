@@ -657,12 +657,25 @@ private fun RecBadge(vm: CameraController, modifier: Modifier = Modifier) {
         vm.timeShiftNormal == false -> "● REC $real · " + tr("Авто", "Auto")
         else -> "● REC $real"
     }
-    Text(
-        text,
-        color = Color.White,
-        fontWeight = FontWeight.Bold,
-        modifier = modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
-    )
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text,
+            color = Color.White,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.background(RecordRed, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+        // Debug builds: the marks as the camera reports them while recording (keyTimePointDetail), raw.
+        val points = vm.capture?.keyPoints
+        if (vm.isDebugBuild && points != null) {
+            Text(
+                "отметки камеры: $points",
+                color = Color.White,
+                fontSize = 11.sp,
+                maxLines = 3,
+                modifier = Modifier.padding(top = 2.dp).background(Color(0x99000000)).padding(horizontal = 4.dp),
+            )
+        }
+    }
 }
 
 /**
