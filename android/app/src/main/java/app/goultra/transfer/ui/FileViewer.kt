@@ -56,6 +56,7 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -262,19 +263,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                         fontSize = 12.sp,
                     )
                 }
-                IconButton({ vm.toggleFavorite(file) }) {
-                    val fav = file.name in vm.favorites
-                    Icon(
-                        if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        tr("Избранное", "Favorite"),
-                        tint = if (fav) Color(0xFFFF5252) else Color.White,
-                    )
-                }
-                IconButton({ info = true }) { Icon(Icons.Outlined.Info, tr("Сведения", "Info"), tint = Color.White) }
-                // Sharing needs the file on the phone.
-                if (file.localUri != null) {
-                    IconButton({ share(context, listOf(file)) }) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
-                }
+                Spacer(Modifier.width(8.dp))
                 if (!file.isOnPhone && file.name !in vm.downloaded) {
                     // With pieces marked: the whole video or one clip of the pieces.
                     Button(
@@ -288,6 +277,26 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                         Spacer(Modifier.width(6.dp))
                         Text(tr("Клип", "Clip"))
                     }
+                }
+            }
+            // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
+            Column(
+                Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                val round = Modifier.background(Color(0x66000000), CircleShape)
+                IconButton({ vm.toggleFavorite(file) }, round) {
+                    val fav = file.name in vm.favorites
+                    Icon(
+                        if (fav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                        tr("Избранное", "Favorite"),
+                        tint = if (fav) Color(0xFFFF5252) else Color.White,
+                    )
+                }
+                IconButton({ info = true }, round) { Icon(Icons.Outlined.Info, tr("Сведения", "Info"), tint = Color.White) }
+                // Sharing needs the file on the phone.
+                if (file.localUri != null) {
+                    IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
                 }
             }
             if (choose) {

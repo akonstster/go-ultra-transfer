@@ -6,6 +6,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -334,7 +336,11 @@ private fun FileGrid(vm: CameraController) {
         snapshotFlow { gridState.firstVisibleItemIndex }.collect { vm.touch() } // scrolling counts as activity
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Scrolls sideways when the chips don't fit (narrow screens, large font).
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             val listed = vm.listedFiles
             val photos = listed.count { it.kind == MediaKind.PHOTO }
             val videos = listed.size - photos
