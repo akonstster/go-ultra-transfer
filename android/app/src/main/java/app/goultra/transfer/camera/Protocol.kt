@@ -5,17 +5,24 @@ class CamMessage(val code: Int, val seq: Int, val body: ByteArray) {
     val isResponse: Boolean get() = code < 1000
 }
 
-/** GET_CURRENT_CAPTURE_STATUS → {1: {1: state (0 idle, 1 recording, 13 TimeShift …), 2: seconds}}. */
-data class CaptureStatus(val state: Int, val seconds: Int) {
+/**
+ * GET_CURRENT_CAPTURE_STATUS → {1: {1: state (0 idle, 1 recording, 13 TimeShift, 24 Pure Video…), 2: seconds,
+ * 10: phase}}; phase as field 7 of the 8208 notification: 0 running, 1 paused, 2 stopping (5 right at the start).
+ */
+data class CaptureStatus(val state: Int, val seconds: Int, val phase: Int = 0) {
+    val paused: Boolean get() = recording && phase == 1
     val recording: Boolean get() = state != 0
 
     companion object {
         const val TIMESHIFT = 13
+        /** A Pure Video recording (also when the camera switched to Pure by itself). */
+        const val PURE = 24
         fun parse(body: ByteArray): CaptureStatus {
             val status = body.pbFields().field(1)?.data?.pbFields() ?: emptyList()
             return CaptureStatus(
                 status.field(1)?.varint?.toInt() ?: 0,
                 status.field(2)?.varint?.toInt() ?: 0,
+                status.field(10)?.varint?.toInt() ?: 0,
             )
         }
     }
@@ -37,7 +44,14 @@ object Proto {
     const val CMD_GET_CURRENT_CAPTURE_STATUS = 15
     const val CMD_IFRAME_REQUEST = 105
     /** UPDATE_LIVE_STREAM_PARAMS {1 encode, 2 width, 3 height, 4 fps}: after StartLiveStream and when the camera restarts its encoder. */
+    /** Codes above 152 come from the newer MessageCode table (OpenInstaCine / insta360-nas), checked on GO Ultra:
+     * GET_ZOOM 171 answers {1: 100}. Used: 60 SET_KEY_TIME_POINT (highlight mark), 164 PAUSE_RECORDING (toggle). */
+    const val CMD_SET_KEY_TIME_POINT = 60
+    const val CMD_PAUSE_RECORDING = 164
     const val NOTIFY_LIVE_STREAM_PARAMS = 8234
+    const val NOTIFY_CAPTURE_STATUS = 8208
+    /** {1: photo_sub_mode, 2: video_sub_mode}: the mode changed (from the app, the camera's menu, or by itself). */
+    const val NOTIFY_SUB_MODE = 8275
     const val CMD_SET_OPTIONS = 7
     const val CMD_SET_PHOTOGRAPHY_OPTIONS = 9
     const val CMD_GET_PHOTOGRAPHY_OPTIONS = 10

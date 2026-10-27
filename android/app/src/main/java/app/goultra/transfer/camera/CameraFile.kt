@@ -23,6 +23,12 @@ data class CameraFile(
     val kind: MediaKind get() = if (name.endsWith(".mp4", ignoreCase = true)) MediaKind.VIDEO else MediaKind.PHOTO
     val isLive: Boolean get() = name.startsWith("LIV_")
 
+    /** The live photo's picture (LIV_….jpg) — its clip is LIV_….mp4 of the same name. */
+    val isLivePhoto: Boolean get() = isLive && name.endsWith(".jpg", ignoreCase = true)
+
+    /** Base name shared by the files of one shot (LIV_…_074 for .jpg / .mp4 / .dng). */
+    val stem: String get() = name.substringBeforeLast('.')
+
     companion object {
         private val STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
         private val NAME_DATE = Regex("""_(\d{8})_(\d{6})_""")

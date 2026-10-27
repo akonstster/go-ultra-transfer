@@ -27,6 +27,7 @@ import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.LiveDecoder
+import app.goultra.transfer.camera.LiveCover
 import app.goultra.transfer.camera.MediaKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -178,7 +179,13 @@ class CameraController(private val app: Application) {
     }
 
     /** Seconds recorded by [now] (elapsedRealtime). */
-    fun recordSeconds(now: Long): Int = recordStartedAt?.let { ((now - it) / 1000).toInt().coerceAtLeast(0) } ?: capture?.seconds ?: 0
+    fun recordSeconds(now: Long): Int {
+        val at = if (paused) pausedAt else now // paused: the time stands
+        val s = recordStartedAt?.let { ((at - it) / 1000).toInt().coerceAtLeast(0) } ?: capture?.seconds ?: 0
+        if (capture?.recording != true) return s
+        shownSeconds = maxOf(shownSeconds, s)
+        return shownSeconds
+    }
 
     /**
      * A TimeShift recording: true = normal speed, false = Auto (sped up), null = no TimeShift recording. Auto picks
@@ -287,6 +294,11 @@ class CameraController(private val app: Application) {
             }
         }
         session.onLiveParams = { scope.launch { onLiveParamsChanged() } }
+        // The mode changed on the camera (its menu, or by itself: Video → Pure Video in the dark): settings, the
+        // photo-while-recording button etc. follow it. A change from the app itself is re-read anyway: harmless.
+        session.onModeChanged = { scope.launch { if (settingBusy == null) refreshSettings() } }
+        // Paused / resumed (our button or the camera's): the time on screen stops and goes on with the camera's.
+        session.onCapturePhase = { phase -> scope.launch { if (capture?.recording == true) applyPause(phase == 1) } }
         session.onLost = {
             scope.launch {
                 if (conn == ConnState.Connected) {
@@ -310,11 +322,117 @@ class CameraController(private val app: Application) {
         }
     }
 
+    /** Clip of each live photo (LIV_….jpg → LIV_….mp4): shown as one LIVE tile, downloaded together. */
+    private val liveClips: Map<String, CameraFile>
+        get() {
+            val clips = files.filter { it.isLive && it.kind == MediaKind.VIDEO }.associateBy { it.stem }
+            return files.filter { it.isLivePhoto }.mapNotNull { p -> clips[p.stem]?.let { p.name to it } }.toMap()
+        }
+
+    fun liveClipOf(file: CameraFile): CameraFile? = if (file.isLivePhoto) liveClips[file.name] else null
+
+    /** A cover change (frame → photo, or back) is running. */
+    var coverBusy by mutableStateOf<String?>(null)
+        private set
+
+    /** Shots whose cover is a frame of the clip instead of the camera's photo (to offer «back to the photo»). */
+    private var replacedCovers by mutableStateOf(prefs.getStringSet("covers_replaced", emptySet())!!.toSet())
+
+    fun coverReplaced(file: CameraFile): Boolean = file.stem in replacedCovers
+
+    /** Bumped after every cover change: the viewer reloads the photo. */
+    var coverVersion by mutableStateOf(0)
+        private set
+
+    private fun markCover(file: CameraFile, replaced: Boolean) {
+        replacedCovers = if (replaced) replacedCovers + file.stem else replacedCovers - file.stem
+        prefs.edit().putStringSet("covers_replaced", replacedCovers).apply()
+        coverVersion++
+    }
+
+    /**
+     * The live photo's cover becomes the clip's frame at [us]: in the gallery file the photo part is replaced by
+     * that frame (EXIF kept, clip untouched). Not in the gallery yet, as a plain photo, or with the light copy of
+     * the clip: it is first downloaded as a live photo with the original clip (the frame then is 3840×2880).
+     */
+    fun setLiveCover(file: CameraFile, us: Long) = changeCover(file, tr("Меняю обложку…", "Changing the cover…")) {
+        val v = liveFileWithOriginalClip(file) ?: return@changeCover tr("Не удалось скачать живое фото", "Couldn't download the live photo")
+        val frame = withContext(Dispatchers.IO) { LiveCover.frame(app, v, us) }
+            ?: return@changeCover tr("Не удалось взять кадр из видео", "Couldn't take the frame from the clip")
+        withContext(Dispatchers.IO) {
+            val photo = LiveCover.jpeg(frame, LiveCover.photoPart(app, v))
+            LiveCover.replacePhoto(app, v, photo, app.cacheDir)
+            showThumb(file, frame)
+            frame.recycle()
+        }
+        markCover(file, true)
+        tr("Обложка заменена кадром из видео", "The cover is now the frame from the clip")
+    }
+
+    /** Back to the camera's own photo as the cover (downloaded again from the camera). */
+    fun restoreLiveCover(file: CameraFile) = changeCover(file, tr("Возвращаю исходное фото…", "Restoring the original photo…")) {
+        val v = withContext(Dispatchers.IO) { LiveCover.video(app, file.name) }
+            ?: return@changeCover tr("Живого фото нет в галерее", "The live photo isn't in the gallery")
+        val original = session.fetchFile(file.uri)
+        withContext(Dispatchers.IO) { LiveCover.replacePhoto(app, v, original, app.cacheDir) }
+        memCache.remove(file.name)
+        File(thumbDir, file.name + ".jpg").delete()
+        markCover(file, false)
+        tr("Обложка — снова исходное фото", "The cover is the original photo again")
+    }
+
+    private fun changeCover(file: CameraFile, busy: String, work: suspend () -> String) {
+        if (coverBusy != null || isDownloading || conn != ConnState.Connected) return
+        touch()
+        coverBusy = busy
+        scope.launch {
+            message = try {
+                work()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("cover ${file.name}: ${e.message}")
+                tr("Ошибка: ", "Error: ") + e.message
+            } finally {
+                coverBusy = null
+            }
+        }
+    }
+
+    /** The gallery live photo of [file], downloaded (again) if missing, plain, or holding only the light clip copy. */
+    private suspend fun liveFileWithOriginalClip(file: CameraFile): LiveCover.Video? {
+        val clip = liveClipOf(file) ?: return null
+        val have = withContext(Dispatchers.IO) { LiveCover.video(app, file.name) }
+        if (have != null && withContext(Dispatchers.IO) { LiveCover.width(app, have) } >= 2000) return have
+        coverBusy = tr("Скачиваю живое фото…", "Downloading the live photo…")
+        session.download(file, overwrite = true, liveVideo = clip) { done, total ->
+            scope.launch { coverBusy = tr("Скачиваю живое фото… ", "Downloading the live photo… ") + (if (total > 0) "${done * 100 / total} %" else "") }
+        }
+        downloaded = downloaded + file.name
+        coverBusy = tr("Меняю обложку…", "Changing the cover…")
+        return withContext(Dispatchers.IO) { LiveCover.video(app, file.name) }
+    }
+
+    /** The list tile shows the new cover (the cached camera thumbnail would show the old photo). */
+    private fun showThumb(file: CameraFile, frame: Bitmap) {
+        val w = 480
+        val small = Bitmap.createScaledBitmap(frame, w, (w.toFloat() * frame.height / frame.width).toInt(), true)
+        saveAtomically(File(thumbDir, file.name + ".jpg"), small)
+        memCache.put(file.name, small.asImageBitmap())
+    }
+
+    /** The file list without live-photo clips (they belong to their photo's tile). */
+    val listedFiles: List<CameraFile>
+        get() {
+            val paired = liveClips.values.map { it.name }.toSet()
+            return files.filter { it.name !in paired }
+        }
+
     val visibleFiles: List<CameraFile>
         get() = when (filter) {
-            Filter.ALL -> files
-            Filter.PHOTO -> files.filter { it.kind == MediaKind.PHOTO }
-            Filter.VIDEO -> files.filter { it.kind == MediaKind.VIDEO }
+            Filter.ALL -> listedFiles
+            Filter.PHOTO -> listedFiles.filter { it.kind == MediaKind.PHOTO }
+            Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
         }
 
     val selectedFiles: List<CameraFile> get() = files.filter { it.name in selected }
@@ -490,6 +608,18 @@ class CameraController(private val app: Application) {
         scope.launch {
             val reply = runCatching { session.rawCommand(code, body) }.getOrElse { "ошибка: ${it.message}" }
             log("DEBUG команда $code [$bodyHex] → $reply")
+        }
+    }
+
+    /** Debug: copies one camera file (read-only HTTP GET) into the app's files folder, for analysis on the PC. */
+    fun debugFetch(uri: String) {
+        if (!debuggable || conn != ConnState.Connected || !uri.startsWith("/DCIM/")) return
+        scope.launch {
+            runCatching {
+                val bytes = session.fetchFile(uri)
+                withContext(Dispatchers.IO) { File(app.getExternalFilesDir(null), uri.substringAfterLast('/')).writeBytes(bytes) }
+                log("DEBUG скопирован $uri: ${bytes.size} Б")
+            }.onFailure { log("DEBUG копирование $uri: ${it.message}") }
         }
     }
 
@@ -767,11 +897,22 @@ class CameraController(private val app: Application) {
         val now = SystemClock.elapsedRealtime()
         if (!status.recording) {
             recordStartedAt = null
+            shownSeconds = 0
+            paused = false
+        } else if (recordStartedAt == null) {
+            // A recording seen for the first time (started now, or joined — maybe paused): the camera's time.
+            shownSeconds = 0
+            recordStartedAt = now - status.seconds * 1000L - 500
+            paused = status.paused
+            if (paused) pausedAt = now
         } else {
-            // The camera's seconds are whole (true time is s…s+1): re-anchor only when the phone clock drifts out.
-            val shown = recordStartedAt?.let { (now - it) / 1000.0 }
-            if (shown == null || shown < status.seconds - 0.2 || shown > status.seconds + 1.5) {
-                recordStartedAt = now - status.seconds * 1000L - 500
+            applyPause(status.paused)
+            if (!paused) {
+                // The camera's seconds are whole (true time is s…s+1): re-anchor only when the phone clock drifts out.
+                val shown = (now - recordStartedAt!!) / 1000.0
+                if (shown < status.seconds - 0.2 || shown > status.seconds + 1.5) {
+                    recordStartedAt = now - status.seconds * 1000L - 500
+                }
             }
         }
         if (status.state != CaptureStatus.TIMESHIFT) timeShiftNormal = null
@@ -813,6 +954,95 @@ class CameraController(private val app: Application) {
         pauseLive()
         session.closeWifi()
         conn = ConnState.Remote
+    }
+
+    /** A photo during a video recording is allowed now (CONF `shoot_on_video`: Video, Loop, FreeFrame, Toddler Titan,
+     * not at every resolution / field of view). */
+    val canShootOnVideo: Boolean
+        get() {
+            if (capture?.recording != true) return false
+            val s = settings ?: return false
+            val mode = s.mode ?: return false
+            // Not at zoom ×2 (the camera refuses; CONF doesn't say so).
+            if (s.values["undamage_zoom"] == "true" || s.values["damage_zoom"] == "true") return false
+            return conf?.allowed(mode, "shoot_on_video", s.values)?.contains("true") == true
+        }
+
+    var photoBusy by mutableStateOf(false)
+        private set
+
+    /** The running recording is paused (tracked here: set by the app's own toggle, cleared when it ends). */
+    var paused by mutableStateOf(false)
+        private set
+
+    /** Pause is offered in the modes whose CONF lists `pause_in_video` (Video, Pure, Toddler Titan, slow motion…). */
+    val canPause: Boolean
+        get() = capture?.recording == true && settings?.mode?.let { conf?.supports(it, "pause_in_video") } == true
+
+    /** When the pause began (phone clock): the timer stands still meanwhile. */
+    private var pausedAt = 0L
+
+    /** The highest time shown in this recording: corrections never make it step back. Reset per recording. */
+    private var shownSeconds = 0
+
+    /** Paused ↔ running: the timer stands still while paused and goes on from the same second. */
+    private fun applyPause(now: Boolean) {
+        if (now == paused) return
+        paused = now
+        if (now) {
+            pausedAt = SystemClock.elapsedRealtime()
+        } else {
+            recordStartedAt = recordStartedAt?.let { it + (SystemClock.elapsedRealtime() - pausedAt) }
+        }
+    }
+
+    /** The state itself comes from the camera's 8208 ([CameraSession.onCapturePhase]). */
+    fun togglePause() = recordingAction(if (paused) tr("Запись продолжена", "Recording resumed") else tr("Пауза", "Paused")) {
+        session.togglePause()
+    }
+
+    /** Marks during any video recording (Pure Video included). */
+    val canMark: Boolean get() = capture?.recording == true
+
+    fun markHighlight() = recordingAction(tr("Отметка поставлена", "Highlight marked")) {
+        session.markHighlight(recordSeconds(SystemClock.elapsedRealtime()) * 1000L)
+    }
+
+    private fun recordingAction(done: String, action: suspend () -> Boolean) {
+        if (photoBusy || !session.hasControl) return
+        touch()
+        photoBusy = true
+        scope.launch {
+            try {
+                message = if (action()) done else tr("Камера не выполнила команду", "The camera didn't do it")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("recording action: ${e.message}")
+                message = tr("Ошибка: ", "Error: ") + e.message
+            } finally {
+                photoBusy = false
+            }
+        }
+    }
+
+    /** TAKE_PICTURE while the camera records: the recording goes on, a photo file appears next to the video. */
+    fun takePhotoWhileRecording() {
+        if (photoBusy || !session.hasControl) return
+        touch()
+        photoBusy = true
+        scope.launch {
+            try {
+                message = if (session.takePicture()) tr("Фото снято", "Photo taken") else tr("Камера не сделала снимок", "The camera didn't take the photo")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("photo while recording: ${e.message}")
+                message = tr("Ошибка: ", "Error: ") + e.message
+            } finally {
+                photoBusy = false
+            }
+        }
     }
 
     /** TimeShift during a recording: Auto (sped up) ↔ normal speed, like the camera's own switch. */
@@ -1192,6 +1422,9 @@ class CameraController(private val app: Application) {
     private fun onLiveParamsChanged() {
         val now = SystemClock.elapsedRealtime()
         if (liveDecoder == null || conn != ConnState.Connected || now - liveStartedAt < 5_000) return
+        // During a recording 8234 comes with a zoom (the crop window changes, twice): the official app just keeps
+        // the stream; a stop/start then would land in the middle of the camera's work.
+        if (capture?.recording == true) return
         val surface = liveSurfaces.lastOrNull() ?: return
         log("камера перезапустила поток (8234): перезапускаю трансляцию")
         restartLive(surface)
@@ -1269,6 +1502,8 @@ class CameraController(private val app: Application) {
         radios = PhoneRadios.check(app)
         touch()
         resumeLive()
+        // Files deleted in the gallery meanwhile lose their «downloaded» tick.
+        scope.launch { refreshDownloaded() }
         if (resumeOnForeground && onboarded) {
             resumeOnForeground = false
             if (resumeControlOnly) reconnectControl() else connect()
@@ -1369,8 +1604,10 @@ class CameraController(private val app: Application) {
 
     /** Photo for the viewer, decoded to about screen size (a 50 MP JPEG must not be decoded in full). */
     suspend fun previewPhoto(file: CameraFile, maxSide: Int): ImageBitmap? = withContext(Dispatchers.IO) {
-        val bytes = runCatching { session.fetchFile(session.previewUri(file)) }
-            .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
+        // A live photo with a frame as its cover: show that (the gallery file), not the camera's photo.
+        val bytes = (if (coverReplaced(file)) LiveCover.video(app, file.name)?.let { LiveCover.photoPart(app, it) } else null)
+            ?: runCatching { session.fetchFile(session.previewUri(file)) }
+                .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
@@ -1398,7 +1635,8 @@ class CameraController(private val app: Application) {
         deleting = true
         scope.launch {
             try {
-                val failed = session.deleteFiles(files)
+                // A live photo's tile stands for its clip too (and the clip's .lrv, added by deleteFiles).
+                val failed = session.deleteFiles(files + files.mapNotNull(::liveClipOf))
                 message = when {
                     failed == null -> tr("Камера не удалила файлы", "The camera didn't delete the files")
                     failed.isEmpty() -> tr("Удалено с камеры: ", "Deleted from the camera: ") + files.size
@@ -1455,6 +1693,7 @@ class CameraController(private val app: Application) {
 
     fun downloadSelected(overwrite: Boolean) {
         if (isDownloading) return
+        // A live photo goes with its clip as one gallery file.
         val queue = selectedFiles.filter { overwrite || it.name !in downloaded }.sortedBy { it.created }
         if (queue.isEmpty()) {
             selected.clear()
@@ -1471,7 +1710,7 @@ class CameraController(private val app: Application) {
                     var startedFrom = -1L
                     download = DownloadProgress(file.name, i + 1, queue.size, 0, file.size ?: 0, 0)
                     try {
-                        session.download(file, overwrite) { done, total ->
+                        session.download(file, overwrite, liveVideo = liveClipOf(file)) { done, total ->
                             if (startedFrom < 0) startedFrom = done
                             val sec = (System.currentTimeMillis() - startedAt) / 1000.0
                             val speed = if (sec > 0.5) ((done - startedFrom) / sec).toLong() else 0L

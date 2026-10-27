@@ -232,6 +232,35 @@ in the read-back.
 
 Ask for each Options type in its own request: a type the camera doesn't answer makes the whole request fail.
 
+### Live photos (LIV)
+
+A live photo is `LIV_….jpg` (the photo) + `LIV_….mp4` (≈3 s: 1.5 s before and after the shot, 3840×2880 H.265,
+~18 MB) + `LIV_….lrv` (1280×960 copy, ~6 MB). The app saves one file in the Android Motion Photo 1.0 format: the
+full-size JPEG with Camera + Container XMP, the MP4 appended. (Huawei Gallery recognises only its own trailer
+`"v3_f…_c" "0:<cover ms>" "LIVE_<n>"`, 20-byte fields at the end; the official app writes that on Huawei phones,
+with the photo scaled down to 1440×1080 and the clip re-encoded.)
+
+### During a recording (*verified* 27.10)
+
+Codes above 152 come from a newer MessageCode table (OpenInstaCine `tools/luna_message_codes.json`); on GO Ultra
+GET_ZOOM 171 answers `{1: 100}`, so the numbering holds.
+
+| What | Command |
+|---|---|
+| pause ↔ resume | PAUSE_RECORDING **164**, empty body (one command for both) |
+| highlight mark | SET_KEY_TIME_POINT **60** `{1: ms since the recording started}` (empty → 400); the camera shows the marks as a film strip |
+| photo while recording | TAKE_PICTURE 3 (CONF `shoot_on_video`; not at zoom ×2) |
+| zoom ×2 | SET_PHOTOGRAPHY_OPTIONS as usual, but **over Wi-Fi**: the answer comes after ~2.5 s with two 8234 in between — don't restart the stream then |
+| phase | 8208 field 7 / capture status field 10: 0 running, 1 paused, 2 stopping; capture state 24 = Pure Video (the camera may switch to it by itself in the dark — 8275) |
+
+While paused the camera takes exposure, ISO, white balance, colour, portrait, blur reduction, sharpness, metering
+and FOV changes; not resolution, FlowState, HDR, LOG. Other commands seen there: SET_SHUTDOWN 219, SET/GET_ZOOM
+170/171, HIGHLIGHT_REC_TIME 156. **Dangerous, never send:** FORMAT_STORAGE 232, USBCARD_FORMAT 134, EXEC_CMD 81,
+ERASE_SD_CARD 24, RESTORE_FACTORY_SETTINGS 57.
+
+FreeFrame: the FOV setting doesn't change the camera's stream or video (always the full frame); the official app
+re-projects the preview itself (GyroFilter, per-FOV view angle).
+
 ### Camera info
 
 Options 48 model (`Insta360 GO Ultra`), 30 firmware (`v1.9.29`), 15 serial number — strings, one request each.

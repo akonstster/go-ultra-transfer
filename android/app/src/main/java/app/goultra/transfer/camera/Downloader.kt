@@ -120,6 +120,8 @@ object Downloader {
     /**
      * [overwrite]: re-download a file that is already complete in the gallery (same item, no duplicate).
      * Otherwise a complete file is left as is and a partial one is resumed. [takenAtMillis] goes to DATE_TAKEN.
+     * [liveVideo]: the photo [uri] is a live photo and this is its clip — one gallery file is written
+     * ([LivePhoto]: the photo with the Motion Photo XMP, the clip right after it, resumable).
      */
     suspend fun download(
         context: Context,
@@ -127,12 +129,18 @@ object Downloader {
         uri: String,
         overwrite: Boolean = false,
         takenAtMillis: Long? = null,
+        liveVideo: String? = null,
         onProgress: (done: Long, total: Long) -> Unit,
     ): Uri = withContext(Dispatchers.IO) {
         val name = uri.substringAfterLast('/')
         val mime = mimeType(name)
         val video = mime.startsWith("video/")
         val resolver = context.contentResolver
+        // Live photo: the photo part (with the XMP) is the same on every attempt, so a resume can trust it.
+        val live = liveVideo?.let { clip ->
+            val size = contentLength(link, clip) ?: throw IOException("нет размера видео $clip")
+            Triple(clip, size, LivePhoto.head(fetch(link, uri), size))
+        }
         val existing = findExisting(resolver, collection(video), name)
         val item = existing?.uri ?: resolver.insert(
             collection(video),
@@ -159,7 +167,16 @@ object Downloader {
             }.getOrNull() ?: 0L
             restart = false
             try {
-                transfer(resolver, link, uri, item, have, onProgress)
+                if (live == null) {
+                    transfer(resolver, link, uri, item, have, onProgress)
+                } else {
+                    val (clip, size, head) = live
+                    val base = head.size.toLong()
+                    if (have < base) writeAt(resolver, item, 0, head)
+                    val total = base + size
+                    transfer(resolver, link, clip, item, (have - base).coerceIn(0, size), { done, _ -> onProgress(base + done, total) }, base)
+                    onProgress(total, total)
+                }
                 break
             } catch (e: IOException) {
                 if (++attempt > MAX_RETRIES) throw e
@@ -178,7 +195,21 @@ object Downloader {
         item
     }
 
-    /** Writes the file from byte [from] (Range) to the end; throws IOException on a short transfer. */
+    /** Truncates the item to [at] and writes [bytes] there (live photo: its photo part). */
+    private fun writeAt(resolver: ContentResolver, item: Uri, at: Long, bytes: ByteArray) {
+        resolver.openFileDescriptor(item, "rw")!!.use { pfd ->
+            FileOutputStream(pfd.fileDescriptor).use { out ->
+                out.channel.truncate(at)
+                out.channel.position(at)
+                out.write(bytes)
+            }
+        }
+    }
+
+    /**
+     * Writes the camera file from its byte [from] (Range) to the end, into the item at [base] + [from] (the live
+     * photo's clip follows its photo part); throws IOException on a short transfer.
+     */
     private suspend fun transfer(
         resolver: ContentResolver,
         link: CameraLink,
@@ -186,6 +217,7 @@ object Downloader {
         item: Uri,
         from: Long,
         onProgress: (done: Long, total: Long) -> Unit,
+        base: Long = 0,
     ) {
         val conn = open(link, uri)
         try {
@@ -201,8 +233,8 @@ object Downloader {
             var done = start
             resolver.openFileDescriptor(item, "rw")!!.use { pfd ->
                 FileOutputStream(pfd.fileDescriptor).use { out ->
-                    out.channel.truncate(start)
-                    out.channel.position(start)
+                    out.channel.truncate(base + start)
+                    out.channel.position(base + start)
                     conn.inputStream.use { input ->
                         val buf = ByteArray(256 * 1024)
                         var reportedAt = 0L
@@ -234,6 +266,9 @@ object Downloader {
         val conn = runCatching { open(link, uri) }.getOrNull() ?: return@withContext null
         try {
             conn.requestMethod = "HEAD"
+            // The camera's server sends the body even for HEAD: a kept-alive connection would hand that video to
+            // the next request as its «status line». Close it after this one.
+            conn.setRequestProperty("Connection", "close")
             if (conn.responseCode == 200) conn.contentLengthLong.takeIf { it > 0 } else null
         } catch (e: java.io.IOException) {
             null

@@ -55,6 +55,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatterySaver
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.BurstMode
@@ -339,6 +342,17 @@ internal fun locked(param: String, values: Map<String, String>): Boolean = when 
 private const val PORTRAIT_BRIGHTEN = "portrait_brighten"
 private const val PORTRAIT_SMOOTH = "portrait_smooth"
 
+/**
+ * What the camera lets change while a recording is paused (checked on the camera 27.10): exposure (auto / manual,
+ * ISO, shutter, EV), white balance, colour, face brighten / smooth, blur reduction, sharpness, metering, field of
+ * view. Not resolution, FlowState, horizon, HDR, LOG.
+ */
+private val PAUSE_EDITABLE = setOf(
+    "exposure_program", "exposure_iso", "exposure_shutter_speed", "exposure_bias", "video_iso_top_limit",
+    "white_balance", "filter_mode", PORTRAIT_BRIGHTEN, PORTRAIT_SMOOTH, "dark_eis_enable", "sharpness_level",
+    "metering_mode", "fov_type",
+)
+
 /** The CONF parameter behind a tile (the two portrait switches share self_portrait_switch_2). */
 private fun confParam(param: String) =
     if (param == PORTRAIT_BRIGHTEN || param == PORTRAIT_SMOOTH) "self_portrait_switch_2" else param
@@ -411,7 +425,8 @@ fun CameraTab(vm: CameraController, onConnect: () -> Unit, onRecord: () -> Unit)
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             if (linked && settings != null) {
-                SettingsGrid(vm, settings, conf, enabled = !recording)
+                // During a pause the camera takes some setting changes, as from its own menu.
+                SettingsGrid(vm, settings, conf, editable = { !recording || (vm.paused && it in PAUSE_EDITABLE) })
                 if (conn == ConnState.Connected) {
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -458,20 +473,31 @@ fun CameraTab(vm: CameraController, onConnect: () -> Unit, onRecord: () -> Unit)
             ) {
                 if (linked && settings != null) ModeRow(vm, settings, enabled = !recording && vm.settingBusy == null)
                 Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.width(88.dp), contentAlignment = Alignment.Center) {
-                        if (vm.timeShiftNormal != null) SpeedButton(vm) else ZoomButton(vm, settings, conf)
+                // Fixed slots (a button that isn't available leaves its place empty, nothing moves):
+                // [battery saving] [photo while recording / TimeShift speed] ⬤ [pause] [highlight mark].
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Slot { if (recording && conn == ConnState.Connected) EcoButton(vm) }
+                        Slot {
+                            when {
+                                vm.timeShiftNormal != null -> SpeedButton(vm)
+                                vm.canShootOnVideo -> PhotoOnVideoButton(vm)
+                            }
+                        }
                     }
-                    RecordButton(
-                        recording = recording,
-                        picture = picture,
-                        busy = (vm.recordBusy && vm.countdown == null) || conn is ConnState.Working,
-                        countdown = vm.countdown,
-                    ) {
-                        if (recording) vm.stopRecording() else onRecord()
+                    Box(Modifier.padding(horizontal = 12.dp)) {
+                        RecordButton(
+                            recording = recording,
+                            picture = picture,
+                            busy = (vm.recordBusy && vm.countdown == null) || conn is ConnState.Working,
+                            countdown = vm.countdown,
+                        ) {
+                            if (recording) vm.stopRecording() else onRecord()
+                        }
                     }
-                    Box(Modifier.width(88.dp), contentAlignment = Alignment.Center) {
-                        if (recording && conn == ConnState.Connected) EcoButton(vm)
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Slot { if (vm.canPause) PauseButton(vm) }
+                        Slot { if (vm.canMark) MarkButton(vm) }
                     }
                 }
                 if (!linked) {
@@ -551,6 +577,8 @@ private fun PreviewBox(
         // Card and battery on top, the recording time at the bottom (they don't fit one row in TimeShift).
         if (live) settings?.card?.let { CardChip(it, Modifier.align(Alignment.TopStart).padding(10.dp)) }
         if (recording) RecBadge(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp))
+        // Zoom on the picture itself (it changes what is seen there), bottom right.
+        if (live) Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) { ZoomButton(vm, settings, vm.conf) }
         if (live && (settings?.batteryPercent != null || settings?.podBatteryPercent != null)) {
             Row(
                 Modifier.align(Alignment.TopEnd).padding(10.dp)
@@ -618,10 +646,11 @@ private fun RecBadge(vm: CameraController, modifier: Modifier = Modifier) {
         }
     }
     val real = formatDuration(vm.recordSeconds(now))
-    val text = when (vm.timeShiftNormal) {
-        true -> "● REC $real · " + tr("Обычная", "Normal")
-        false -> "● REC $real · " + tr("Авто", "Auto")
-        null -> "● REC $real"
+    val text = when {
+        vm.paused -> "⏸ " + tr("ПАУЗА", "PAUSED") + " $real"
+        vm.timeShiftNormal == true -> "● REC $real · " + tr("Обычная", "Normal")
+        vm.timeShiftNormal == false -> "● REC $real · " + tr("Авто", "Auto")
+        else -> "● REC $real"
     }
     Text(
         text,
@@ -670,6 +699,68 @@ private fun EcoButton(vm: CameraController) {
     }
 }
 
+/** A fixed 52 dp place for a round button: empty when the button isn't available, so nothing else moves. */
+@Composable
+private fun Slot(content: @Composable () -> Unit) {
+    Box(Modifier.size(52.dp), contentAlignment = Alignment.Center) { content() }
+}
+
+/** A round 52 dp action button of the recording bar. */
+@Composable
+private fun RoundAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    active: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier.size(52.dp).clip(CircleShape)
+            .background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, label, tint = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Pause ↔ resume (the camera's own state from its 8208 notifications). Paused: a red dot — «record on», as on the camera. */
+@Composable
+private fun PauseButton(vm: CameraController) {
+    if (!vm.paused) {
+        RoundAction(Icons.Filled.Pause, tr("Пауза", "Pause"), enabled = !vm.photoBusy) { vm.togglePause() }
+        return
+    }
+    Box(
+        Modifier.size(52.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(enabled = !vm.photoBusy) { vm.togglePause() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(22.dp).clip(CircleShape).background(RecordRed))
+    }
+}
+
+/** A highlight mark at this moment of the recording (the camera's «film strip» in its playback). */
+@Composable
+private fun MarkButton(vm: CameraController) =
+    RoundAction(Icons.Filled.Flag, tr("Отметка", "Highlight"), enabled = !vm.photoBusy) { vm.markHighlight() }
+
+/** A photo while the video keeps recording (only where the camera allows it). */
+@Composable
+private fun PhotoOnVideoButton(vm: CameraController) {
+    Box(
+        Modifier.size(52.dp).clip(CircleShape).background(Color.White)
+            .clickable(enabled = !vm.photoBusy) { vm.takePhotoWhileRecording() },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (vm.photoBusy) {
+            CircularProgressIndicator(Modifier.size(22.dp), color = RecordRed, strokeWidth = 2.dp)
+        } else {
+            Icon(Icons.Filled.PhotoCamera, tr("Фото во время записи", "Photo while recording"), tint = Color.Black)
+        }
+    }
+}
+
 /** TimeShift recording: Auto (sped up, the camera picks how much) ↔ normal speed (1×). */
 @Composable
 private fun SpeedButton(vm: CameraController) {
@@ -696,10 +787,14 @@ private fun ZoomButton(vm: CameraController, settings: CamSettings?, conf: Camer
     val param = listOf("damage_zoom", "undamage_zoom").firstOrNull { conf?.supports(mode, it) == true } ?: return
     if (conf!!.allowed(mode, param, settings.values).toSet() != setOf("true", "false")) return
     val on = settings.values[param] == "true"
+    // During a recording only over Wi-Fi (as the official app; the camera answers after ~2.5 s). Over Bluetooth it
+    // didn't answer at all (log 27.10): then shown, off.
+    val recording = vm.capture?.recording == true && vm.conn != ConnState.Connected
     Box(
         Modifier.size(52.dp).clip(CircleShape)
             .background(if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(enabled = vm.settingBusy == null) { vm.setSetting(param, (!on).toString()) },
+            .graphicsLayer { alpha = if (recording) 0.4f else 1f }
+            .clickable(enabled = vm.settingBusy == null && !recording) { vm.setSetting(param, (!on).toString()) },
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -711,7 +806,7 @@ private fun ZoomButton(vm: CameraController, settings: CamSettings?, conf: Camer
 }
 
 @Composable
-private fun SettingsGrid(vm: CameraController, settings: CamSettings, conf: CameraConf?, enabled: Boolean) {
+private fun SettingsGrid(vm: CameraController, settings: CamSettings, conf: CameraConf?, editable: (String) -> Boolean) {
     val mode = settings.mode
     when {
         mode == null -> Text(
@@ -744,7 +839,7 @@ private fun SettingsGrid(vm: CameraController, settings: CamSettings, conf: Came
                             val current = currentValue(spec.param, settings.values)
                             val options = optionsFor(conf, mode, spec.param, settings.values)
                                 .filter { offered(spec.param, it) && encodable(spec.param, it) }
-                            val usable = enabled && vm.settingBusy == null && !locked(spec.param, settings.values) &&
+                            val usable = editable(spec.param) && vm.settingBusy == null && !locked(spec.param, settings.values) &&
                                 (if (spec.toggle) options.any { it != current } else options.size > 1)
                             SettingTile(
                                 spec = spec,
@@ -1135,6 +1230,7 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     )
                 }
                 if (recording) RecBadge(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp))
+                Box(Modifier.align(Alignment.BottomEnd).padding(12.dp)) { ZoomButton(vm, vm.settings, vm.conf) }
                 // Same places as in portrait: card top left, batteries top right.
                 val s = vm.settings
                 s?.card?.let { CardChip(it, Modifier.align(Alignment.TopStart).padding(12.dp)) }
@@ -1150,13 +1246,14 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     }
                 }
             }
-            // The shutter centred at the side; the TimeShift speed above it, battery saving below.
+            // The portrait bar turned on its side, fixed slots: [battery saving] [photo / speed] ⬤ [pause] [mark].
             Column(
                 Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Box(Modifier.size(52.dp)) { SpeedButton(vm) }
+                Slot { if (recording && vm.conn == ConnState.Connected) EcoButton(vm) }
+                Slot { if (vm.timeShiftNormal != null) SpeedButton(vm) else if (vm.canShootOnVideo) PhotoOnVideoButton(vm) }
                 RecordButton(
                     recording = recording,
                     picture = picture,
@@ -1164,7 +1261,8 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                     countdown = vm.countdown,
                     light = true,
                 ) { if (recording) vm.stopRecording() else onRecord() }
-                Box(Modifier.size(52.dp)) { if (recording && vm.conn == ConnState.Connected) EcoButton(vm) }
+                Slot { if (vm.canPause) PauseButton(vm) }
+                Slot { if (vm.canMark) MarkButton(vm) }
             }
         }
     }

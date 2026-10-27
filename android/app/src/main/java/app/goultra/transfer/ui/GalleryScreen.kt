@@ -271,6 +271,11 @@ private fun FileGrid(vm: CameraController) {
     val scope = rememberCoroutineScope()
     /** Downloaded: the phone's own player / gallery; still on the camera (or no app for it): the in-app viewer. */
     fun open(file: CameraFile) {
+        // A live photo opens in our viewer while the camera is there: its clip plays and the cover is chosen there.
+        if (vm.liveClipOf(file) != null && vm.conn == ConnState.Connected) {
+            vm.view(file)
+            return
+        }
         scope.launch {
             val uri = vm.galleryUri(file)
             val opened = uri != null && runCatching {
@@ -291,10 +296,11 @@ private fun FileGrid(vm: CameraController) {
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val photos = vm.files.count { it.kind == MediaKind.PHOTO }
-            val videos = vm.files.size - photos
+            val listed = vm.listedFiles
+            val photos = listed.count { it.kind == MediaKind.PHOTO }
+            val videos = listed.size - photos
             val pick = { f: Filter -> vm.filter = f; vm.touch() }
-            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${vm.files.size}", "All ${vm.files.size}")) })
+            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${listed.size}", "All ${listed.size}")) })
             FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото $photos", "Photos $photos")) })
             FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео $videos", "Videos $videos")) })
         }

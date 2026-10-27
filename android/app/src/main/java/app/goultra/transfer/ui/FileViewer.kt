@@ -52,7 +52,21 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.text.style.TextAlign
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.SeekParameters
+import kotlinx.coroutines.delay
 import app.goultra.transfer.camera.CameraFile
+import app.goultra.transfer.camera.LivePhoto
 import app.goultra.transfer.camera.MediaKind
 
 /**
@@ -66,7 +80,36 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            if (file.kind == MediaKind.VIDEO) VideoPreview(vm, file) else PhotoPreview(vm, file)
+            val clip = vm.liveClipOf(file)
+            var playing by remember(file.uri) { mutableStateOf(false) }
+            when {
+                file.kind == MediaKind.VIDEO -> VideoPreview(vm, file)
+                clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
+                else -> PhotoPreview(vm, file)
+            }
+            // Live photo: its clip, where a frame can become the cover; and the way back to the camera's photo.
+            if (clip != null && !playing && vm.coverBusy == null) {
+                Column(
+                    Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button({ playing = true }) { Text(tr("▶ Живое фото · выбрать обложку", "▶ Live photo · pick the cover")) }
+                    if (vm.coverReplaced(file)) {
+                        OutlinedButton({ vm.restoreLiveCover(file) }) { Text(tr("Вернуть исходное фото", "Back to the original photo"), color = Color.White) }
+                    }
+                }
+            }
+            vm.coverBusy?.let { busy ->
+                Column(
+                    Modifier.align(Alignment.Center).background(Color(0xCC000000), RoundedCornerShape(12.dp)).padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    CircularProgressIndicator(color = Color.White)
+                    Spacer(Modifier.width(12.dp))
+                    Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
+                }
+            }
             Row(
                 Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
                     .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
@@ -117,11 +160,94 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
     )
 }
 
+/**
+ * A live photo's clip (its low-res copy, straight from the camera) as a frame picker: our own slider over the whole
+ * clip, the frame large, a play button to watch it. «Сделать обложкой» replaces the photo in the gallery file with
+ * that frame (taken from the full-resolution clip).
+ */
+@OptIn(UnstableApi::class)
+@Composable
+private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFile, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val source = remember { vm.previewSource() }
+    if (source == null) {
+        Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White, modifier = Modifier.padding(24.dp))
+        return
+    }
+    val player = remember(clip.uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(clip))))
+            setSeekParameters(SeekParameters.EXACT)
+            repeatMode = Player.REPEAT_MODE_ONE
+            seekTo(LivePhoto.DEFAULT_COVER_US / 1000) // where the photo was taken
+            playWhenReady = false
+            prepare()
+        }
+    }
+    DisposableEffect(player) { onDispose { player.release() } }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var positionMs by remember { mutableLongStateOf(LivePhoto.DEFAULT_COVER_US / 1000) }
+    var isPlaying by remember { mutableStateOf(false) }
+    LaunchedEffect(player) {
+        while (true) {
+            if (player.duration > 0) durationMs = player.duration
+            if (player.isPlaying) positionMs = player.currentPosition
+            isPlaying = player.isPlaying
+            delay(50)
+        }
+    }
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(top = 64.dp)) {
+        AndroidView(
+            factory = { ctx -> PlayerView(ctx).apply { this.player = player; useController = false } },
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        )
+        Column(
+            Modifier.fillMaxWidth().background(Color(0xCC000000)).padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton({ if (player.isPlaying) player.pause() else player.play() }) {
+                    Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White)
+                }
+                Slider(
+                    value = positionMs.toFloat(),
+                    onValueChange = { player.pause(); positionMs = it.toLong(); player.seekTo(positionMs) },
+                    valueRange = 0f..maxOf(durationMs, 1L).toFloat(),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Text(
+                tr("Кадр: ", "Frame: ") + "%.2f ".format(positionMs / 1000.0) + tr("с", "s") + " · " +
+                    tr("фото снято на 1,5 с", "the photo was taken at 1.5 s"),
+                color = Color(0xCCFFFFFF),
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            Button(
+                { player.pause(); vm.setLiveCover(photo, player.currentPosition * 1000); onBack() },
+                Modifier.fillMaxWidth(),
+            ) { Text(tr("Сделать обложкой", "Make it the cover")) }
+            OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text(tr("Отмена", "Cancel"), color = Color.White) }
+            Text(
+                tr(
+                    "Фото в галерее заменится этим кадром из видео 3840×2880 (чуть мягче фото). Вернуть исходное — кнопкой в просмотре.",
+                    "The gallery photo is replaced by this frame of the 3840×2880 clip (a bit softer). Get the original back from the viewer.",
+                ),
+                color = Color(0x99FFFFFF),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun PhotoPreview(vm: CameraController, file: CameraFile) {
     val config = LocalConfiguration.current
     val maxSide = with(LocalDensity.current) { (maxOf(config.screenWidthDp, config.screenHeightDp).dp.toPx() * 1.5f).toInt() }
-    val image by produceState<ImageBitmap?>(null, file.uri) { value = vm.previewPhoto(file, maxSide) }
+    // Reloaded after a cover change (the photo is then the chosen frame).
+    val image by produceState<ImageBitmap?>(null, file.uri, vm.coverVersion) { value = vm.previewPhoto(file, maxSide) }
     var loaded by remember(file.uri) { mutableStateOf(false) }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }

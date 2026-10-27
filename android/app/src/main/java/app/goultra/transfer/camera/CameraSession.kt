@@ -258,10 +258,17 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return Thumbnails.fromNv12(raw)
     }
 
-    suspend fun download(file: CameraFile, overwrite: Boolean, onProgress: (done: Long, total: Long) -> Unit): Uri =
+    /** [liveVideo]: the clip of a live photo, saved together with it as one gallery file ([LivePhoto]). */
+    suspend fun download(
+        file: CameraFile,
+        overwrite: Boolean,
+        liveVideo: CameraFile? = null,
+        onProgress: (done: Long, total: Long) -> Unit,
+    ): Uri =
         Downloader.download(
             context, link, file.uri, overwrite,
             takenAtMillis = file.created?.atZone(ZoneId.systemDefault())?.toInstant()?.toEpochMilli(),
+            liveVideo = liveVideo?.uri,
             onProgress = onProgress,
         )
 
@@ -353,9 +360,10 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     /** Debug: raw reply (hex) of a read-only command with an empty body (only capture status is allowed). */
     suspend fun rawCommand(code: Int, body: ByteArray = ByteArray(0)): String {
-        // Read-only capture status only (24 erases the card, 32 reboots, 12 deletes files). The power experiments
-        // (49/50 OLED, 56 standby) are done: CLAUDE.md, docs/PROTOCOL.md.
-        require(code == Proto.CMD_GET_CURRENT_CAPTURE_STATUS) { "command $code not allowed" }
+        // Read-only commands only: capture status, and the reads that check the newer code table (OpenInstaCine)
+        // on GO Ultra — 166 GET_STORAGE, 171 GET_ZOOM, 242 GET_FIRMWARE_VERSIONS. Never anything else: 24 / 232 / 134
+        // erase or format the card, 32 reboots, 12 deletes files, 81 runs shell commands.
+        require(code in setOf(Proto.CMD_GET_CURRENT_CAPTURE_STATUS, 166, 171, 242)) { "command $code not allowed" }
         val r = ble.request(code, body, timeoutMs = 3_000, quiet = true)
         return "${r?.code} ${r?.body?.hex(120)}"
     }
@@ -435,6 +443,15 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         }
     }
 
+    /**
+     * A command over Wi-Fi when it is up (as the official app does), else over Bluetooth. A setting changed during a
+     * recording (zoom) takes the camera ~2.5 s to answer, with stream restarts meanwhile: hence the long wait.
+     */
+    private suspend fun send(code: Int, body: ByteArray = ByteArray(0), timeoutMs: Long = 10_000): CamMessage? {
+        val t = tcp
+        return if (t != null) t.request(code, body, timeoutMs) else ble.request(code, body, timeoutMs)
+    }
+
     /** SET_PHOTOGRAPHY_OPTIONS for [fields] (field → already encoded value bytes of PhotographyOptions). */
     suspend fun writePhotoOptions(functionMode: Int, fields: Map<Int, ByteArray>): Boolean {
         val value = fields.values.fold(ByteArray(0)) { acc, b -> acc + b }
@@ -443,7 +460,24 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             .bytes(2, value)
             .varint(3, functionMode.toLong())
             .toByteArray()
-        val r = ble.request(Proto.CMD_SET_PHOTOGRAPHY_OPTIONS, body)
+        val r = send(Proto.CMD_SET_PHOTOGRAPHY_OPTIONS, body)
+        return r?.code == 200
+    }
+
+    /** Pause ↔ resume the running recording (one command for both, as in the official app). */
+    suspend fun togglePause(): Boolean = recordingCommand(Proto.CMD_PAUSE_RECORDING)
+
+    /**
+     * A highlight mark: SetKeyTimePoint {1 timestamp u64, 2 type INSTANT 0 / START 1 / END 2, 3 typeDetail}
+     * (RigacciOrg pb2; an empty body → 400). Timestamp = ms since the recording started (checked 27.10; type 0 =
+     * INSTANT, left out). The camera shows the marks as a «film strip» of highlight clips in its playback.
+     */
+    suspend fun markHighlight(recordingMs: Long): Boolean =
+        recordingCommand(Proto.CMD_SET_KEY_TIME_POINT, PbWriter().varint(1, recordingMs).toByteArray())
+
+    private suspend fun recordingCommand(code: Int, body: ByteArray = ByteArray(0)): Boolean {
+        val r = send(code, body, timeoutMs = 5_000)
+        if (r?.code != 200) log("команда $code во время записи: ${r?.code ?: "нет ответа"} ${r?.body?.hex(24) ?: ""}")
         return r?.code == 200
     }
 
@@ -466,11 +500,24 @@ class CameraSession(private val context: Context, private val log: (String) -> U
     /** The camera announced new stream parameters (8234), on the TCP reader thread. */
     @Volatile var onLiveParams: (() -> Unit)? = null
 
+    /** The camera switched its shooting mode by itself (8275; e.g. Video → Pure Video at the start of a recording). */
+    @Volatile var onModeChanged: (() -> Unit)? = null
+
+    /** The recording's phase from 8208 (0 running, 1 paused — from the app or the camera's own button). */
+    @Volatile var onCapturePhase: ((Int) -> Unit)? = null
+
     /** Starts the preview stream (empty StartLiveStream → 1080p30 H.265); packets go to [onPacket]. */
     suspend fun startLive(onPacket: (ByteArray) -> Unit): Boolean {
         val t = tcp ?: return false
         t.onStream = onPacket
-        t.onNotification = { m -> if (m.code == Proto.NOTIFY_LIVE_STREAM_PARAMS) onLiveParams?.invoke() }
+        t.onNotification = { m ->
+            when (m.code) {
+                Proto.NOTIFY_LIVE_STREAM_PARAMS -> onLiveParams?.invoke()
+                Proto.NOTIFY_SUB_MODE -> onModeChanged?.invoke()
+                // CAPTURE_STATUS {1 state, 2 seconds, 7 phase: 0 running, 1 paused, 2 stopping, 3 finishing}.
+                Proto.NOTIFY_CAPTURE_STATUS -> m.body.pbFields().field(7)?.varint?.let { onCapturePhase?.invoke(it.toInt()) }
+            }
+        }
         val r = t.request(Proto.CMD_START_LIVE_STREAM, ByteArray(0))
         log("StartLiveStream: ${r?.code}")
         if (r?.code == 200) t.request(Proto.CMD_IFRAME_REQUEST, ByteArray(0), 3_000)

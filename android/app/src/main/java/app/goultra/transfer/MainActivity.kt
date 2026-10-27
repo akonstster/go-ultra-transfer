@@ -53,6 +53,8 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra("scan", false)) cameraController.debugScan()
         // Debug: `--ei status 120` logs the raw capture status every second (mapping recording fields).
         intent.getIntExtra("status", 0).takeIf { it > 0 }?.let(cameraController::debugCaptureStatus)
+        // Debug: `--es fetch /DCIM/Camera01/…` copies a camera file into Android/data/…/files.
+        intent.getStringExtra("fetch")?.let(cameraController::debugFetch)
         // Debug: `--es cmd 56:0801` sends one allowed command (code:hex body) and logs the reply.
         intent.getStringExtra("cmd")?.split(':')?.let { p ->
             p[0].toIntOrNull()?.let { cameraController.debugCommand(it, p.getOrElse(1) { "" }) }
