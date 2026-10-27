@@ -4,6 +4,23 @@ For the next agent picking up this work. Branch `highlights`, on top of v0.8 (`8
 Local, untracked notes with device serials, adb ids and every past finding: `CLAUDE.md` in the repo root (gitignored)
 — read it first. Public protocol notes: [PROTOCOL.md](PROTOCOL.md) (section "Highlight marks in a file").
 
+## Status (end of 27.10)
+
+**Done and tested on the Poco:** marks are read and shown in the viewer (`ui/FileViewer.kt` → `VideoPreview`).
+- `camera/Highlights.kt`: `parse()` (record → marks, ms from start) and `pieces()` (the camera's film-strip rule:
+  a recording mark → 1 s either side, clipped; playback segments as they are; overlapping pieces merged). Tests:
+  `app/src/test/.../HighlightsTest.kt` (real records). A value below first_frame counts as **0** — verified: video 119
+  then gives pieces 0–1 s and 1.52–6.88 s, exactly what the camera shows (1 s and 5.3 s). (The notes below that call
+  it "relative 1.32 s" are superseded.)
+- `CameraTcp.fileExtra(uri, type)`, `CameraSession.highlights(file)`, `CameraController.highlights(file)`;
+  `CameraFile.firstFrameUs` (metadata field 24).
+- Viewer: whole video plays by default; yellow ticks (media3 `setExtraAdGroupMarkers`) at piece starts; a flag chip
+  with the piece count toggles the **film strip**: only pieces play (gaps skipped, 300 ms slack for key frames), after
+  the last one it returns to the first and pauses; the current piece's chip is yellow; tapping a chip jumps there.
+
+**Next ideas** (not started): flag badge on grid tiles; marks in downloaded files (parse the local trailer); export /
+download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
+
 ## Goal of this step
 
 The camera lets the user put highlight marks on a video (flag button while recording — in our app, the official app

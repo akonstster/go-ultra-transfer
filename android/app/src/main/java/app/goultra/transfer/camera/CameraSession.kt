@@ -258,6 +258,12 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return Thumbnails.fromNv12(raw)
     }
 
+    /** Highlight marks of a video (Wi-Fi only); null when they couldn't be read. */
+    suspend fun highlights(file: CameraFile): List<Highlight>? {
+        val raw = tcpLock.withLock { tcp?.fileExtra(file.uri, Highlights.EXTRA_TYPE) } ?: return null
+        return Highlights.parse(raw, file.firstFrameUs, file.durationSec?.let { (it + 1) * 1000L })
+    }
+
     /** [liveVideo]: the clip of a live photo, saved together with it as one gallery file ([LivePhoto]). */
     suspend fun download(
         file: CameraFile,

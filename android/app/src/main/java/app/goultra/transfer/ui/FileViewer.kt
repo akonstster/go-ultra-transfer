@@ -65,7 +65,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.SeekParameters
 import kotlinx.coroutines.delay
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.runtime.mutableIntStateOf
 import app.goultra.transfer.camera.CameraFile
+import app.goultra.transfer.camera.Highlight
+import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.LivePhoto
 import app.goultra.transfer.camera.MediaKind
 
@@ -154,11 +164,77 @@ private fun VideoPreview(vm: CameraController, file: CameraFile) {
         }
     }
     DisposableEffect(player) { onDispose { player.release() } }
-    AndroidView(
-        factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
-        modifier = Modifier.fillMaxSize(),
-    )
+    // Highlight marks from the camera, as its film strip shows them: 2 s pieces, nearby ones merged. Ticks on the seek
+    // bar; the flag switches to the film strip — only the pieces play, the rest is skipped.
+    val marks by produceState(emptyList<Highlight>(), file.uri) { value = vm.highlights(file) }
+    val pieces = remember(marks) { Highlights.pieces(marks, file.durationSec?.let { (it + 1) * 1000L }) }
+    var film by remember(file.uri) { mutableStateOf(false) }
+    var current by remember(file.uri) { mutableIntStateOf(-1) }
+    LaunchedEffect(player, film, pieces) {
+        current = -1
+        if (!film || pieces.isEmpty()) return@LaunchedEffect
+        player.seekTo(pieces[0].startMs)
+        player.play()
+        while (true) {
+            val pos = player.currentPosition
+            val i = pieces.indexOfFirst { pos < it.endMs!! }
+            if (i < 0) {
+                // Past the last piece: back to the first, stopped (the play button runs the strip again).
+                player.pause()
+                player.seekTo(pieces[0].startMs)
+                current = 0
+            } else {
+                if (pos < pieces[i].startMs - SKIP_SLACK_MS) player.seekTo(pieces[i].startMs)
+                current = i
+            }
+            delay(40)
+        }
+    }
+    Box(Modifier.fillMaxSize()) {
+        AndroidView(
+            factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
+            update = { view -> view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size)) },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (pieces.isNotEmpty()) {
+            Row(
+                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp)
+                    .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = film,
+                    onClick = { film = !film },
+                    label = { Text(if (film) tr("Отмеченное", "Highlights only") else "${pieces.size}") },
+                    leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color(0x99000000), labelColor = Color.White,
+                        selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
+                    ),
+                )
+                if (film) pieces.forEachIndexed { i, piece ->
+                    AssistChip(
+                        onClick = { player.seekTo(piece.startMs); player.play() },
+                        label = { Text(clock(piece.startMs) + "–" + clock(piece.endMs!!)) },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = if (i == current) MARK_COLOR else Color(0x99000000),
+                            labelColor = if (i == current) Color.Black else Color.White,
+                        ),
+                    )
+                }
+            }
+        }
+    }
 }
+
+/** A seek can land a little before the piece's start (key frames); don't bounce on that. */
+private const val SKIP_SLACK_MS = 300L
+
+/** The seek bar's default marker colour (media3 ad markers), so the chips match the ticks. */
+private val MARK_COLOR = Color(0xB2FFFF00)
+
+private fun clock(ms: Long): String = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
 
 /**
  * A live photo's clip (its low-res copy, straight from the camera) as a frame picker: our own slider over the whole

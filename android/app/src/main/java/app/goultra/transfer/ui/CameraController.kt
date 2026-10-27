@@ -19,6 +19,7 @@ import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CameraInfo
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.CameraHttpDataSource
+import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
@@ -1607,6 +1608,13 @@ class CameraController(private val app: Application) {
         session.wifiLink?.let { CameraHttpDataSource.Factory(it) }
 
     fun previewUrl(file: CameraFile): String = "http://${CameraTcp.HOST}${session.previewUri(file)}"
+
+    /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
+    suspend fun highlights(file: CameraFile): List<Highlight> {
+        if (conn != ConnState.Connected) return emptyList()
+        return runCatching { session.highlights(file) }.getOrNull().orEmpty()
+            .also { if (debuggable) log("отметки ${file.name}: ${it.joinToString { h -> "${h.startMs}" + (h.endMs?.let { e -> "–$e" } ?: "") }}") }
+    }
 
     /** Photo for the viewer, decoded to about screen size (a 50 MP JPEG must not be decoded in full). */
     suspend fun previewPhoto(file: CameraFile, maxSide: Int): ImageBitmap? = withContext(Dispatchers.IO) {

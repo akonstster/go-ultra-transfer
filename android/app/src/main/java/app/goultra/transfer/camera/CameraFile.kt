@@ -8,7 +8,7 @@ enum class MediaKind { PHOTO, VIDEO }
 /**
  * A file on the camera card. Metadata comes from GetFileInfoList (ExtraMetadata):
  * 7 creation_time (yyyyMMddHHmmss, wrong for LIV), 9 file_size (approximate), 10 total_time (s),
- * 19 {1 width, 2 height}, 20 fps.
+ * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks).
  */
 data class CameraFile(
     val uri: String,
@@ -18,6 +18,7 @@ data class CameraFile(
     val height: Int?,
     val fps: Int?,
     val created: LocalDateTime?,
+    val firstFrameUs: Long? = null,
 ) {
     val name: String get() = uri.substringAfterLast('/')
     val kind: MediaKind get() = if (name.endsWith(".mp4", ignoreCase = true)) MediaKind.VIDEO else MediaKind.PHOTO
@@ -51,6 +52,7 @@ data class CameraFile(
                 // The name is reliable; creation_time of LIV files decodes to year 5026.
                 created = createdFromName(uri.substringAfterLast('/'))
                     ?: meta.field(7)?.varint?.let { parseStamp(it.toString()) },
+                firstFrameUs = meta.field(24)?.varint,
             )
         }
     }

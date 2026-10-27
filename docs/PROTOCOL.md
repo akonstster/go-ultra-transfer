@@ -277,8 +277,9 @@ Layout: blocks `[type u8][count u32 LE][values u64 LE, µs]`. No marks → eight
 | 2 | added in the camera's playback | two u64 per mark (start, end) — a 2 s segment starting just before the chosen point |
 
 Values are on the camera clock: seconds from the start = (value − metadata field 24 `first_frame_timestamp`) / 10⁶.
-A value **smaller** than `first_frame_timestamp` is already relative (seen as exactly 1 320 000 = 1.32 s). The camera
-groups nearby marks into one piece on its timeline. After an edit in playback the record holds only types 1–2 and the
+A value **smaller** than `first_frame_timestamp` (seen: exactly 1 320 000) counts as 0. The camera's film strip turns
+a recording mark into a 2 s piece (1 s either side, clipped to the video) and merges overlapping pieces — e.g. marks
+at 0 (the broken value), 2.52, 4.36, 5.88 s → pieces 0–1 s and 1.52–6.88 s. After an edit in playback the record holds only types 1–2 and the
 metadata gains 87 `bHighLightEidted` = 1 and 90 `edit_version` = 1. The official app keeps marks edited on the phone in
 its own database; they don't reach the camera. GET_EDITINFO_LIST 201 = favourites / AI analysis (not marks);
 PLAYBACK_GET_HIGHLIGHT_INFO 203 with the uri → 400.

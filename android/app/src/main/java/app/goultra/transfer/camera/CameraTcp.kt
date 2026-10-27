@@ -180,8 +180,11 @@ class CameraTcp(
     }
 
     /** GetFileExtra(THUMBNAIL): raw 40-byte header + NV12 frame (see [Thumbnails.fromNv12]). */
-    suspend fun fileThumbnail(uri: String): ByteArray? {
-        val body = PbWriter().string(1, uri).varint(2, Proto.EXTRA_TYPE_THUMBNAIL).toByteArray()
+    suspend fun fileThumbnail(uri: String): ByteArray? = fileExtra(uri, Proto.EXTRA_TYPE_THUMBNAIL)
+
+    /** GetFileExtra: one trailer record of the file (raw bytes, not protobuf). */
+    suspend fun fileExtra(uri: String, type: Long): ByteArray? {
+        val body = PbWriter().string(1, uri).varint(2, type).toByteArray()
         val r = request(Proto.CMD_GET_FILE_EXTRA, body) ?: return null
         return r.body.takeIf { r.code == 200 && it.isNotEmpty() }
     }
