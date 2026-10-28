@@ -518,6 +518,17 @@ private fun VideoPreview(
     // No swiping to the next file while the timeline or the colour sliders own the gestures.
     LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
     LaunchedEffect(colouring) { onColouring(colouring) }
+    // The video's box changes size with the panel. Paused, the player shows no new frame, so the old picture would stay
+    // where it was until playback starts: once the new layout is in, the same frame is shown again.
+    val shownColouring = remember(player) { booleanArrayOf(colouring) }
+    LaunchedEffect(player, colouring) {
+        if (colouring == shownColouring[0]) return@LaunchedEffect
+        shownColouring[0] = colouring
+        if (!player.isPlaying) {
+            delay(100)
+            player.seekTo(player.currentPosition)
+        }
+    }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
     LaunchedEffect(player, film, editing, pieces) {
         if (!film || editing || pieces.isEmpty()) return@LaunchedEffect
