@@ -131,9 +131,12 @@ from the camera). `CameraController.save` picks the way: whole as shot = downloa
 effects in full, no preview size / stripes, sharpening radius × lines / 1080), the original's size, frame rate, codec
 (H.265 if the original is, else H.264; the encoder factory falls back), bitrate (track, or file size / length; 20…200
 Mbit/s). Whole: one item, sound copied. Pieces: one clipped item each in a sequence, cut exactly (re-encoding anyway);
-the sound is decoded (each item's `FadeProcessor` forces it) so it is cut at the same places and faded at the joins —
-0.1 s out + 0.1 s in (`AudioFade`, quarter sine; 20 ms at the clip's ends; not an overlapping crossfade: nothing moves,
-picture and sound stay in step) — re-encoded AAC ≥ 256 kbit/s (`HighAudioEncoders`; the default is 128). From the camera: `DefaultAssetLoaderFactory`
+the transformer makes the picture only (`setRemoveAudio`); the sound is joined by `ClipAudio` like a video
+editor's crossfade: at each join the first piece's sound runs 0.1 s past its end fading out while the next one's
+starts 0.1 s before its start fading in (constant power, window centred on the cut, narrowed to half a short piece;
+`AudioJoin`, unit-tested: as long as the picture, exact inside pieces), 10 ms fades at the clip's ends; decoded with
+MediaCodec from the original (phone copy or `session.clipSource`), encoded AAC-LC 256 kbit/s in memory, muxed with
+the picture (`MediaMuxer`, interleaved by time, rotation kept) straight into the gallery item.
 with `ProgressiveMediaSource` over `CameraHttpDataSource` on the full file's URL (Range reads, only what is needed);
 the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
 (own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit

@@ -14,7 +14,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import app.goultra.transfer.CameraService
-import app.goultra.transfer.camera.AudioFade
+import app.goultra.transfer.camera.ClipAudio
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CameraInfo
@@ -2293,8 +2293,8 @@ class CameraController(private val app: Application) {
      * [file] re-encoded with [look] (the viewer's effects in full, see [exportEffects]) into the gallery as [name]: the
      * original's size and frame rate, its codec (H.265 / H.264, another if the phone has no encoder for it) at its
      * bitrate. The whole video keeps its sound as is; [pieces] are cut exactly where they are marked (re-encoding
-     * anyway, no key frames needed) and joined, the sound cut at the same places — so it is re-encoded (AAC 256 kbit/s),
-     * the only way to cut it exactly. From the phone's copy; a file on the camera is downloaded first, or with [direct]
+     * anyway, no key frames needed) and joined, their sound crossfaded at each join as a video editor does — 0.1 s each
+     * side of the cut, overlapping ([AudioJoin]) — and re-encoded (AAC 256 kbit/s). From the phone's copy; a file on the camera is downloaded first, or with [direct]
      * read from the camera over Wi-Fi. Written to the app's cache first (the transformer takes a file path), then into
      * the gallery. The Insta360 data at the file's end (marks) isn't carried over. One at a time; «Стоп» cancels.
      */
@@ -2328,10 +2328,23 @@ class CameraController(private val app: Application) {
                 val effects = exportEffects(table, look, source.lines)
                 val parts = pieces?.let { Highlights.joinTouching(it) }
                 tmp.delete()
-                transform(uri, camera != null, parts, tmp, effects, source) { export = ExportProgress(name, it) }
+                // Pieces: the picture first (90 %), then the sound with crossfades and the two together.
+                transform(uri, camera != null, parts, tmp, effects, source) { export = ExportProgress(name, if (parts != null) it * 9 / 10 else it) }
+                val takenAt = file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()
                 withContext(Dispatchers.IO) {
-                    Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
-                        java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
+                    if (parts == null) {
+                        Downloader.saveClip(app, name, takenAt) { fd ->
+                            java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
+                        }
+                    } else {
+                        val job = coroutineContext[Job]
+                        val audioSource = if (local == null) session.clipSource(file) else null
+                        val audio = ClipAudio.encode(
+                            { ex -> if (audioSource != null) ex.setDataSource(audioSource) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) },
+                            parts,
+                        ) { job?.isActive == false }
+                        withContext(Dispatchers.Main) { export = ExportProgress(name, 97) }
+                        Downloader.saveClip(app, name, takenAt) { fd -> ClipAudio.mux(tmp, audio, fd) }
                     }
                 }
                 val sec = (System.currentTimeMillis() - startedAt) / 1000
@@ -2396,7 +2409,7 @@ class CameraController(private val app: Application) {
     /**
      * Runs the transformer on the main thread until it is done; [onPercent] twice a second. [uri]: the phone's copy, or
      * with [fromCamera] the camera's file over Wi-Fi (our data source, reading only what is needed). [parts] null: the
-     * whole video, its sound copied; else those pieces in a row, each cut exactly, the sound cut with them (re-encoded).
+     * whole video, its sound copied; else those pieces in a row, each cut exactly, without sound (see [exportWithColor]).
      */
     @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
     private suspend fun transform(
@@ -2409,12 +2422,10 @@ class CameraController(private val app: Application) {
         onPercent: (Int) -> Unit,
     ) = kotlinx.coroutines.coroutineScope {
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val encoders = HighAudioEncoders(
-            androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
-                .setRequestedVideoEncoderSettings(androidx.media3.transformer.VideoEncoderSettings.Builder().setBitrate(source.bitrate).build())
-                .setEnableFallback(true)
-                .build(),
-        )
+        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
+            .setRequestedVideoEncoderSettings(androidx.media3.transformer.VideoEncoderSettings.Builder().setBitrate(source.bitrate).build())
+            .setEnableFallback(true)
+            .build()
         val builder = androidx.media3.transformer.Transformer.Builder(app)
             .setVideoMimeType(source.mime)
             .setEncoderFactory(encoders)
@@ -2446,9 +2457,9 @@ class CameraController(private val app: Application) {
             })
             .build()
         exporter = t
-        // A piece: the media item clipped to it; its sound decoded (the fades below make the transformer do that), so it
-        // is cut at the piece's exact ends — copied, it could only be cut at its own frames — and faded at the joins.
-        fun item(piece: Highlight?, i: Int = 0): androidx.media3.transformer.EditedMediaItem {
+        // A piece: the media item clipped to it, its picture only — the sound of pieces is joined with crossfades
+        // afterwards (ClipAudio), which the transformer can't do.
+        fun item(piece: Highlight?): androidx.media3.transformer.EditedMediaItem {
             val media = androidx.media3.common.MediaItem.Builder().setUri(uri).apply {
                 if (piece != null) {
                     setClippingConfiguration(
@@ -2459,18 +2470,13 @@ class CameraController(private val app: Application) {
                     )
                 }
             }.build()
-            val audio = if (piece != null) {
-                val us = ((piece.endMs ?: piece.startMs) - piece.startMs) * 1000
-                listOf<androidx.media3.common.audio.AudioProcessor>(FadeProcessor(AudioFade.of(i, parts!!.size, us)))
-            } else {
-                emptyList()
-            }
             return androidx.media3.transformer.EditedMediaItem.Builder(media)
-                .setEffects(androidx.media3.transformer.Effects(audio, effects))
+                .setRemoveAudio(piece != null)
+                .setEffects(androidx.media3.transformer.Effects(emptyList(), effects))
                 .build()
         }
         val composition = androidx.media3.transformer.Composition.Builder(
-            androidx.media3.transformer.EditedMediaItemSequence(parts?.mapIndexed { i, p -> item(p, i) } ?: listOf(item(null))),
+            androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
         ).build()
         val ticker = launch {
             val holder = androidx.media3.transformer.ProgressHolder()
@@ -2487,59 +2493,5 @@ class CameraController(private val app: Application) {
             if (!done.isCompleted) t.cancel()
             exporter = null
         }
-    }
-}
-
-/** The default encoders, with re-encoded sound at 256 kbit/s AAC (the default is 128) — or the original's rate if higher. */
-@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
-private class HighAudioEncoders(private val base: androidx.media3.transformer.DefaultEncoderFactory) :
-    androidx.media3.transformer.Codec.EncoderFactory {
-    override fun createForAudioEncoding(format: androidx.media3.common.Format): androidx.media3.transformer.Codec =
-        base.createForAudioEncoding(format.buildUpon().setAverageBitrate(maxOf(format.bitrate, 256_000)).build())
-
-    override fun createForVideoEncoding(format: androidx.media3.common.Format): androidx.media3.transformer.Codec =
-        base.createForVideoEncoding(format)
-}
-
-/** [fade] on a piece's decoded sound (16-bit or float PCM), counted from the piece's first sample. */
-@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
-private class FadeProcessor(private val fade: AudioFade) : androidx.media3.common.audio.BaseAudioProcessor() {
-    private var frames = 0L
-
-    override fun onConfigure(
-        inputAudioFormat: androidx.media3.common.audio.AudioProcessor.AudioFormat,
-    ): androidx.media3.common.audio.AudioProcessor.AudioFormat {
-        val e = inputAudioFormat.encoding
-        if (e != androidx.media3.common.C.ENCODING_PCM_16BIT && e != androidx.media3.common.C.ENCODING_PCM_FLOAT) {
-            throw androidx.media3.common.audio.AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
-        }
-        return inputAudioFormat
-    }
-
-    override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
-        val format = inputAudioFormat
-        val float = format.encoding == androidx.media3.common.C.ENCODING_PCM_FLOAT
-        val frameBytes = format.channelCount * (if (float) 4 else 2)
-        val out = replaceOutputBuffer(inputBuffer.remaining())
-        while (inputBuffer.remaining() >= frameBytes) {
-            val g = fade.gain(frames * 1_000_000L / format.sampleRate)
-            repeat(format.channelCount) {
-                if (float) {
-                    out.putFloat(inputBuffer.getFloat() * g)
-                } else {
-                    out.putShort(Math.round(inputBuffer.getShort() * g).coerceIn(-32768, 32767).toShort())
-                }
-            }
-            frames++
-        }
-        out.flip()
-    }
-
-    override fun onFlush() {
-        frames = 0
-    }
-
-    override fun onReset() {
-        frames = 0
     }
 }
