@@ -17,18 +17,21 @@ object ClipAudio {
     const val BITRATE = 256_000
     private const val TIMEOUT_US = 10_000L
 
-    /** The joined, encoded sound: its format and its samples in order. */
-    class Encoded(val format: MediaFormat, val samples: List<Pair<ByteArray, MediaCodec.BufferInfo>>)
+    /**
+     * The joined, encoded sound: its format, and its samples in order in [file] (the data one after another) with their
+     * sizes, times and flags here — on disk, not in memory: an hour of sound is over 100 MB.
+     */
+    class Encoded(val format: MediaFormat, val file: java.io.File, val count: Int, val sizes: IntArray, val times: LongArray, val flags: IntArray)
 
     /**
-     * The sound of [pieces] from the original ([open] sets the extractor's source), or null when it has no sound.
-     * [cancelled] is checked between chunks.
+     * The sound of [pieces] from the original ([open] sets the extractor's source) into [file], or null when it has no
+     * sound. [cancelled] is checked between chunks.
      */
-    fun encode(open: (MediaExtractor) -> Unit, pieces: List<Highlight>, cancelled: () -> Boolean): Encoded? {
+    fun encode(open: (MediaExtractor) -> Unit, pieces: List<Highlight>, file: java.io.File, cancelled: () -> Boolean): Encoded? {
         val reader = PcmReader.open(open) ?: return null
         try {
             val join = AudioJoin(reader.rate, reader.channels)
-            val writer = AacWriter(reader.rate, reader.channels)
+            val writer = AacWriter(reader.rate, reader.channels, file)
             try {
                 join.render(join.plan(pieces), reader::read) { pcm ->
                     if (cancelled()) throw java.util.concurrent.CancellationException()
@@ -46,9 +49,11 @@ object ClipAudio {
     /** The clip's [video] file (no sound) and [audio] into [out]: tracks interleaved by time, the video's rotation kept. */
     fun mux(video: java.io.File, audio: Encoded?, out: FileDescriptor) {
         val ex = MediaExtractor()
-        ex.setDataSource(video.absolutePath)
-        val muxer = MediaMuxer(out, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        var muxer: MediaMuxer? = null
+        val sound = audio?.let { java.io.RandomAccessFile(it.file, "r") }
         try {
+            ex.setDataSource(video.absolutePath)
+            val m = MediaMuxer(out, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).also { muxer = it }
             var videoTrack = -1
             var videoFormat: MediaFormat? = null
             for (i in 0 until ex.trackCount) {
@@ -60,15 +65,27 @@ object ClipAudio {
             }
             require(videoTrack >= 0) { "no video in the clip" }
             ex.selectTrack(videoTrack)
-            if (videoFormat!!.containsKey(MediaFormat.KEY_ROTATION)) muxer.setOrientationHint(videoFormat.getInteger(MediaFormat.KEY_ROTATION))
-            val vOut = muxer.addTrack(videoFormat)
-            val aOut = audio?.let { muxer.addTrack(it.format) } ?: -1
-            muxer.start()
+            if (videoFormat!!.containsKey(MediaFormat.KEY_ROTATION)) m.setOrientationHint(videoFormat.getInteger(MediaFormat.KEY_ROTATION))
+            val vOut = m.addTrack(videoFormat)
+            val aOut = audio?.let { m.addTrack(it.format) } ?: -1
+            m.start()
             val maxSize = if (videoFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) videoFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 8 shl 20
             val buf = java.nio.ByteBuffer.allocateDirect(maxOf(maxSize, 1 shl 20))
             val info = MediaCodec.BufferInfo()
             var a = 0
-            val samples = audio?.samples.orEmpty()
+            val count = audio?.count ?: 0
+            val aInfo = MediaCodec.BufferInfo()
+            val aBuf = java.nio.ByteBuffer.allocate((0 until count).maxOfOrNull { audio!!.sizes[it] } ?: 1)
+            /** The next sound sample, from the file in order. */
+            fun writeSound() {
+                val n = audio!!.sizes[a]
+                aBuf.clear()
+                sound!!.readFully(aBuf.array(), 0, n)
+                aBuf.limit(n)
+                aInfo.set(0, n, audio.times[a], audio.flags[a])
+                m.writeSampleData(aOut, aBuf, aInfo)
+                a++
+            }
             while (true) {
                 info.size = ex.readSampleData(buf, 0)
                 if (info.size < 0) break
@@ -76,21 +93,16 @@ object ClipAudio {
                 info.presentationTimeUs = ex.sampleTime
                 info.flags = if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                 // The sound up to this frame's time first.
-                while (a < samples.size && samples[a].second.presentationTimeUs <= info.presentationTimeUs) {
-                    muxer.writeSampleData(aOut, java.nio.ByteBuffer.wrap(samples[a].first), samples[a].second)
-                    a++
-                }
-                muxer.writeSampleData(vOut, buf, info)
+                while (a < count && audio!!.times[a] <= info.presentationTimeUs) writeSound()
+                m.writeSampleData(vOut, buf, info)
                 ex.advance()
             }
-            while (a < samples.size) {
-                muxer.writeSampleData(aOut, java.nio.ByteBuffer.wrap(samples[a].first), samples[a].second)
-                a++
-            }
-            muxer.stop()
+            while (a < count) writeSound()
+            m.stop()
         } finally {
-            muxer.release()
+            muxer?.release()
             ex.release()
+            sound?.close()
         }
     }
 
@@ -139,7 +151,12 @@ object ClipAudio {
                 return
             }
             while (true) {
-                if (!decodeMore()) return
+                if (!decodeMore()) {
+                    // Past the end: nothing left (not the last buffer decoded before it) — silence.
+                    buffer = ShortArray(0)
+                    bufferAt = 0
+                    return
+                }
                 val start = lastFrame
                 val end = start + buffer.size / channels
                 if (end > frame) {
@@ -202,37 +219,54 @@ object ClipAudio {
         }
 
         companion object {
+            /** Released again if anything fails on the way (a dropped Wi-Fi, a codec that won't start). */
             fun open(open: (MediaExtractor) -> Unit): PcmReader? {
                 val ex = MediaExtractor()
-                open(ex)
-                for (i in 0 until ex.trackCount) {
-                    val f = ex.getTrackFormat(i)
-                    val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-                    if (!mime.startsWith("audio/")) continue
-                    ex.selectTrack(i)
-                    val codec = MediaCodec.createDecoderByType(mime)
-                    codec.configure(f, null, null, 0)
-                    codec.start()
-                    return PcmReader(ex, codec, f.getInteger(MediaFormat.KEY_SAMPLE_RATE), f.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                var codec: MediaCodec? = null
+                try {
+                    open(ex)
+                    for (i in 0 until ex.trackCount) {
+                        val f = ex.getTrackFormat(i)
+                        val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                        if (!mime.startsWith("audio/")) continue
+                        ex.selectTrack(i)
+                        val c = MediaCodec.createDecoderByType(mime).also { codec = it }
+                        c.configure(f, null, null, 0)
+                        c.start()
+                        return PcmReader(ex, c, f.getInteger(MediaFormat.KEY_SAMPLE_RATE), f.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                    }
+                    ex.release()
+                    return null
+                } catch (e: Throwable) {
+                    codec?.release()
+                    ex.release()
+                    throw e
                 }
-                ex.release()
-                return null
             }
         }
     }
 
-    /** 16-bit PCM in, AAC-LC at [BITRATE] out, kept in memory (a clip's sound: megabytes). */
-    private class AacWriter(private val rate: Int, private val channels: Int) {
-        private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
-            val f = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, channels)
-            f.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            f.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
-            f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
-            configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            start()
+    /** 16-bit PCM in, AAC-LC at [BITRATE] out into [file] (sizes, times, flags kept here: a few bytes a sample). */
+    private class AacWriter(private val rate: Int, private val channels: Int, private val file: java.io.File) {
+        private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).also { c ->
+            try {
+                val f = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, channels)
+                f.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                f.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
+                f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
+                c.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                c.start()
+            } catch (e: Throwable) {
+                c.release()
+                throw e
+            }
         }
+        private val out = java.io.BufferedOutputStream(java.io.FileOutputStream(file), 1 shl 16)
         private var format: MediaFormat? = null
-        private val samples = ArrayList<Pair<ByteArray, MediaCodec.BufferInfo>>()
+        private var count = 0
+        private var sizes = IntArray(4096)
+        private var times = LongArray(4096)
+        private var flags = IntArray(4096)
         private var frames = 0L
 
         fun write(pcm: ShortArray) {
@@ -261,7 +295,8 @@ object ClipAudio {
                 drain(false)
             }
             drain(true)
-            return Encoded(format ?: error("no AAC format"), samples)
+            out.close()
+            return Encoded(format ?: error("no AAC format"), file, count, sizes, times, flags)
         }
 
         private fun drain(toEnd: Boolean) {
@@ -273,11 +308,20 @@ object ClipAudio {
                     o >= 0 -> {
                         val end = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                         if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
-                            val out = codec.getOutputBuffer(o)!!
+                            val src = codec.getOutputBuffer(o)!!
                             val data = ByteArray(info.size)
-                            out.position(info.offset)
-                            out.get(data)
-                            samples += data to MediaCodec.BufferInfo().apply { set(0, info.size, info.presentationTimeUs, info.flags) }
+                            src.position(info.offset)
+                            src.get(data)
+                            out.write(data)
+                            if (count == sizes.size) {
+                                sizes = sizes.copyOf(count * 2)
+                                times = times.copyOf(count * 2)
+                                flags = flags.copyOf(count * 2)
+                            }
+                            sizes[count] = info.size
+                            times[count] = info.presentationTimeUs
+                            flags[count] = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
+                            count++
                         }
                         codec.releaseOutputBuffer(o, false)
                         if (end) return
@@ -288,6 +332,7 @@ object ClipAudio {
         }
 
         fun release() {
+            runCatching { out.close() }
             runCatching { codec.stop() }
             codec.release()
         }

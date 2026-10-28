@@ -149,6 +149,13 @@ Colour copy / paste: icons over the video while the panel is open; `copiedLook` 
 that video's look; in the gallery a selection gets a paste icon (`pasteLookToSelected`, videos only) and tiles with a
 look of their own show a palette mark (`hasLook`, redrawn via `lookVersion`). A save replacing a file forgets its
 thumbnail (`forgetThumbnail`; tiles also key on `localUri`). Saving a selection as a batch: to do.
+Review fixes (after a Poco reboot while testing): a page's player prepares only when the page is on screen; the
+paused-frame nudge leaves a released player alone; the joined sound goes to `cacheDir/export.aac`, not the heap;
+codecs / extractors are released when setup fails; temp files are cleared at start; `lut()` parses once (Mutex) and
+fast; a LUT that fails to load plays the video as shot; pieces are clamped to the video's real length; «i» counts
+frames only for phone files (from the camera the extractor would read the frames' data over Wi-Fi); the
+notification's «Стоп» also stops a save with colour. Still: every video player carries the effect chain even with a
+plain look (the effects must exist before prepare for live sliders).
 «i» for videos: `streamInfo` (MediaExtractor on the phone copy, or the camera's index over Wi-Fi) — video codec, 8 / 10
 bit (codec profile), its bitrate; frame rate counted from frame times over the first 2 s; sound codec, kHz, channels,
 bitrate or «нет»; the whole file's bitrate from the retriever.

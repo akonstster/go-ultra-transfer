@@ -157,12 +157,17 @@ class CameraController(private val app: Application) {
     private var ilogLut: CubeLut? = null
 
     /** Insta360's «GO Ultra I-Log to Rec.709» table (app assets), read once. */
-    suspend fun lut(): CubeLut? = ilogLut ?: withContext(Dispatchers.IO) {
-        runCatching { app.assets.open("luts/GO_Ultra_I-Log_To_Rec.709_V1.0.cube").use { it.readBytes().decodeToString() } }
-            .mapCatching(CubeLut::parse)
-            .onFailure { log("LUT: ${it.message}") }
-            .getOrNull()
-    }?.also { ilogLut = it }
+    private val lutLock = kotlinx.coroutines.sync.Mutex()
+
+    /** Parsed once: pages opening together wait for the same one (not a parse each). */
+    suspend fun lut(): CubeLut? = ilogLut ?: lutLock.withLock {
+        ilogLut ?: withContext(Dispatchers.IO) {
+            runCatching { app.assets.open("luts/GO_Ultra_I-Log_To_Rec.709_V1.0.cube").use { it.readBytes().decodeToString() } }
+                .mapCatching(CubeLut::parse)
+                .onFailure { log("LUT: ${it.message}") }
+                .getOrNull()
+        }?.also { ilogLut = it }
+    }
 
     private val iLogCache = mutableMapOf<String, Boolean>()
 
@@ -394,6 +399,12 @@ class CameraController(private val app: Application) {
     private var afterRadios by mutableStateOf<(() -> Unit)?>(null)
 
     val isDownloading: Boolean get() = downloadJob?.isActive == true
+
+    init {
+        // A save with colour cut short by the process dying leaves its temp files (gigabytes for a long 4K video).
+        File(app.cacheDir, "export.mp4").delete()
+        File(app.cacheDir, "export.aac").delete()
+    }
 
     init {
         if (!prefs.getBoolean("migrated_to_dcim", false)) {
@@ -1914,8 +1925,8 @@ class CameraController(private val app: Application) {
             // Wi-Fi (its index only).
             val streams = runCatching {
                 when {
-                    local != null -> streamInfo { it.setDataSource(app, local, null) }
-                    conn == ConnState.Connected -> session.indexSource(file).let { src -> streamInfo { it.setDataSource(src) } }
+                    local != null -> streamInfo(countFrames = true) { it.setDataSource(app, local, null) }
+                    conn == ConnState.Connected -> session.indexSource(file).let { src -> streamInfo(countFrames = false) { it.setDataSource(src) } }
                     else -> null
                 }
             }.onFailure { log("сведения ${file.name}: ${it.message}") }.getOrNull()
@@ -1985,10 +1996,11 @@ class CameraController(private val app: Application) {
     private class Streams(val video: String?, val fps: String?, val audio: String?)
 
     /**
-     * The tracks of a video ([open] sets the extractor's source). The frame rate is counted from the frames' times over
-     * the first two seconds (the container's own figure is often missing); bit depth from the codec profile.
+     * The tracks of a video ([open] sets the extractor's source). With [countFrames] (a local file) the frame rate is
+     * counted from the frames' times over the first second (the container's own figure is often missing); bit depth
+     * from the codec profile.
      */
-    private fun streamInfo(open: (android.media.MediaExtractor) -> Unit): Streams {
+    private fun streamInfo(countFrames: Boolean, open: (android.media.MediaExtractor) -> Unit): Streams {
         val ex = android.media.MediaExtractor()
         try {
             open(ex)
@@ -2014,13 +2026,18 @@ class CameraController(private val app: Application) {
                         if (tenBit) tr("10 бит", "10-bit") else tr("8 бит", "8-bit"),
                         kbps?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") },
                     ).joinToString(" · ")
-                    // Frames over the first 2 s, by their times (the index only, no picture data read).
+                    // Frames over the first second, by their times — the extractor reads each frame's data on the way, so
+                    // only from a file on the phone (from the camera that would be megabytes over Wi-Fi).
+                    if (!countFrames) {
+                        fps = int(android.media.MediaFormat.KEY_FRAME_RATE)?.let { "%.2f".format(it.toDouble()) }
+                        continue
+                    }
                     ex.selectTrack(i)
                     ex.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC)
                     val first = ex.sampleTime
                     var count = 0
                     var last = first
-                    while (ex.sampleTime >= 0 && ex.sampleTime - first < 2_000_000) {
+                    while (ex.sampleTime >= 0 && ex.sampleTime - first < 1_000_000) {
                         last = ex.sampleTime
                         count++
                         if (!ex.advance()) break
@@ -2200,8 +2217,11 @@ class CameraController(private val app: Application) {
         CameraService.start(app)
     }
 
+    /** «Стоп» on the notification or the bar: a download, a clip or a save with colour. */
     fun cancelDownload() {
         downloadJob?.cancel()
+        exporter?.cancel()
+        exportJob?.cancel()
     }
 
     // ---------- pieces: edits and clips ----------
@@ -2218,16 +2238,6 @@ class CameraController(private val app: Application) {
     }
 
     fun clipName(file: CameraFile, n: Int = 1): String = file.stem + "_HL" + (if (n > 1) "$n" else "") + ".mp4"
-
-    /** A clip of [file] is already in the gallery (saving would replace it). */
-    suspend fun clipExists(file: CameraFile): Boolean = withContext(Dispatchers.IO) { Downloader.galleryUri(app, clipName(file)) != null }
-
-    /** The first clip name of [file] not taken yet: …_HL2.mp4, …_HL3.mp4 … */
-    suspend fun freeClipName(file: CameraFile): String = withContext(Dispatchers.IO) {
-        var n = 2
-        while (Downloader.galleryUri(app, clipName(file, n)) != null) n++
-        clipName(file, n)
-    }
 
     // ---------- the editor's timeline: frames along the whole video ----------
 
@@ -2443,6 +2453,7 @@ class CameraController(private val app: Application) {
         }
         exportJob = scope.launch {
             val tmp = java.io.File(app.cacheDir, "export.mp4")
+            val soundTmp = java.io.File(app.cacheDir, "export.aac")
             val startedAt = System.currentTimeMillis()
             try {
                 // The original: the phone's copy; downloaded first when asked so; or the camera's file.
@@ -2462,7 +2473,11 @@ class CameraController(private val app: Application) {
                 val uri = local ?: previewUrlOf(file)
                 val table = if (iLog && look.lut && look.strength > 0f) lut() else null
                 val effects = exportEffects(table, look, source.lines)
-                val parts = pieces?.let { Highlights.joinTouching(it) }
+                // Pieces end where the video does (a piece past it would get sound without picture).
+                val parts = pieces?.let { Highlights.joinTouching(it) }?.let { ps ->
+                    if (source.durationMs <= 0) ps
+                    else ps.mapNotNull { p -> if (p.startMs >= source.durationMs) null else p.copy(endMs = minOf(p.endMs ?: p.startMs, source.durationMs)) }
+                }
                 tmp.delete()
                 // Pieces with sound: the picture first (90 %), then the sound with crossfades and the two together.
                 transform(uri, camera != null, parts, tmp, effects, source, sound) { export = ExportProgress(name, if (parts != null && sound) it * 9 / 10 else it) }
@@ -2478,6 +2493,7 @@ class CameraController(private val app: Application) {
                         val audio = ClipAudio.encode(
                             { ex -> if (audioSource != null) ex.setDataSource(audioSource) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) },
                             parts,
+                            soundTmp,
                         ) { job?.isActive == false }
                         withContext(Dispatchers.Main) { export = ExportProgress(name, 97) }
                         Downloader.saveClip(app, name, takenAt) { fd -> ClipAudio.mux(tmp, audio, fd) }
@@ -2513,6 +2529,7 @@ class CameraController(private val app: Application) {
                 lastResult = tr("Не удалось сохранить", "Couldn't save") + (e.message?.let { ": $it" } ?: "")
             } finally {
                 tmp.delete()
+                soundTmp.delete()
                 export = null
                 message = lastResult
             }
@@ -2529,7 +2546,7 @@ class CameraController(private val app: Application) {
     }
 
     /** What the copy keeps from the original: the video codec, its bitrate, the short side (px). */
-    private class ExportSource(val mime: String, val bitrate: Int, val lines: Int)
+    private class ExportSource(val mime: String, val bitrate: Int, val lines: Int, val durationMs: Long)
 
     private fun exportSource(fileBytes: Long?, open: (android.media.MediaExtractor) -> Unit): ExportSource {
         val ex = android.media.MediaExtractor()
@@ -2548,7 +2565,7 @@ class CameraController(private val app: Application) {
                 // The original's own codec when it is one of the two every phone encodes; at its bitrate (no less than
                 // 20 Mbit/s for good quality, no more than 200).
                 val out = if (mime == androidx.media3.common.MimeTypes.VIDEO_H265) mime else androidx.media3.common.MimeTypes.VIDEO_H264
-                return ExportSource(out, (if (rate > 0) rate else 60_000_000).coerceIn(20_000_000, 200_000_000), minOf(w, h))
+                return ExportSource(out, (if (rate > 0) rate else 60_000_000).coerceIn(20_000_000, 200_000_000), minOf(w, h), durationUs / 1000)
             }
             error(tr("в файле нет видео", "no video in the file"))
         } finally {

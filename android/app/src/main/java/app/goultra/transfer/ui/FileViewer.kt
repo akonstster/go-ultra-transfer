@@ -492,7 +492,9 @@ private fun VideoPreview(
     // Insta360's LUT for I-Log files, exposure / saturation as a matrix the sliders change live, clipping stripes on
     // demand. Only the LUT and the stripes rebuild the effects.
     val iLog by produceState<Boolean?>(null, file.uri, file.localUri) { value = vm.isILog(file) }
-    val lut by produceState<CubeLut?>(null) { value = vm.lut() }
+    // (loaded, table): a LUT that failed to load lets the video play as shot instead of waiting for it for ever.
+    val lutState by produceState<Pair<Boolean, CubeLut?>>(false to null) { value = true to vm.lut() }
+    val lut = lutState.second
     var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
     val look = saved ?: ColorLook()
     var colorPanel by remember(file.uri) { mutableStateOf(false) }
@@ -503,7 +505,7 @@ private fun VideoPreview(
     }
     val ilog = iLog == true
     val table = lut
-    if (iLog == null || (ilog && table == null) || knownLines == null) {
+    if (iLog == null || (ilog && !lutState.first) || knownLines == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
         return
     }
@@ -560,10 +562,13 @@ private fun VideoPreview(
                 setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(file))))
             }
             playWhenReady = active
-            prepare()
+            // A page not on screen yet (swiping) doesn't take a decoder and a GL pipeline: it prepares when it settles.
+            if (active) prepare()
         }
     }
-    DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
+    // False once the player is released (the page swiped away, the viewer closed): late callers leave it alone.
+    val alive = remember(player) { booleanArrayOf(true) }
+    DisposableEffect(player) { onDispose { alive[0] = false; player.release(); vm.closeTimeline() } }
     // Paused, the player draws no new frame — not even after a seek to the same spot (tried; many seeks of a 4K video
     // hung the viewer). After a change (a slider let go, the panel opened / closed) it plays without sound until one new
     // frame is drawn (at most 0.4 s) and pauses again: the picture moves on by a frame or two.
@@ -572,14 +577,18 @@ private fun VideoPreview(
         if (redraw == 0) return@LaunchedEffect
         delay(200)
         if (player.playWhenReady || player.playbackState != Player.STATE_READY) return@LaunchedEffect
+        if (!alive[0]) return@LaunchedEffect
         withContext(NonCancellable) {
             val volume = player.volume
             val drawn = filmLook.frames.get()
             player.volume = 0f
             player.play()
-            withTimeoutOrNull(400) { while (filmLook.frames.get() == drawn) delay(16) }
-            player.pause()
-            player.volume = volume
+            // Bypassed, the film look isn't in the chain and counts no frames: a short fixed wait then.
+            withTimeoutOrNull(if (bypass) 80L else 400L) { while (alive[0] && filmLook.frames.get() == drawn) delay(16) }
+            if (alive[0]) {
+                player.pause()
+                player.volume = volume
+            }
         }
     }
     // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
@@ -633,7 +642,14 @@ private fun VideoPreview(
         if (!firstFrame[0]) dropEffects("нет кадров за 5 с (превью ${previewLines ?: "полное"}, ступень $level, ${sourceLines} строк)")
     }
     // Swiped away: stop; swiped back: play on.
-    LaunchedEffect(active) { if (active) player.play() else player.pause() }
+    LaunchedEffect(active) {
+        if (active) {
+            if (player.playbackState == Player.STATE_IDLE && player.playerError == null) player.prepare()
+            player.play()
+        } else {
+            player.pause()
+        }
+    }
     // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
     // so the player's own taps (controls, seek bar) still work when not zooming.
     var zoom by remember(file.uri) { mutableFloatStateOf(1f) }
