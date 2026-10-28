@@ -36,6 +36,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.LibraryAdd
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.PlaylistRemove
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Share
@@ -164,6 +169,13 @@ fun GalleryScreen(
                             )
                         }
                     }
+                    // Videos and photos from elsewhere on the phone, to view, cut and colour (with or without the camera).
+                    if (vm.tab == Tab.FILES && selectionCount == 0) {
+                        val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addFiles(uris) }
+                        IconButton({ pick.launch(arrayOf("video/*", "image/*")) }) {
+                            Icon(Icons.Filled.LibraryAdd, tr("Добавить с телефона", "Add from the phone"))
+                        }
+                    }
                     if (vm.conn == ConnState.Connected || (vm.tab == Tab.CAMERA && vm.conn == ConnState.Remote)) {
                         IconButton(vm::refresh, enabled = vm.download == null) { Icon(Icons.Filled.Refresh, tr("Обновить", "Refresh")) }
                     }
@@ -207,7 +219,7 @@ fun GalleryScreen(
                     vm.tab == Tab.CAMERA -> CameraTab(vm, onConnect, onRecord)
                     vm.conn == ConnState.Connected -> FileGrid(vm)
                     // No camera: what is already on the phone, with the way to connect above it.
-                    vm.phoneFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
+                    vm.listedFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
                         ConnectBar(vm.conn, onConnect)
                         FileGrid(vm)
                     }
@@ -350,10 +362,15 @@ private fun FileGrid(vm: CameraController) {
             FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${listed.size}", "All ${listed.size}")) })
             FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото $photos", "Photos $photos")) })
             FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео $videos", "Videos $videos")) })
-            val favorites = listed.count { it.name in vm.favorites }
-            if (favorites > 0 || vm.filter == Filter.FAVORITE) {
-                FilterChip(vm.filter == Filter.FAVORITE, { pick(Filter.FAVORITE) }, { Text("♥ $favorites") })
+            // The rest only when there is something in them (or picked).
+            @Composable
+            fun Extra(f: Filter, count: Int, label: String) {
+                if (count > 0 || vm.filter == f) FilterChip(vm.filter == f, { pick(f) }, { Text("$label $count") })
             }
+            Extra(Filter.FAVORITE, listed.count { it.name in vm.favorites }, "♥")
+            Extra(Filter.ADDED, listed.count { it.isAdded }, tr("Добавленные", "Added"))
+            Extra(Filter.COLOURED, listed.count { it.kind == MediaKind.VIDEO && vm.lookVersion >= 0 && vm.hasLook(it) }, tr("Свой цвет", "Own colour"))
+            Extra(Filter.SAVED, listed.count(vm::isSaved), tr("Сохранённые", "Saved"))
         }
         LazyVerticalGrid(
             state = gridState,
@@ -376,6 +393,7 @@ private fun FileGrid(vm: CameraController) {
                         favorite = file.name in vm.favorites,
                         coloured = file.kind == MediaKind.VIDEO && vm.lookVersion >= 0 && vm.hasLook(file),
                         phoneOnly = file.isOnPhone && !vm.showsPhone,
+                        added = file.isAdded,
                         loadThumbnail = vm::thumbnail,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
@@ -407,6 +425,7 @@ private fun FileTile(
     favorite: Boolean,
     coloured: Boolean,
     phoneOnly: Boolean,
+    added: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -461,7 +480,14 @@ private fun FileTile(
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Filled.Palette, tr("Свой цвет", "Own colour"), Modifier.size(12.dp), tint = MARK_COLOR) }
         }
-        if (phoneOnly) {
+        if (added) {
+            // Added from elsewhere on the phone.
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.FolderOpen, tr("Добавлен с телефона", "Added from the phone"), Modifier.size(12.dp), tint = Color.White) }
+        } else if (phoneOnly) {
             // Only on the phone (a clip made here, or deleted from the card).
             Box(
                 Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
@@ -543,6 +569,12 @@ private fun BottomPanel(vm: CameraController) {
             ) {
                 Text(tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
                 PasteColour(vm, selection)
+                // Added files: off the list (they stay on the phone).
+                if (selection.all { it.isAdded }) {
+                    IconButton({ vm.removeAdded(selection) }) {
+                        Icon(Icons.Filled.PlaylistRemove, tr("Убрать из списка", "Take off the list"), tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
                 Button({ share(context, selection); vm.clearSelection() }) {
                     Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))

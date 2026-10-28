@@ -32,7 +32,10 @@ data class CameraFile(
     /** Shot in I-Log, as the camera's list says; null = it doesn't say. */
     val iLog: Boolean? get() = colorMode?.let { it == COLOR_MODE_ILOG }
     val name: String get() = uri.substringAfterLast('/')
-    val kind: MediaKind get() = if (name.endsWith(".mp4", ignoreCase = true)) MediaKind.VIDEO else MediaKind.PHOTO
+    val kind: MediaKind get() = if (name.substringAfterLast('.').lowercase() in VIDEO_EXTENSIONS) MediaKind.VIDEO else MediaKind.PHOTO
+
+    /** A file added from elsewhere on the phone (not the camera's, not saved by the app). */
+    val isAdded: Boolean get() = uri.startsWith(ADDED_PREFIX)
     val isLive: Boolean get() = name.startsWith("LIV_")
 
     /** The live photo's picture (LIV_….jpg) — its clip is LIV_….mp4 of the same name. */
@@ -42,6 +45,12 @@ data class CameraFile(
     val stem: String get() = name.substringBeforeLast('.')
 
     companion object {
+        /** Videos by their extension: the camera's .mp4, and what a phone file added to the list may be. */
+        val VIDEO_EXTENSIONS = setOf("mp4", "mov", "m4v", "3gp", "mkv", "webm")
+
+        /** [uri] prefix of files added from the phone (see [isAdded]). */
+        const val ADDED_PREFIX = "/added/"
+
         private val STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
         private val NAME_DATE = Regex("""_(\d{8})_(\d{6})_""")
 

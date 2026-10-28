@@ -64,7 +64,11 @@ sealed interface ConnState {
     data class Failed(val message: String) : ConnState
 }
 
-enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
+/**
+ * The gallery's filter: by kind, favorites, files added from the phone, videos with a colour of their own, and what the
+ * app saved (clips …_HL, copies with colour …_COLOR, without sound …_MUTE).
+ */
+enum class Filter { ALL, PHOTO, VIDEO, FAVORITE, ADDED, COLOURED, SAVED }
 
 /**
  * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
@@ -404,6 +408,7 @@ class CameraController(private val app: Application) {
         // A save with colour cut short by the process dying leaves its temp files (gigabytes for a long 4K video).
         File(app.cacheDir, "export.mp4").delete()
         File(app.cacheDir, "export.aac").delete()
+        loadAddedFiles()
     }
 
     init {
@@ -624,13 +629,13 @@ class CameraController(private val app: Application) {
 
     /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
     val listedFiles: List<CameraFile> by derivedStateOf {
-        if (showsPhone) return@derivedStateOf phoneFiles
+        if (showsPhone) return@derivedStateOf localFiles
         val paired = liveClips.values.map { it.name }.toSet()
         val onCard = files.filter { it.name !in paired }
         // With the camera there too: what is only on the phone — clips made here, files already deleted from the
         // card — so they don't vanish from the app while connected.
         val names = files.map { it.name }.toSet()
-        val phoneOnly = phoneFiles.filter { it.name !in names }
+        val phoneOnly = localFiles.filter { it.name !in names }
         if (phoneOnly.isEmpty()) onCard
         else (onCard + phoneOnly).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
     }
@@ -641,7 +646,124 @@ class CameraController(private val app: Application) {
             Filter.PHOTO -> listedFiles.filter { it.kind == MediaKind.PHOTO }
             Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
             Filter.FAVORITE -> listedFiles.filter { it.name in favorites }
+            Filter.ADDED -> listedFiles.filter { it.isAdded }
+            Filter.COLOURED -> listedFiles.filter { it.kind == MediaKind.VIDEO && lookVersion >= 0 && hasLook(it) }
+            Filter.SAVED -> listedFiles.filter(::isSaved)
         }
+    }
+
+    /** A file the app saved: a clip of pieces, a copy with colour or without sound. */
+    fun isSaved(file: CameraFile): Boolean = file.stem.let { it.contains("_HL") || it.contains("_COLOR") || it.contains("_MUTE") }
+
+    /** The phone's side of the list: the app's own folder and the files added to it, newest first. */
+    private val localFiles: List<CameraFile> by derivedStateOf {
+        if (addedFiles.isEmpty()) phoneFiles
+        else (phoneFiles + addedFiles).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+    }
+
+    // ---------- files added from elsewhere on the phone ----------
+
+    /** Files added from the phone (the system's file picker): listed, viewed, coloured and saved like the app's own. */
+    var addedFiles by mutableStateOf<List<CameraFile>>(emptyList())
+        private set
+
+    private fun addedUris(): Set<String> = prefs.getStringSet("added_files", emptySet()).orEmpty()
+
+    /**
+     * Adds [uris] to the list — not copied: the app keeps the link and a lasting permission to read it (so they stay
+     * after a restart; the files themselves aren't touched).
+     */
+    fun addFiles(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        for (u in uris) {
+            runCatching { app.contentResolver.takePersistableUriPermission(u, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                .onFailure { log("добавить ${u.lastPathSegment}: нет постоянного доступа (${it.message})") }
+        }
+        prefs.edit().putStringSet("added_files", addedUris() + uris.map { it.toString() }).apply()
+        loadAddedFiles()
+        message = tr("Добавлено: ${uris.size}", "Added: ${uris.size}")
+    }
+
+    /** Takes [files] off the list (only the app forgets them: nothing is deleted from the phone). */
+    fun removeAdded(files: List<CameraFile>) {
+        val gone = files.filter { it.isAdded }.mapNotNull { it.localUri }.toSet()
+        if (gone.isEmpty()) return
+        for (u in gone) runCatching { app.contentResolver.releasePersistableUriPermission(android.net.Uri.parse(u), android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        prefs.edit().putStringSet("added_files", addedUris() - gone).apply()
+        files.forEach { selected.remove(it.name) }
+        loadAddedFiles()
+        message = tr("Убрано из списка: ${gone.size} (на телефоне файлы остались)", "Taken off the list: ${gone.size} (the files stay on the phone)")
+    }
+
+    /**
+     * The added files as list entries: name, size, date from the picker's provider; a video's length and size read from
+     * the file. One whose permission is gone (the file deleted or moved) drops off the list.
+     */
+    private fun loadAddedFiles() {
+        scope.launch {
+            val uris = addedUris()
+            val (found, lost) = withContext(Dispatchers.IO) {
+                val found = mutableListOf<CameraFile>()
+                val lost = mutableSetOf<String>()
+                val names = mutableSetOf<String>()
+                for (s in uris) {
+                    val f = runCatching { addedFile(android.net.Uri.parse(s), names) }.getOrNull()
+                    if (f == null) lost += s else { found += f; names += f.name }
+                }
+                found to lost
+            }
+            if (lost.isNotEmpty()) {
+                log("добавленные файлы: недоступно ${lost.size} — убраны из списка")
+                prefs.edit().putStringSet("added_files", addedUris() - lost).apply()
+            }
+            addedFiles = found
+        }
+    }
+
+    /** One added file, its name kept apart from [taken] ones (two «video.mp4» from two folders). */
+    private fun addedFile(uri: android.net.Uri, taken: Set<String>): CameraFile? {
+        var name: String? = null
+        var size: Long? = null
+        var modified: Long? = null
+        app.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            if (!c.moveToFirst()) return null
+            fun col(n: String) = c.getColumnIndex(n).takeIf { it >= 0 && !c.isNull(it) }
+            name = col(android.provider.OpenableColumns.DISPLAY_NAME)?.let(c::getString)
+            size = col(android.provider.OpenableColumns.SIZE)?.let(c::getLong)
+            modified = col(android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)?.let(c::getLong)
+        } ?: return null
+        var shown = name ?: uri.lastPathSegment ?: return null
+        var n = 2
+        while (shown in taken) shown = (name ?: "file").let { it.substringBeforeLast('.') + " ($n)." + it.substringAfterLast('.') }.also { n++ }
+        var file = CameraFile(
+            uri = CameraFile.ADDED_PREFIX + shown,
+            size = size,
+            durationSec = null,
+            width = null,
+            height = null,
+            fps = null,
+            created = CameraFile.createdFromName(shown) ?: modified?.let {
+                java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
+            },
+            localUri = uri.toString(),
+        )
+        if (file.kind == MediaKind.VIDEO) {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(app, uri)
+                fun meta(k: Int) = r.extractMetadata(k)
+                file = file.copy(
+                    durationSec = meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { ((it + 500) / 1000).toInt() },
+                    width = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull(),
+                    height = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull(),
+                )
+            } catch (e: RuntimeException) {
+                log("добавленное видео $shown: ${e.message}")
+            } finally {
+                r.release()
+            }
+        }
+        return file
     }
 
     /** Selected files of the list on screen: the camera's card, or the phone's copies (for sharing). */
@@ -1915,7 +2037,11 @@ class CameraController(private val app: Application) {
             value?.toString()?.takeIf { it.isNotBlank() }?.let { out += tr(ru, en) to it }
         }
         add("Файл", "File", file.name)
-        add("Где", "Where", if (file.isOnPhone) tr("на телефоне (DCIM/Camera)", "on the phone (DCIM/Camera)") else tr("на камере", "on the camera"))
+        add("Где", "Where", when {
+            file.isAdded -> tr("на телефоне, добавлен в список", "on the phone, added to the list")
+            file.isOnPhone -> tr("на телефоне (DCIM/Camera)", "on the phone (DCIM/Camera)")
+            else -> tr("на камере", "on the camera")
+        })
         add("Дата", "Date", file.created?.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")))
         add("Размер", "Size", file.size?.let(::formatSize))
         add("Избранное", "Favorite", if (file.name in favorites) "♥" else null)
@@ -2127,6 +2253,7 @@ class CameraController(private val app: Application) {
             } ?: if (file.localUri != null) {
                 // A phone copy whose camera thumbnail was never cached: the gallery's own (cached by MediaStore).
                 runCatching { app.contentResolver.loadThumbnail(android.net.Uri.parse(file.localUri), android.util.Size(320, 320), null) }
+                    .recoverCatching { localThumbnail(file) ?: throw it } // a picked file's provider may have none
                     .onFailure { log("миниатюра ${file.name} с телефона: ${it.message}") }
                     .getOrNull()
             } else if (conn == ConnState.Connected) {
@@ -2141,6 +2268,26 @@ class CameraController(private val app: Application) {
             }
         } ?: return null
         return bitmap.asImageBitmap().also { memCache.put(file.name, it) }
+    }
+
+    /** A thumbnail made here: a video's frame at 1 s, or the photo decoded small. */
+    private fun localThumbnail(file: CameraFile): Bitmap? {
+        val uri = android.net.Uri.parse(file.localUri ?: return null)
+        return if (file.kind == MediaKind.VIDEO) {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(app, uri)
+                r.getScaledFrameAtTime(1_000_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 320, 320)
+            } finally {
+                r.release()
+            }
+        } else {
+            android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(app.contentResolver, uri)) { d, info, _ ->
+                val k = maxOf(1, maxOf(info.size.width, info.size.height) / 320)
+                d.setTargetSize(info.size.width / k, info.size.height / k)
+                d.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        }
     }
 
     /** A gallery file was written again under [name]: its old thumbnail must not be shown. */

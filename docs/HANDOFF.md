@@ -160,6 +160,13 @@ player's own effect objects as `ColorStep`s (shader + `bind`; media3 runs them v
 FBOs, redrawn when `LiveEdits.version` moves. The player draws nothing new while paused, and a frame caught half-way
 through its chain mixed old and new settings (before / after looked random: «то только стиль, то весь LUT»). The muted
 nudge stays only for a new player view (panel opened / closed) and an effect rebuild.
+Files added from the phone: the «Добавить с телефона» icon (Files tab) opens the system file picker
+(OpenMultipleDocuments, video/* and image/*); the app keeps the URIs (prefs `added_files`) with a persistable read
+permission — nothing copied. `CameraFile.ADDED_PREFIX` uris (`isAdded`), names kept apart («name (2).ext»), listed with
+the app's folder (`localFiles`), a folder badge; everything else (viewer, pieces, colour, save) as for phone copies.
+Video kinds by extension (mp4, mov, m4v, 3gp, mkv, webm). A file whose permission is gone drops off; «Убрать из списка»
+on a selection of added files only forgets them. Filters: all / photos / videos, then ♥, added, own colour, saved
+(…_HL / _COLOR / _MUTE) — shown when not empty. Thumbnails of picked files fall back to a frame / a small decode.
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
 (NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
 the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /
