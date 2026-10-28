@@ -87,6 +87,8 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.RadioButton
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Edit
@@ -196,43 +198,8 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         // Setting the colour: only the video and the panel — the top bar and the ♥ / «i» / share column hide.
         var colouring by remember(file.uri) { mutableStateOf(false) }
         if (info) FileInfo(vm, file) { info = false }
-        // A clip of this video already in the gallery: replace it, or keep both (…_HL2.mp4).
-        val scope = rememberCoroutineScope()
-        var replaceClip by remember(file.uri) { mutableStateOf(false) }
-        fun startClip() {
-            scope.launch {
-                if (vm.clipExists(file)) replaceClip = true else { vm.saveClip(file, pieces); onClose() }
-            }
-        }
-        if (replaceClip) {
-            AlertDialog(
-                onDismissRequest = { replaceClip = false },
-                title = { Text(tr("Клип уже есть", "The clip already exists")) },
-                text = {
-                    Text(
-                        tr(
-                            "В галерее уже есть ${vm.clipName(file)}. Заменить его новым или сохранить новый отдельно?",
-                            "${vm.clipName(file)} is already in the gallery. Replace it, or save the new one separately?",
-                        ),
-                    )
-                },
-                confirmButton = {
-                    TextButton({ replaceClip = false; vm.saveClip(file, pieces); onClose() }) { Text(tr("Заменить", "Replace")) }
-                },
-                dismissButton = {
-                    TextButton({
-                        scope.launch {
-                            val name = vm.freeClipName(file)
-                            replaceClip = false
-                            vm.saveClip(file, pieces, name)
-                            onClose()
-                        }
-                    }) { Text(tr("Сохранить отдельно", "Save separately")) }
-                },
-            )
-        }
         when {
-            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
+            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }, { choose = true }) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
@@ -284,19 +251,16 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 )
             }
             Spacer(Modifier.width(8.dp))
-            if (!file.isOnPhone && file.name !in vm.downloaded) {
-                // With pieces marked: the whole video or one clip of the pieces.
-                Button(
-                    { if (isVideo && pieces.isNotEmpty()) choose = true else { vm.downloadOne(file); onClose() } },
-                    enabled = !vm.isDownloading,
-                ) { Text(tr("Скачать", "Download")) }
-            } else if (isVideo && pieces.isNotEmpty()) {
-                // Already on the phone: a clip of the pieces, made from the phone's copy.
-                Button({ startClip() }, enabled = !vm.isDownloading) {
-                    Icon(Icons.Filled.ContentCut, null, Modifier.size(18.dp))
+            val busy = vm.isDownloading || vm.export != null
+            if (isVideo && (!file.isOnPhone || pieces.isNotEmpty() || vm.look(file) != null)) {
+                // A video: one «Сохранить» for every way (whole / marked, as shot / with colour).
+                Button({ choose = true }, enabled = !busy) {
+                    Icon(Icons.Filled.SaveAlt, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(tr("Клип", "Clip"))
+                    Text(tr("Сохранить", "Save"))
                 }
+            } else if (!isVideo && !file.isOnPhone && file.name !in vm.downloaded) {
+                Button({ vm.downloadOne(file); onClose() }, enabled = !busy) { Text(tr("Скачать", "Download")) }
             }
         }
         // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
@@ -319,14 +283,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
             }
         }
-        if (choose) {
-            DownloadChoice(
-                file, pieces, vm.clipName(file),
-                onWhole = { choose = false; vm.downloadOne(file); onClose() },
-                onPieces = { choose = false; startClip() },
-                onDismiss = { choose = false },
-            )
-        }
+        if (choose) SaveDialog(vm, file, pieces, onDismiss = { choose = false }, onStarted = { choose = false; onClose() })
     }
 }
 
@@ -375,37 +332,120 @@ fun share(context: android.content.Context, files: List<CameraFile>) {
     runCatching { context.startActivity(android.content.Intent.createChooser(intent, tr("Поделиться", "Share"))) }
 }
 
-/** «Скачать» for a video with marked pieces: the whole file, or one clip of just the pieces. */
+/**
+ * «Сохранить» for a video — one dialog for every way: what (the whole video / the marked pieces) and how (as shot /
+ * with the colour set in the viewer); a file on the camera with colour: download the original first, or read only
+ * what is needed straight from the camera. The line below says what comes out and how (cut without re-encoding,
+ * fast — or re-encoded, slower). A name already in the gallery: replace it, or save another.
+ */
 @Composable
-private fun DownloadChoice(
-    file: CameraFile,
-    pieces: List<Highlight>,
-    clipName: String,
-    onWhole: () -> Unit,
-    onPieces: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val piecesMs = pieces.sumOf { it.endMs!! - it.startMs }
-    val clipBytes = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * piecesMs / (it * 1000L) } }
+private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<Highlight>, onDismiss: () -> Unit, onStarted: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val look = remember(file.name) { vm.look(file) ?: ColorLook() }
+    val iLog by produceState<Boolean?>(null, file.uri, file.localUri) { value = vm.isILog(file) }
+    val ilog = iLog == true
+    val colourSet = iLog != null && !look.isPlain(ilog)
+    var marked by remember { mutableStateOf(pieces.isNotEmpty()) }
+    var colour by remember(colourSet) { mutableStateOf(colourSet) }
+    var direct by remember { mutableStateOf(false) }
+    var taken by remember { mutableStateOf<String?>(null) }
+    val onCamera = !file.isOnPhone
+    val piecesMs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs }
+    val name = vm.saveName(file, marked, colour)
+    // Nothing to do: the whole video as shot is already on the phone.
+    val nothing = !marked && !colour && !onCamera
+    fun start(as_: String) {
+        vm.save(file, if (marked) pieces else null, if (colour) look else null, ilog, as_, direct)
+        onStarted()
+    }
+    val takenName = taken
+    if (takenName != null) {
+        AlertDialog(
+            onDismissRequest = { taken = null },
+            title = { Text(tr("Файл уже есть", "The file already exists")) },
+            text = { Text(tr("В галерее уже есть $takenName. Заменить его или сохранить новый отдельно?", "$takenName is already in the gallery. Replace it, or save the new one separately?")) },
+            confirmButton = { TextButton({ start(takenName) }) { Text(tr("Заменить", "Replace")) } },
+            dismissButton = {
+                TextButton({ scope.launch { start(vm.freeSaveName(file, marked, colour)) } }) { Text(tr("Сохранить отдельно", "Save separately")) }
+            },
+        )
+        return
+    }
+    @Composable
+    fun Choice(selected: Boolean, enabled: Boolean = true, onClick: () -> Unit, label: String, note: String? = null) {
+        Row(
+            Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected, onClick, enabled = enabled)
+            Column {
+                Text(label, color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant)
+                if (note != null) Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(tr("Скачать видео", "Download the video")) },
+        title = { Text(tr("Сохранить видео", "Save the video")) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(tr("Целиком", "Whole video") + (file.size?.let { " — ${formatSize(it)}" } ?: ""))
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Choice(!marked, onClick = { marked = false }, label = tr("Целиком", "Whole video") + (file.size?.let { " — ${formatSize(it)}" } ?: ""))
+                Choice(
+                    marked, enabled = pieces.isNotEmpty(), onClick = { marked = true },
+                    label = tr("Только отмеченное", "Marked pieces only"),
+                    note = if (pieces.isEmpty()) tr("кусков нет", "no pieces") else "${pieces.size} · " + "%.1f ".format(piecesMs / 1000.0) + tr("с", "s"),
+                )
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Choice(!colour, onClick = { colour = false }, label = tr("Как снято", "As shot"))
+                Choice(
+                    colour, enabled = colourSet, onClick = { colour = true },
+                    label = tr("С моим цветом", "With my colour"),
+                    note = if (colourSet) null else tr("цвет не менялся", "the colour wasn't changed"),
+                )
+                if (onCamera && colour) {
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    Choice(
+                        !direct, onClick = { direct = false },
+                        label = tr("Скачать оригинал, потом сохранить", "Download the original, then save"),
+                        note = tr("надёжнее; оригинал останется на телефоне", "more reliable; the original stays on the phone"),
+                    )
+                    Choice(
+                        direct, onClick = { direct = true },
+                        label = tr("Прямо с камеры", "Straight from the camera"),
+                        note = tr("читается только нужное — место под оригинал не нужно; камера должна быть на связи всё время", "only what is needed is read — no room for the original; the camera must stay connected"),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 Text(
-                    tr("Только отмеченное", "Marked pieces only") + " — ${pieces.size} · " + "%.1f ".format(piecesMs / 1000.0) +
-                        tr("с", "s") + (clipBytes?.let { ", ~${formatSize(it)}" } ?: "") + "\n" +
-                        tr(
-                            "Одним клипом $clipName. Начало куска сдвигается назад к ключевому кадру, с камеры читаются только куски.",
-                            "One clip, $clipName. A piece's start moves back to a key frame; only the pieces are read from the camera.",
-                        ),
+                    when {
+                        nothing -> tr("Видео уже на телефоне.", "The video is already on the phone.")
+                        !marked && !colour -> tr("Скачивание оригинала.", "Downloads the original.")
+                        !colour -> "$name · " + tr(
+                            "без перекодирования, быстро, исходное качество; начало куска — с ключевого кадра перед ним.",
+                            "no re-encoding, fast, original quality; a piece starts at the key frame before it.",
+                        )
+                        else -> "$name · " + tr(
+                            "перекодирование в исходном размере: дольше. " + (if (marked) "Куски точно по отметкам, звук режется вместе с ними." else "Звук копируется как есть."),
+                            "re-encoded at full size: slower. " + (if (marked) "Pieces exactly as marked, the sound cut with them." else "The sound is copied as is."),
+                        )
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
         },
-        confirmButton = { TextButton(onPieces) { Text(tr("Только отмеченное", "Marked only")) } },
-        dismissButton = { TextButton(onWhole) { Text(tr("Целиком", "Whole")) } },
+        confirmButton = {
+            TextButton(
+                {
+                    if (!marked && !colour) {
+                        start(file.name)
+                    } else {
+                        scope.launch { if (vm.nameTaken(name)) taken = name else start(name) }
+                    }
+                },
+                enabled = !nothing && iLog != null,
+            ) { Text(tr("Сохранить", "Save")) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text(tr("Отмена", "Cancel")) } },
     )
 }
 
@@ -420,6 +460,7 @@ private fun VideoPreview(
     active: Boolean,
     onLock: (Boolean) -> Unit,
     onColouring: (Boolean) -> Unit,
+    onSave: () -> Unit,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -760,20 +801,9 @@ private fun VideoPreview(
                         modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
                     )
                 } else {
-                    IconButton(
-                        {
-                            when {
-                                !file.isOnPhone -> android.widget.Toast.makeText(context, tr("Сначала скачайте видео на телефон", "Download the video to the phone first"), android.widget.Toast.LENGTH_LONG).show()
-                                look.isPlain(ilog) -> android.widget.Toast.makeText(context, tr("Цвет не менялся — сохранять нечего", "The colour wasn't changed — nothing to save"), android.widget.Toast.LENGTH_SHORT).show()
-                                else -> {
-                                    vm.exportWithColor(file, look, ilog)
-                                    android.widget.Toast.makeText(context, tr("Сохраняю с цветом в исходном размере — это займёт время", "Saving with colour at full size — this takes a while"), android.widget.Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        },
-                        Modifier.background(Color(0x99000000), CircleShape),
-                    ) {
-                        Icon(Icons.Filled.SaveAlt, tr("Сохранить с цветом", "Save with colour"), tint = Color.White)
+                    // The same «Сохранить» as in the top bar (colour preselected when set).
+                    IconButton(onSave, Modifier.background(Color(0x99000000), CircleShape), enabled = !vm.isDownloading) {
+                        Icon(Icons.Filled.SaveAlt, tr("Сохранить", "Save"), tint = Color.White)
                     }
                 }
                 IconButton(

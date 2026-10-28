@@ -2250,7 +2250,7 @@ class CameraController(private val app: Application) {
     }
 
 
-    // ---------- saving a video with its colour ----------
+    // ---------- saving: the whole video or the marked pieces, as shot or with the colour ----------
 
     /** Saving with colour: the file being written and how far (0…100). */
     data class ExportProgress(val name: String, val percent: Int)
@@ -2260,56 +2260,93 @@ class CameraController(private val app: Application) {
     private var exportJob: Job? = null
     private var exporter: androidx.media3.transformer.Transformer? = null
 
-    fun exportName(file: CameraFile, n: Int = 1): String = file.stem + "_COLOR" + (if (n > 1) "$n" else "") + ".mp4"
+    /** The gallery name of a save: …_HL (marked pieces), …_COLOR (with colour), …_HL_COLOR; [n] > 1 adds a number. */
+    fun saveName(file: CameraFile, pieces: Boolean, color: Boolean, n: Int = 1): String =
+        file.stem + (if (pieces) "_HL" else "") + (if (color) "_COLOR" else "") + (if (n > 1) "$n" else "") + ".mp4"
+
+    suspend fun nameTaken(name: String): Boolean = withContext(Dispatchers.IO) { Downloader.galleryUri(app, name) != null }
+
+    /** The first free name for this kind of save: …2, …3 … */
+    suspend fun freeSaveName(file: CameraFile, pieces: Boolean, color: Boolean): String {
+        var n = 2
+        while (nameTaken(saveName(file, pieces, color, n))) n++
+        return saveName(file, pieces, color, n)
+    }
 
     /**
-     * The phone's copy of [file] re-encoded with [look] (the viewer's effects in full, see [exportEffects]) into the
-     * gallery as …_COLOR.mp4 (…_COLOR2 … when taken): the original's size and frame rate, its codec (H.265 / H.264,
-     * another if the phone has no encoder for it) at its bitrate; the sound copied as is. Written to the app's cache
-     * first (the transformer takes a file path), then into the gallery. The Insta360 data at the file's end (marks)
-     * isn't carried over. One at a time; «Стоп» cancels.
+     * One way to save a video, whatever is asked: [pieces] null = the whole video, else these pieces as one clip;
+     * [look] null = as shot, else with this colour ([iLog] for the LUT). As shot: the whole is a download, pieces a
+     * clip cut without re-encoding ([saveClip]). With colour it is re-encoded ([exportWithColor]); a file still on the
+     * camera is downloaded first, or with [direct] read straight from the camera (only what is needed — no room on the
+     * phone for the original).
+     */
+    fun save(file: CameraFile, pieces: List<Highlight>?, look: ColorLook?, iLog: Boolean, name: String, direct: Boolean) {
+        when {
+            look == null && pieces == null -> downloadOne(file)
+            look == null -> saveClip(file, pieces!!, name)
+            else -> exportWithColor(file, look, iLog, pieces, name, direct)
+        }
+    }
+
+    /**
+     * [file] re-encoded with [look] (the viewer's effects in full, see [exportEffects]) into the gallery as [name]: the
+     * original's size and frame rate, its codec (H.265 / H.264, another if the phone has no encoder for it) at its
+     * bitrate. The whole video keeps its sound as is; [pieces] are cut exactly where they are marked (re-encoding
+     * anyway, no key frames needed) and joined, the sound cut at the same places — so it is re-encoded (AAC 256 kbit/s),
+     * the only way to cut it exactly. From the phone's copy; a file on the camera is downloaded first, or with [direct]
+     * read from the camera over Wi-Fi. Written to the app's cache first (the transformer takes a file path), then into
+     * the gallery. The Insta360 data at the file's end (marks) isn't carried over. One at a time; «Стоп» cancels.
      */
     @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
-    fun exportWithColor(file: CameraFile, look: ColorLook, iLog: Boolean) {
-        val local = file.localUri
-        if (local == null) {
-            message = tr("Сначала скачайте видео на телефон", "Download the video to the phone first")
+    fun exportWithColor(file: CameraFile, look: ColorLook, iLog: Boolean, pieces: List<Highlight>?, name: String, direct: Boolean) {
+        if (exportJob?.isActive == true || isDownloading) return
+        if (file.localUri == null && conn != ConnState.Connected) {
+            message = tr("Чтобы сохранить файл с камеры, подключитесь", "Connect to save a file from the camera")
             return
         }
-        if (exportJob?.isActive == true) return
         exportJob = scope.launch {
-            val uri = android.net.Uri.parse(local)
             val tmp = java.io.File(app.cacheDir, "export.mp4")
-            var name = exportName(file)
-            export = ExportProgress(name, 0)
             val startedAt = System.currentTimeMillis()
             try {
-                name = withContext(Dispatchers.IO) {
-                    var n = 1
-                    while (Downloader.galleryUri(app, exportName(file, n)) != null) n++
-                    exportName(file, n)
+                // The original: the phone's copy; downloaded first when asked so; or the camera's file.
+                var local = file.localUri
+                if (local == null && !direct) {
+                    downloadOne(file)
+                    downloadJob?.join()
+                    local = withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }?.toString()
+                        ?: error(tr("оригинал не скачался", "the original didn't download"))
                 }
                 export = ExportProgress(name, 0)
-                val source = withContext(Dispatchers.IO) { exportSource(uri) }
+                val camera = if (local == null) session.indexSource(file) else null
+                val source = withContext(Dispatchers.IO) {
+                    exportSource(file.size) { ex -> if (camera != null) ex.setDataSource(camera) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) }
+                }
+                if (camera != null) CameraService.start(app)
+                val uri = local ?: previewUrlOf(file)
                 val table = if (iLog && look.lut && look.strength > 0f) lut() else null
                 val effects = exportEffects(table, look, source.lines)
+                val parts = pieces?.let { Highlights.joinTouching(it) }
                 tmp.delete()
-                transform(uri, tmp, effects, source) { export = ExportProgress(name, it) }
+                transform(uri, camera != null, parts, tmp, effects, source) { export = ExportProgress(name, it) }
                 withContext(Dispatchers.IO) {
                     Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
                         java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
                     }
                 }
                 val sec = (System.currentTimeMillis() - startedAt) / 1000
-                log("с цветом $name: ${source.mime}, ${source.bitrate / 1_000_000} Мбит/с, ${source.lines} строк, ${effects.size} эффектов, $sec с")
-                lastResult = tr("Сохранено с цветом: $name", "Saved with colour: $name")
+                log(
+                    "с цветом $name: ${source.mime}, ${source.bitrate / 1_000_000} Мбит/с, ${source.lines} строк, " +
+                        "${effects.size} эффектов, " + (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
+                        (if (camera != null) "с камеры, " else "") + "$sec с",
+                )
+                lastResult = tr("Сохранено: $name", "Saved: $name")
                 loadPhoneFiles()
             } catch (e: CancellationException) {
-                lastResult = tr("С цветом не сохранено: остановлено", "Not saved with colour: stopped")
+                lastResult = tr("Не сохранено: остановлено", "Not saved: stopped")
                 throw e
             } catch (e: Exception) {
                 log("с цветом $name: ${e.javaClass.simpleName}: ${e.message} ${e.cause?.message ?: ""}")
-                lastResult = tr("Не удалось сохранить с цветом", "Couldn't save with colour") + (e.message?.let { ": $it" } ?: "")
+                lastResult = tr("Не удалось сохранить", "Couldn't save") + (e.message?.let { ": $it" } ?: "")
             } finally {
                 tmp.delete()
                 export = null
@@ -2318,18 +2355,22 @@ class CameraController(private val app: Application) {
         }
     }
 
+    /** The camera's full file (not its light copy) over Wi-Fi. */
+    private fun previewUrlOf(file: CameraFile) = "http://${CameraTcp.HOST}${file.uri}"
+
     fun cancelExport() {
         exporter?.cancel()
         exportJob?.cancel()
+        downloadJob?.cancel()
     }
 
     /** What the copy keeps from the original: the video codec, its bitrate, the short side (px). */
     private class ExportSource(val mime: String, val bitrate: Int, val lines: Int)
 
-    private fun exportSource(uri: android.net.Uri): ExportSource {
+    private fun exportSource(fileBytes: Long?, open: (android.media.MediaExtractor) -> Unit): ExportSource {
         val ex = android.media.MediaExtractor()
         try {
-            ex.setDataSource(app, uri, null)
+            open(ex)
             for (i in 0 until ex.trackCount) {
                 val f = ex.getTrackFormat(i)
                 val mime = f.getString(android.media.MediaFormat.KEY_MIME) ?: continue
@@ -2337,14 +2378,9 @@ class CameraController(private val app: Application) {
                 val w = f.getInteger(android.media.MediaFormat.KEY_WIDTH)
                 val h = f.getInteger(android.media.MediaFormat.KEY_HEIGHT)
                 val trackRate = if (f.containsKey(android.media.MediaFormat.KEY_BIT_RATE)) f.getInteger(android.media.MediaFormat.KEY_BIT_RATE) else 0
-                val rate = trackRate.takeIf { it > 0 } ?: android.media.MediaMetadataRetriever().run {
-                    try {
-                        setDataSource(app, uri)
-                        extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull() ?: 0
-                    } finally {
-                        release()
-                    }
-                }
+                // Without it in the track: the whole file's rate (size over length), a little over the video's.
+                val durationUs = if (f.containsKey(android.media.MediaFormat.KEY_DURATION)) f.getLong(android.media.MediaFormat.KEY_DURATION) else 0L
+                val rate = trackRate.takeIf { it > 0 } ?: fileBytes?.takeIf { durationUs > 0 }?.let { (it * 8_000_000L / durationUs).toInt() } ?: 0
                 // The original's own codec when it is one of the two every phone encodes; at its bitrate (no less than
                 // 20 Mbit/s for good quality, no more than 200).
                 val out = if (mime == androidx.media3.common.MimeTypes.VIDEO_H265) mime else androidx.media3.common.MimeTypes.VIDEO_H264
@@ -2356,23 +2392,44 @@ class CameraController(private val app: Application) {
         }
     }
 
-    /** Runs the transformer on the main thread until it is done; [onPercent] twice a second. */
+    /**
+     * Runs the transformer on the main thread until it is done; [onPercent] twice a second. [uri]: the phone's copy, or
+     * with [fromCamera] the camera's file over Wi-Fi (our data source, reading only what is needed). [parts] null: the
+     * whole video, its sound copied; else those pieces in a row, each cut exactly, the sound cut with them (re-encoded).
+     */
     @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
     private suspend fun transform(
-        uri: android.net.Uri,
+        uri: String,
+        fromCamera: Boolean,
+        parts: List<Highlight>?,
         out: java.io.File,
         effects: List<androidx.media3.common.Effect>,
         source: ExportSource,
         onPercent: (Int) -> Unit,
     ) = kotlinx.coroutines.coroutineScope {
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
-            .setRequestedVideoEncoderSettings(androidx.media3.transformer.VideoEncoderSettings.Builder().setBitrate(source.bitrate).build())
-            .setEnableFallback(true)
-            .build()
-        val t = androidx.media3.transformer.Transformer.Builder(app)
+        val encoders = HighAudioEncoders(
+            androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
+                .setRequestedVideoEncoderSettings(androidx.media3.transformer.VideoEncoderSettings.Builder().setBitrate(source.bitrate).build())
+                .setEnableFallback(true)
+                .build(),
+        )
+        val builder = androidx.media3.transformer.Transformer.Builder(app)
             .setVideoMimeType(source.mime)
             .setEncoderFactory(encoders)
+        if (fromCamera) {
+            val camera = previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera"))
+            builder.setAssetLoaderFactory(
+                androidx.media3.transformer.DefaultAssetLoaderFactory(
+                    app,
+                    androidx.media3.transformer.DefaultDecoderFactory(app),
+                    androidx.media3.common.util.Clock.DEFAULT,
+                    androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(camera),
+                    androidx.media3.datasource.DataSourceBitmapLoader(app),
+                ),
+            )
+        }
+        val t = builder
             .addListener(object : androidx.media3.transformer.Transformer.Listener {
                 override fun onCompleted(composition: androidx.media3.transformer.Composition, exportResult: androidx.media3.transformer.ExportResult) {
                     done.complete(Unit)
@@ -2388,9 +2445,28 @@ class CameraController(private val app: Application) {
             })
             .build()
         exporter = t
-        val item = androidx.media3.transformer.EditedMediaItem.Builder(androidx.media3.common.MediaItem.fromUri(uri))
-            .setEffects(androidx.media3.transformer.Effects(emptyList(), effects))
-            .build()
+        // A piece: the media item clipped to it; a no-op audio processor makes the transformer decode the sound, so it
+        // is cut at the piece's exact ends (copied, it could only be cut at its own frames). Several pieces in a row
+        // are decoded anyway.
+        fun item(piece: Highlight?): androidx.media3.transformer.EditedMediaItem {
+            val media = androidx.media3.common.MediaItem.Builder().setUri(uri).apply {
+                if (piece != null) {
+                    setClippingConfiguration(
+                        androidx.media3.common.MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs(piece.startMs)
+                            .setEndPositionMs(piece.endMs ?: piece.startMs)
+                            .build(),
+                    )
+                }
+            }.build()
+            val audio = if (piece != null) listOf<androidx.media3.common.audio.AudioProcessor>(androidx.media3.common.audio.SonicAudioProcessor()) else emptyList()
+            return androidx.media3.transformer.EditedMediaItem.Builder(media)
+                .setEffects(androidx.media3.transformer.Effects(audio, effects))
+                .build()
+        }
+        val composition = androidx.media3.transformer.Composition.Builder(
+            androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
+        ).build()
         val ticker = launch {
             val holder = androidx.media3.transformer.ProgressHolder()
             while (true) {
@@ -2399,7 +2475,7 @@ class CameraController(private val app: Application) {
             }
         }
         try {
-            t.start(item, out.absolutePath)
+            t.start(composition, out.absolutePath)
             done.await()
         } finally {
             ticker.cancel()
@@ -2407,4 +2483,15 @@ class CameraController(private val app: Application) {
             exporter = null
         }
     }
+}
+
+/** The default encoders, with re-encoded sound at 256 kbit/s AAC (the default is 128) — or the original's rate if higher. */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+private class HighAudioEncoders(private val base: androidx.media3.transformer.DefaultEncoderFactory) :
+    androidx.media3.transformer.Codec.EncoderFactory {
+    override fun createForAudioEncoding(format: androidx.media3.common.Format): androidx.media3.transformer.Codec =
+        base.createForAudioEncoding(format.buildUpon().setAverageBitrate(maxOf(format.bitrate, 256_000)).build())
+
+    override fun createForVideoEncoding(format: androidx.media3.common.Format): androidx.media3.transformer.Codec =
+        base.createForVideoEncoding(format)
 }

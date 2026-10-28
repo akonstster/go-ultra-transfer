@@ -123,13 +123,19 @@ down), so dark and light skins alike — wide soft edges, narrow ones showed as 
 pulls skin hues up to 60 % to the line. A preset can lower the guard (`skinGuard`, mixed by strength): Amélie has 0 —
 faces go golden with the rest, as in the film, and guarding against so strong a grade showed its edges. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
 Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
-Save with colour (the save icon over the video while the panel is open; phone copies only): `exportWithColor` runs
-media3-transformer 1.4.1 with `exportEffects` — the same effects in full (no preview size, no stripes, only those that
-change something; the sharpening radius widened by lines / 1080 since it was set on a ≤ 1080 preview). The original's
-size and frame rate; H.265 if the original is, else H.264 (the encoder factory falls back to what the phone has); the
-original's bitrate (track or file), kept within 20…200 Mbit/s; audio copied, not re-encoded. Written to
-`cacheDir/export.mp4`, then into the gallery as `…_COLOR.mp4` (`_COLOR2`… when taken) via `Downloader.saveClip`.
-Progress (`ProgressHolder`, 2 Hz) in its own bar at the gallery's bottom and over the video; «Стоп» cancels. 8-bit
+Saving is one «Сохранить» (top bar for videos, also the save icon in the colour panel) → `SaveDialog`: whole /
+marked pieces × as shot / with my colour (+ for a camera file with colour: download the original first, or straight
+from the camera). `CameraController.save` picks the way: whole as shot = download; pieces as shot = `saveClip`
+(no re-encoding, starts on key frames, `…_HL`); with colour = `exportWithColor` (media3-transformer 1.4.1, `…_COLOR` /
+`…_HL_COLOR`). Names via `saveName`; a taken name → replace / save separately. Export: `exportEffects` (the viewer's
+effects in full, no preview size / stripes, sharpening radius × lines / 1080), the original's size, frame rate, codec
+(H.265 if the original is, else H.264; the encoder factory falls back), bitrate (track, or file size / length; 20…200
+Mbit/s). Whole: one item, sound copied. Pieces: one clipped item each in a sequence, cut exactly (re-encoding anyway);
+the sound is decoded (several items force it; one gets a no-op `SonicAudioProcessor`) so it is cut at the same places,
+re-encoded AAC ≥ 256 kbit/s (`HighAudioEncoders`; the default is 128). From the camera: `DefaultAssetLoaderFactory`
+with `ProgressiveMediaSource` over `CameraHttpDataSource` on the full file's URL (Range reads, only what is needed);
+the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
+(own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit
 output: an I-Log file's 10 bits are not kept. The Insta360 trailer (marks) isn't carried over. Not on the phone yet.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
