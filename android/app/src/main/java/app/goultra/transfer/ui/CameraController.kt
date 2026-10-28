@@ -2355,6 +2355,19 @@ class CameraController(private val app: Application) {
                     }
                 }
                 val sec = (System.currentTimeMillis() - startedAt) / 1000
+                // The picture's length against what was asked: shows at once if the pieces weren't cut.
+                val gotMs = runCatching {
+                    android.media.MediaMetadataRetriever().run {
+                        try {
+                            setDataSource(tmp.absolutePath)
+                            extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                        } finally {
+                            release()
+                        }
+                    }
+                }.getOrNull()
+                val wantedMs = parts?.sumOf { (it.endMs ?: it.startMs) - it.startMs }
+                log("с цветом $name: картинка ${gotMs ?: "?"} мс" + (wantedMs?.let { ", куски $it мс" } ?: ""))
                 log(
                     "с цветом $name: ${source.mime}, ${source.bitrate / 1_000_000} Мбит/с, ${source.lines} строк, " +
                         "${effects.size} эффектов, " + (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
@@ -2445,7 +2458,8 @@ class CameraController(private val app: Application) {
                     app,
                     androidx.media3.transformer.DefaultDecoderFactory(app),
                     androidx.media3.common.util.Clock.DEFAULT,
-                    androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(camera),
+                    // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(camera),
                     androidx.media3.datasource.DataSourceBitmapLoader(app),
                 ),
             )

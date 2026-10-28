@@ -139,7 +139,8 @@ MediaCodec from the original (phone copy or `session.clipSource`), encoded AAC-L
 the picture (`MediaMuxer`, interleaved by time, rotation kept) straight into the gallery item. Without sound (`_MUTE`): clips
 leave the track out (`ClipMaker.join(withSound = false)`; the whole video as shot becomes such a copy instead of a
 download), the transformer removes it, pieces skip `ClipAudio`.
-with `ProgressiveMediaSource` over `CameraHttpDataSource` on the full file's URL (Range reads, only what is needed);
+with `DefaultMediaSourceFactory` over `CameraHttpDataSource` on the full file's URL (not `ProgressiveMediaSource`: it
+ignores the items' clipping — the whole picture came out) (Range reads, only what is needed);
 the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
 (own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit
 output: an I-Log file's 10 bits are not kept. The Insta360 trailer (marks) isn't carried over. Not on the phone yet.
