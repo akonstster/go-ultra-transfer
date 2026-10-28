@@ -116,7 +116,8 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Compare
-import app.goultra.transfer.R
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.material3.Switch
 import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.CameraFile
@@ -139,13 +140,6 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
-        // The viewer's window itself black and nothing dimmed behind it: with the picture in a TextureView the
-        // gallery showed through the content's own black.
-        val dialogWindow = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
-        androidx.compose.runtime.SideEffect {
-            dialogWindow?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.BLACK))
-            dialogWindow?.setDimAmount(0f)
-        }
         // Swipe up / down: the next / previous file of the gallery as it is listed (filter included). The list is
         // taken when the viewer opens; each page shows the phone's copy of a file when there is one.
         val list = remember { vm.visibleFiles.takeIf { l -> l.any { it.name == file.name } } ?: listOf(file) }
@@ -562,6 +556,8 @@ private fun VideoPreview(
     // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
     // so the player's own taps (controls, seek bar) still work when not zooming.
     var zoom by remember(file.uri) { mutableFloatStateOf(1f) }
+    var boxSize by remember(file.uri) { mutableStateOf(IntSize.Zero) }
+    val statusTop = WindowInsets.statusBars.getTop(LocalDensity.current).toFloat()
     var shift by remember(file.uri) { mutableStateOf(Offset.Zero) }
     var durationMs by remember(file.uri) { mutableLongStateOf(file.durationSec?.let { it * 1000L } ?: 0L) }
     LaunchedEffect(player) {
@@ -581,6 +577,7 @@ private fun VideoPreview(
     var film by remember(file.uri) { mutableStateOf(false) }
     var editing by remember(file.uri) { mutableStateOf(false) }
     val colouring = colorPanel && !editing
+    val colouringNow by rememberUpdatedState(colouring) // for the gesture handler, set up once
     // No swiping to the next file while the timeline or the colour sliders own the gestures.
     LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
     LaunchedEffect(colouring) {
@@ -663,11 +660,15 @@ private fun VideoPreview(
         )
     }
     Column(Modifier.fillMaxSize()) {
-        // Setting the colour: the video keeps the upper part of the screen whatever the panel shows; the panel scrolls.
+        // Setting the colour: the panel lies over the lower part of the video's box and the picture moves up into the
+        // rest. The box itself keeps its size — the player's SurfaceView doesn't follow a resize while paused, a move
+        // and a scale it does.
         Box(
-            (if (colouring) Modifier.fillMaxHeight(0.45f).statusBarsPadding() else Modifier.weight(1f)).fillMaxWidth().pointerInput(file.uri) {
+            Modifier.weight(1f).fillMaxWidth().onSizeChanged { boxSize = it }.pointerInput(file.uri) {
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    // On the colour panel the touches are the sliders'.
+                    if (colouringNow && down.position.y > size.height * VIDEO_SHARE) return@awaitEachGesture
                     do {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val fingers = event.changes.count { it.pressed }
@@ -690,7 +691,7 @@ private fun VideoPreview(
             AndroidView(
                 // Controls only on a tap on the picture, not on their own when the video starts or a slider moves.
                 factory = { ctx ->
-                    (android.view.LayoutInflater.from(ctx).inflate(R.layout.player_texture, null) as PlayerView).apply {
+                    PlayerView(ctx).apply {
                         this.player = player
                         setShowNextButton(false)
                         setShowPreviousButton(false)
@@ -702,8 +703,14 @@ private fun VideoPreview(
                     // The player is made again when the colour effects start or stop: the view must follow it.
                     if (view.player !== player) view.player = player
                     view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size))
-                    // Only the picture zooms, not the player's controls.
-                    view.videoSurfaceView?.apply { scaleX = zoom; scaleY = zoom; translationX = shift.x; translationY = shift.y }
+                    // Only the picture zooms, not the player's controls; setting the colour, it sits above the panel.
+                    val (fit, up) = if (colouring) colouringFit(boxSize, player.videoSize, statusTop) else 1f to 0f
+                    view.videoSurfaceView?.apply {
+                        scaleX = zoom * fit
+                        scaleY = zoom * fit
+                        translationX = shift.x
+                        translationY = shift.y + up
+                    }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -720,7 +727,7 @@ private fun VideoPreview(
             }
             // Setting the colour: before / after (the processing off while lit) and «Готово», over the video's top.
             if (colouring) Row(
-                Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
+                Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -769,19 +776,20 @@ private fun VideoPreview(
                     )
                 }
             }
+            if (colouring) {
+                ColorPanel(
+                    Modifier.align(Alignment.BottomCenter).fillMaxHeight(1f - VIDEO_SHARE),
+                    ilog, look, saved != null, effectsFailed, vm.clipping,
+                    onLook = { saved = it; vm.saveLook(file, it) },
+                    onLive = { ev, sat -> matrix.set(ev, sat); redraw++ },
+                    onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius; redraw++ },
+                    onFilmLive = { filmLook.set(it); redraw++ },
+                    onClipping = vm::toggleClipping,
+                    onReset = { saved = null; vm.saveLook(file, null) },
+                )
+            }
         }
-        if (colouring) {
-            ColorPanel(
-                Modifier.weight(1f),
-                ilog, look, saved != null, effectsFailed, vm.clipping,
-                onLook = { saved = it; vm.saveLook(file, it) },
-                onLive = { ev, sat -> matrix.set(ev, sat); redraw++ },
-                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius; redraw++ },
-                onFilmLive = { filmLook.set(it); redraw++ },
-                onClipping = vm::toggleClipping,
-                onReset = { saved = null; vm.saveLook(file, null) },
-            )
-        } else if (film) {
+        if (film && !colouring) {
             if (pieces.isNotEmpty() && !editing) {
                 FilmStrip(pieces, frames, current) { i ->
                     current = i
@@ -854,6 +862,23 @@ private fun colorEffects(
     out += film
     if (clipping) out += ClippingStripes()
     return out
+}
+
+/** Setting the colour: the share of the video's box (from the top) the picture keeps above the panel. */
+private const val VIDEO_SHARE = 0.45f
+
+/**
+ * Setting the colour: the scale and the move down (px, negative = up) that put the picture, fitted into the [box] as the
+ * player shows it, whole into the box's top [VIDEO_SHARE] below [top] px (the status bar).
+ */
+private fun colouringFit(box: IntSize, video: androidx.media3.common.VideoSize, top: Float): Pair<Float, Float> {
+    val w = box.width.toFloat()
+    val h = box.height.toFloat()
+    if (w <= 0f || h <= 0f) return 1f to 0f
+    val aspect = if (video.width > 0 && video.height > 0) video.width * video.pixelWidthHeightRatio / video.height else w / h
+    val shownH = if (aspect > w / h) w / aspect else h
+    val bottom = h * VIDEO_SHARE
+    return minOf(1f, (bottom - top) / shownH) to (top + bottom) / 2 - h / 2
 }
 
 /** Preview sizes while playing (lines), from the first choice to the lightest. */
