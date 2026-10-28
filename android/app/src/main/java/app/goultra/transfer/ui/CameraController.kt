@@ -14,6 +14,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import app.goultra.transfer.CameraService
+import app.goultra.transfer.camera.ClipAudio
+import androidx.compose.ui.graphics.asAndroidBitmap
+import app.goultra.transfer.camera.Look
+import app.goultra.transfer.camera.FilmMath
+import app.goultra.transfer.camera.ColorMath
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CameraInfo
@@ -22,6 +27,7 @@ import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.ClipMaker
+import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.KeyFrames
 import app.goultra.transfer.camera.FrameReader
 import app.goultra.transfer.camera.Mp4Index
@@ -44,6 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.drop
 import androidx.compose.runtime.derivedStateOf
@@ -62,7 +69,59 @@ sealed interface ConnState {
     data class Failed(val message: String) : ConnState
 }
 
-enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
+/**
+ * The gallery's filter: by kind, favorites, files added from the phone, videos with a colour of their own, and what the
+ * app saved (clips …_HL, copies with colour …_COLOR, without sound …_MUTE).
+ */
+enum class Filter { ALL, PHOTO, VIDEO, FAVORITE, ADDED, COLOURED, SAVED }
+
+/**
+ * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
+ * stops (−2…+2), saturation as a factor (0 grey … 1 as shot … 2), sharpness (0…1) and its radius (px) for any video;
+ * the «Стиль» tab (FilmLook): how much of the film print (0…1), warmth (−1 cold … +1 warm), an even skin tone (0…1),
+ * grain and halation (0…1), a film look preset ([Look] ordinal) and its strength.
+ */
+data class ColorLook(
+    val lut: Boolean = true,
+    val strength: Float = 1f,
+    val exposure: Float = 0f,
+    val saturation: Float = 1f,
+    val sharpness: Float = 0f,
+    val sharpRadius: Float = 1f,
+    val film: Float = 0f,
+    val warmth: Float = 0f,
+    val skin: Float = 0f,
+    val grain: Float = 0f,
+    val halation: Float = 0f,
+    val preset: Int = 0,
+    val presetStrength: Float = 1f,
+) {
+    fun encode() = "$lut,$strength,$exposure,$saturation,$sharpness,$sharpRadius,$film,$warmth,$skin,$grain,$halation,$preset,$presetStrength"
+
+    /** Anything for the «Стиль» shader (FilmLook) to do. */
+    val hasStyle get() = film != 0f || warmth != 0f || skin != 0f || grain != 0f || halation != 0f || (preset != 0 && presetStrength > 0f)
+
+    /** Nothing to change for a file in [iLog] or not. */
+    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f && sharpness == 0f &&
+        film == 0f && warmth == 0f && skin == 0f && grain == 0f && halation == 0f && (preset == 0 || presetStrength == 0f)
+
+    companion object {
+        /**
+         * Also the shorter forms saved by earlier versions (4, 6 and 11 values; in the 11 the skin value was a
+         * protection strength — protection is always on now, so it is dropped).
+         */
+        fun decode(s: String): ColorLook? {
+            val p = s.split(',')
+            if (p.size != 4 && p.size != 6 && p.size != 11 && p.size != 13) return null
+            fun f(i: Int, default: Float) = p.getOrNull(i)?.toFloatOrNull() ?: default
+            return ColorLook(
+                p[0] == "true", f(1, 1f), f(2, 0f), f(3, 1f), f(4, 0f), f(5, 1f),
+                f(6, 0f), f(7, 0f), if (p.size == 13) f(8, 0f) else 0f, f(9, 0f), f(10, 0f),
+                p.getOrNull(11)?.toIntOrNull() ?: 0, f(12, 1f),
+            )
+        }
+    }
+}
 
 enum class Tab { FILES, CAMERA }
 
@@ -101,6 +160,94 @@ class CameraController(private val app: Application) {
     /** Files marked with the heart, by name (the camera's file and its phone copy share it); kept on the phone. */
     var favorites by mutableStateOf(prefs.getStringSet("favorites", emptySet())!!.toSet())
         private set
+
+    // ---------- colour: I-Log videos get Insta360's LUT (shown in the viewer; the file stays as shot) ----------
+
+    private var ilogLut: CubeLut? = null
+
+    /** Insta360's «GO Ultra I-Log to Rec.709» table (app assets), read once. */
+    private val lutLock = kotlinx.coroutines.sync.Mutex()
+
+    /** Parsed once: pages opening together wait for the same one (not a parse each). */
+    suspend fun lut(): CubeLut? = ilogLut ?: lutLock.withLock {
+        ilogLut ?: withContext(Dispatchers.IO) {
+            runCatching { app.assets.open("luts/GO_Ultra_I-Log_To_Rec.709_V1.0.cube").use { it.readBytes().decodeToString() } }
+                .mapCatching(CubeLut::parse)
+                .onFailure { log("LUT: ${it.message}") }
+                .getOrNull()
+        }?.also { ilogLut = it }
+    }
+
+    private val iLogCache = mutableMapOf<String, Boolean>()
+
+    /**
+     * Shot in I-Log? The camera's file list says so (metadata 212.8); a file listed from the phone has it in its own
+     * trailer. False when it can't be told.
+     */
+    suspend fun isILog(file: CameraFile): Boolean {
+        iLogCache[file.name]?.let { return it }
+        file.iLog?.let { return it.also { iLogCache[file.name] = it; log("цвет ${file.name}: режим ${file.colorMode} (список камеры)") } }
+        val local = file.localUri ?: return false.also {
+            iLogCache[file.name] = false
+            log("цвет ${file.name}: режима в списке камеры нет")
+        }
+        val mode = withContext(Dispatchers.IO) {
+            runCatching { LocalTrailer.read(app, android.net.Uri.parse(local))?.colorMode }.getOrNull()
+        }
+        log("цвет ${file.name}: режим ${mode ?: "не указан"}" + if (mode == CameraFile.COLOR_MODE_ILOG) " (I-Log)" else "")
+        return (mode == CameraFile.COLOR_MODE_ILOG).also { iLogCache[file.name] = it }
+    }
+
+    /** A video's colour settings: null = shown as shot. Kept on the phone per file name. */
+    fun look(file: CameraFile): ColorLook? = prefs.getString("look2_" + file.name, null)?.let(ColorLook::decode)
+
+    fun saveLook(file: CameraFile, look: ColorLook?) {
+        prefs.edit().apply { if (look == null) remove("look2_" + file.name) else putString("look2_" + file.name, look.encode()) }.apply()
+        lookKeys = if (look == null) lookKeys - file.name else lookKeys + (file.name to look.encode())
+    }
+
+    /**
+     * The videos with a colour of their own: name → the colour, encoded. In memory (read once), so the gallery asks it
+     * per tile for free, and a tile redraws only when its own video's colour changes.
+     */
+    var lookKeys by mutableStateOf(
+        prefs.all.mapNotNull { (k, v) -> if (k.startsWith("look2_") && v is String) k.removePrefix("look2_") to v else null }.toMap(),
+    )
+        private set
+
+    /** The video has a colour of its own set in the viewer. */
+    fun hasLook(file: CameraFile): Boolean = file.name in lookKeys
+
+    /** The copied colour onto every selected video (photos are left alone); how many got it. */
+    fun pasteLookToSelected(): Int {
+        val look = copiedLook ?: return 0
+        val videos = selectedFiles.filter { it.kind == MediaKind.VIDEO }
+        videos.forEach { saveLook(it, look) }
+        message = tr("Цвет вставлен в ${videos.size} видео", "Colour pasted into ${videos.size} videos")
+        return videos.size
+    }
+
+    /** A video's whole colour, copied to paste onto other videos (kept across restarts); null: nothing copied. */
+    var copiedLook by mutableStateOf(prefs.getString("look_copied", null)?.let(ColorLook::decode))
+        private set
+
+    fun copyLook(look: ColorLook) {
+        copiedLook = look
+        prefs.edit().putString("look_copied", look.encode()).apply()
+    }
+
+    /** Clipping stripes over the video in the viewer (blown whites red, crushed blacks blue), for every video. */
+    /** A check while setting the colour, not a setting: off at start, and off again when the colour panel closes. */
+    var clipping by mutableStateOf(false)
+        private set
+
+    fun toggleClipping() {
+        clipping = !clipping
+    }
+
+    fun clippingOff() {
+        clipping = false
+    }
 
     fun toggleFavorite(file: CameraFile) {
         favorites = if (file.name in favorites) favorites - file.name else favorites + file.name
@@ -266,6 +413,13 @@ class CameraController(private val app: Application) {
     private var afterRadios by mutableStateOf<(() -> Unit)?>(null)
 
     val isDownloading: Boolean get() = downloadJob?.isActive == true
+
+    init {
+        // A save with colour cut short by the process dying leaves its temp files (gigabytes for a long 4K video).
+        File(app.cacheDir, "export.mp4").delete()
+        File(app.cacheDir, "export.aac").delete()
+        loadAddedFiles()
+    }
 
     init {
         if (!prefs.getBoolean("migrated_to_dcim", false)) {
@@ -485,13 +639,13 @@ class CameraController(private val app: Application) {
 
     /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
     val listedFiles: List<CameraFile> by derivedStateOf {
-        if (showsPhone) return@derivedStateOf phoneFiles
+        if (showsPhone) return@derivedStateOf localFiles
         val paired = liveClips.values.map { it.name }.toSet()
         val onCard = files.filter { it.name !in paired }
         // With the camera there too: what is only on the phone — clips made here, files already deleted from the
         // card — so they don't vanish from the app while connected.
         val names = files.map { it.name }.toSet()
-        val phoneOnly = phoneFiles.filter { it.name !in names }
+        val phoneOnly = localFiles.filter { it.name !in names }
         if (phoneOnly.isEmpty()) onCard
         else (onCard + phoneOnly).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
     }
@@ -502,11 +656,197 @@ class CameraController(private val app: Application) {
             Filter.PHOTO -> listedFiles.filter { it.kind == MediaKind.PHOTO }
             Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
             Filter.FAVORITE -> listedFiles.filter { it.name in favorites }
+            Filter.ADDED -> listedFiles.filter { it.isAdded }
+            Filter.COLOURED -> listedFiles.filter { it.kind == MediaKind.VIDEO && hasLook(it) }
+            Filter.SAVED -> listedFiles.filter(::isSaved)
         }
     }
 
+    /** The filter chips' counts, worked out once per change of the list, favorites or colours (not per tap). */
+    data class FilterCounts(val all: Int, val photos: Int, val videos: Int, val favorites: Int, val added: Int, val coloured: Int, val saved: Int)
+
+    val filterCounts: FilterCounts by derivedStateOf {
+        val l = listedFiles
+        val photos = l.count { it.kind == MediaKind.PHOTO }
+        FilterCounts(
+            l.size, photos, l.size - photos,
+            l.count { it.name in favorites },
+            l.count { it.isAdded },
+            l.count { it.kind == MediaKind.VIDEO && hasLook(it) },
+            l.count(::isSaved),
+        )
+    }
+
+    /** A file the app saved: a clip of pieces, a copy with colour or without sound. */
+    fun isSaved(file: CameraFile): Boolean = file.stem.let { it.contains("_HL") || it.contains("_COLOR") || it.contains("_MUTE") }
+
+    /** The phone's side of the list: the app's own folder and the files added to it, newest first. */
+    private val localFiles: List<CameraFile> by derivedStateOf {
+        if (addedFiles.isEmpty()) phoneFiles
+        else (phoneFiles + addedFiles).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+    }
+
+    // ---------- files added from elsewhere on the phone ----------
+
+    /** Files added from the phone (the system's file picker): listed, viewed, coloured and saved like the app's own. */
+    var addedFiles by mutableStateOf<List<CameraFile>>(emptyList())
+        private set
+
+    /**
+     * Added files, one entry each: uri → «name, size, length, width, height, modified», all read once when added. The
+     * name is fixed then (kept apart from every name in the list: colours, pieces and favorites go by name), so the
+     * list comes up without reading the files again.
+     */
+    private val addedStore = app.getSharedPreferences("added", android.content.Context.MODE_PRIVATE)
+    private val addedLock = kotlinx.coroutines.sync.Mutex()
+
+    private fun storedAdded(): List<CameraFile> = addedStore.all.mapNotNull { (uri, v) ->
+        val f = (v as? String)?.split('\t') ?: return@mapNotNull null
+        if (f.size < 6) return@mapNotNull null
+        val name = f[0]
+        CameraFile(
+            uri = CameraFile.ADDED_PREFIX + name,
+            size = f[1].toLongOrNull(),
+            durationSec = f[2].toIntOrNull(),
+            width = f[3].toIntOrNull(),
+            height = f[4].toIntOrNull(),
+            fps = null,
+            created = CameraFile.createdFromName(name) ?: f[5].toLongOrNull()?.let {
+                java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
+            },
+            localUri = uri,
+        )
+    }
+
+    /**
+     * Adds [uris] to the list — not copied: the app keeps the link and a lasting permission to read it (so they stay
+     * after a restart; the files themselves aren't touched).
+     */
+    fun addFiles(uris: List<android.net.Uri>) {
+        if (uris.isEmpty()) return
+        scope.launch {
+            val added = addedLock.withLock {
+                withContext(Dispatchers.IO) {
+                    val taken = (phoneFiles.map { it.name } + files.map { it.name } + storedAdded().map { it.name }).toMutableSet()
+                    var count = 0
+                    for (u in uris) {
+                        if (addedStore.contains(u.toString())) continue
+                        runCatching { app.contentResolver.takePersistableUriPermission(u, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                            .onFailure { log("добавить ${u.lastPathSegment}: нет постоянного доступа (${it.message})") }
+                        val entry = runCatching { describeAdded(u, taken) }.onFailure { log("добавить ${u.lastPathSegment}: ${it.message}") }.getOrNull() ?: continue
+                        taken += entry.first
+                        addedStore.edit().putString(u.toString(), entry.second).apply()
+                        count++
+                    }
+                    count
+                }
+            }
+            addedFiles = storedAdded()
+            message = tr("Добавлено: $added", "Added: $added")
+        }
+    }
+
+    /** Takes [files] off the list (only the app forgets them: nothing is deleted from the phone). */
+    fun removeAdded(files: List<CameraFile>) {
+        val gone = files.filter { it.isAdded }.mapNotNull { it.localUri }.toSet()
+        if (gone.isEmpty()) return
+        files.forEach { selected.remove(it.name) }
+        scope.launch {
+            addedLock.withLock { forgetAdded(gone) }
+            addedFiles = storedAdded()
+            message = tr("Убрано из списка: ${gone.size} (на телефоне файлы остались)", "Taken off the list: ${gone.size} (the files stay on the phone)")
+        }
+    }
+
+    private fun forgetAdded(uris: Set<String>) {
+        for (u in uris) runCatching { app.contentResolver.releasePersistableUriPermission(android.net.Uri.parse(u), android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        addedStore.edit().apply { uris.forEach(::remove) }.apply()
+    }
+
+    /**
+     * The list from what was stored (no reading of the files); then each one checked quietly: one whose file is gone or
+     * whose permission was taken away drops off — a passing error (a card not mounted yet) leaves it be.
+     */
+    private fun loadAddedFiles() {
+        scope.launch {
+            addedLock.withLock {
+                // Files added by the first version of this (a plain set of links): described now, once.
+                val old = prefs.getStringSet("added_files", null)
+                if (old != null) {
+                    withContext(Dispatchers.IO) {
+                        val taken = storedAdded().map { it.name }.toMutableSet()
+                        for (u in old) {
+                            if (addedStore.contains(u)) continue
+                            runCatching { describeAdded(android.net.Uri.parse(u), taken) }.getOrNull()?.let { (name, line) ->
+                                taken += name
+                                addedStore.edit().putString(u, line).apply()
+                            }
+                        }
+                    }
+                    prefs.edit().remove("added_files").apply()
+                }
+                addedFiles = storedAdded()
+                val lost = withContext(Dispatchers.IO) {
+                    addedStore.all.keys.filter { u ->
+                        try {
+                            app.contentResolver.openFileDescriptor(android.net.Uri.parse(u), "r")?.close()
+                            false
+                        } catch (e: SecurityException) {
+                            true
+                        } catch (e: java.io.FileNotFoundException) {
+                            true
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }.toSet()
+                }
+                if (lost.isNotEmpty()) {
+                    log("добавленные файлы: недоступно ${lost.size} — убраны из списка")
+                    forgetAdded(lost)
+                    addedFiles = storedAdded()
+                }
+            }
+        }
+    }
+
+    /** An added file's name (kept apart from [taken]) and its stored line: name, size, length, width, height, modified. */
+    private fun describeAdded(uri: android.net.Uri, taken: Set<String>): Pair<String, String> {
+        var name: String? = null
+        var size: Long? = null
+        var modified: Long? = null
+        app.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            require(c.moveToFirst()) { "пустой ответ" }
+            fun col(n: String) = c.getColumnIndex(n).takeIf { it >= 0 && !c.isNull(it) }
+            name = col(android.provider.OpenableColumns.DISPLAY_NAME)?.let(c::getString)
+            size = col(android.provider.OpenableColumns.SIZE)?.let(c::getLong)
+            modified = col(android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)?.let(c::getLong)
+        } ?: error("нет ответа")
+        val base = (name ?: uri.lastPathSegment ?: "file").replace('/', '_').replace('\t', ' ')
+        var shown = base
+        var n = 2
+        while (shown in taken) shown = base.substringBeforeLast('.') + " (${n++})." + base.substringAfterLast('.')
+        var duration: Int? = null
+        var w: Int? = null
+        var h: Int? = null
+        if (shown.substringAfterLast('.').lowercase() in CameraFile.VIDEO_EXTENSIONS) {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(app, uri)
+                fun meta(k: Int) = r.extractMetadata(k)
+                duration = meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { ((it + 500) / 1000).toInt() }
+                w = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                h = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+            } catch (e: RuntimeException) {
+                log("добавленное видео $shown: ${e.message}")
+            } finally {
+                r.release()
+            }
+        }
+        return shown to listOf(shown, size ?: "", duration ?: "", w ?: "", h ?: "", modified ?: "").joinToString("\t")
+    }
+
     /** Selected files of the list on screen: the camera's card, or the phone's copies (for sharing). */
-    val selectedFiles: List<CameraFile> get() = listedFiles.filter { it.name in selected }
+    val selectedFiles: List<CameraFile> by derivedStateOf { listedFiles.filter { it.name in selected } }
 
     // ---------- camera info (menu ⋮ → «Камера») ----------
 
@@ -1720,7 +2060,7 @@ class CameraController(private val app: Application) {
     /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
     suspend fun highlights(file: CameraFile): List<Highlight> {
         // A camera file with a phone copy: the camera's record first (marks edited there after the download).
-        val onCard = !file.uri.startsWith(Downloader.PHONE_PREFIX) && conn == ConnState.Connected
+        val onCard = !file.uri.startsWith(Downloader.PHONE_PREFIX) && !file.isAdded && conn == ConnState.Connected
         val fromCamera = if (onCard) runCatching { session.highlights(file) }.getOrNull() else null
         // Otherwise a downloaded copy keeps the camera's trailer: the same record, read from the end of the file.
         val marks = fromCamera ?: file.localUri?.let { local ->
@@ -1776,12 +2116,25 @@ class CameraController(private val app: Application) {
             value?.toString()?.takeIf { it.isNotBlank() }?.let { out += tr(ru, en) to it }
         }
         add("Файл", "File", file.name)
-        add("Где", "Where", if (file.isOnPhone) tr("на телефоне (DCIM/Camera)", "on the phone (DCIM/Camera)") else tr("на камере", "on the camera"))
+        add("Где", "Where", when {
+            file.isAdded -> tr("на телефоне, добавлен в список", "on the phone, added to the list")
+            file.isOnPhone -> tr("на телефоне (DCIM/Camera)", "on the phone (DCIM/Camera)")
+            else -> tr("на камере", "on the camera")
+        })
         add("Дата", "Date", file.created?.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")))
         add("Размер", "Size", file.size?.let(::formatSize))
         add("Избранное", "Favorite", if (file.name in favorites) "♥" else null)
         val local = file.localUri?.let(android.net.Uri::parse)
         if (file.kind == MediaKind.VIDEO) {
+            // The streams as the file has them (codecs, frame rate, sound): the phone's copy, or the camera's file over
+            // Wi-Fi (its index only).
+            val streams = runCatching {
+                when {
+                    local != null -> streamInfo(countFrames = true) { it.setDataSource(app, local, null) }
+                    conn == ConnState.Connected -> session.indexSource(file).let { src -> streamInfo(countFrames = false) { it.setDataSource(src) } }
+                    else -> null
+                }
+            }.onFailure { log("сведения ${file.name}: ${it.message}") }.getOrNull()
             if (local != null) {
                 val r = android.media.MediaMetadataRetriever()
                 try {
@@ -1790,9 +2143,11 @@ class CameraController(private val app: Application) {
                     val w = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
                     val h = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
                     if (w != null && h != null) add("Разрешение", "Resolution", "$w × $h")
-                    add("Кадров/с", "Frame rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()?.let { "%.2f".format(it) } ?: file.fps)
+                    add("Кадров/с", "Frame rate", streams?.fps ?: meta(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()?.let { "%.2f".format(it) } ?: file.fps)
+                    add("Видео", "Video", streams?.video)
+                    add("Звук", "Sound", streams?.audio ?: streams?.let { tr("нет", "none") })
                     add("Длительность", "Length", meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { formatDuration((it / 1000).toInt()) })
-                    add("Битрейт", "Bit rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") })
+                    add("Битрейт", "Bit rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()?.let { "${it / 1_000_000} " + tr("Мбит/с (весь файл)", "Mbit/s (whole file)") })
                     add("Поворот", "Rotation", meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.takeIf { it != "0" }?.let { "$it°" })
                     add("Место", "Location", meta(android.media.MediaMetadataRetriever.METADATA_KEY_LOCATION))
                 } catch (e: RuntimeException) {
@@ -1802,7 +2157,9 @@ class CameraController(private val app: Application) {
                 }
             } else {
                 if (file.width != null && file.height != null) add("Разрешение", "Resolution", "${file.width} × ${file.height}")
-                add("Кадров/с", "Frame rate", file.fps)
+                add("Кадров/с", "Frame rate", streams?.fps ?: file.fps)
+                add("Видео", "Video", streams?.video)
+                add("Звук", "Sound", streams?.audio ?: streams?.let { tr("нет", "none") })
                 add("Длительность", "Length", file.durationSec?.let(::formatDuration))
             }
             add("Отметок", "Highlights", highlights(file).size.takeIf { it > 0 })
@@ -1838,6 +2195,91 @@ class CameraController(private val app: Application) {
             add("Живое фото", "Live photo", if (file.isLive) tr("да", "yes") else null)
         }
         out
+    }
+
+    /** A video's streams as text: the video codec and bit depth and rate, the frame rate, the sound (null: none). */
+    private class Streams(val video: String?, val fps: String?, val audio: String?)
+
+    /**
+     * The tracks of a video ([open] sets the extractor's source). With [countFrames] (a local file) the frame rate is
+     * counted from the frames' times over the first second (the container's own figure is often missing); bit depth
+     * from the codec profile.
+     */
+    private fun streamInfo(countFrames: Boolean, open: (android.media.MediaExtractor) -> Unit): Streams {
+        val ex = android.media.MediaExtractor()
+        try {
+            open(ex)
+            var video: String? = null
+            var fps: String? = null
+            var audio: String? = null
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val mime = f.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                fun int(key: String) = if (f.containsKey(key)) runCatching { f.getInteger(key) }.getOrNull() else null
+                val kbps = int(android.media.MediaFormat.KEY_BIT_RATE)?.takeIf { it > 0 }
+                if (mime.startsWith("video/") && video == null) {
+                    val tenBit = when (mime) {
+                        android.media.MediaFormat.MIMETYPE_VIDEO_HEVC -> int(android.media.MediaFormat.KEY_PROFILE) in setOf(
+                            android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
+                            android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
+                        )
+                        android.media.MediaFormat.MIMETYPE_VIDEO_AVC -> int(android.media.MediaFormat.KEY_PROFILE) == android.media.MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10
+                        else -> false
+                    }
+                    video = listOfNotNull(
+                        codecName(mime),
+                        if (tenBit) tr("10 бит", "10-bit") else tr("8 бит", "8-bit"),
+                        kbps?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") },
+                    ).joinToString(" · ")
+                    // Frames over the first second, by their times — the extractor reads each frame's data on the way, so
+                    // only from a file on the phone (from the camera that would be megabytes over Wi-Fi).
+                    if (!countFrames) {
+                        fps = int(android.media.MediaFormat.KEY_FRAME_RATE)?.let { "%.2f".format(it.toDouble()) }
+                        continue
+                    }
+                    ex.selectTrack(i)
+                    ex.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                    val first = ex.sampleTime
+                    var count = 0
+                    var last = first
+                    while (ex.sampleTime >= 0 && ex.sampleTime - first < 1_000_000) {
+                        last = ex.sampleTime
+                        count++
+                        if (!ex.advance()) break
+                    }
+                    ex.unselectTrack(i)
+                    val counted = if (count > 1 && last > first) (count - 1) * 1_000_000.0 / (last - first) else null
+                    fps = (counted ?: int(android.media.MediaFormat.KEY_FRAME_RATE)?.toDouble())?.let { "%.2f".format(it) }
+                } else if (mime.startsWith("audio/") && audio == null) {
+                    val channels = int(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+                    audio = listOfNotNull(
+                        codecName(mime),
+                        int(android.media.MediaFormat.KEY_SAMPLE_RATE)?.let { "%.1f ".format(it / 1000.0) + tr("кГц", "kHz") },
+                        when (channels) {
+                            null -> null
+                            1 -> tr("моно", "mono")
+                            2 -> tr("стерео", "stereo")
+                            else -> "$channels " + tr("кан.", "ch")
+                        },
+                        kbps?.let { "${it / 1000} " + tr("кбит/с", "kbit/s") },
+                    ).joinToString(" · ")
+                }
+            }
+            return Streams(video, fps, audio)
+        } finally {
+            ex.release()
+        }
+    }
+
+    private fun codecName(mime: String) = when (mime) {
+        android.media.MediaFormat.MIMETYPE_VIDEO_HEVC -> "H.265 (HEVC)"
+        android.media.MediaFormat.MIMETYPE_VIDEO_AVC -> "H.264 (AVC)"
+        "video/av01" -> "AV1"
+        "video/x-vnd.on2.vp9" -> "VP9"
+        android.media.MediaFormat.MIMETYPE_AUDIO_AAC -> "AAC"
+        "audio/opus" -> "Opus"
+        "audio/raw" -> "PCM"
+        else -> mime.substringAfter('/')
     }
 
     /** «Скачать» from the viewer: just this file. */
@@ -1890,6 +2332,7 @@ class CameraController(private val app: Application) {
             } ?: if (file.localUri != null) {
                 // A phone copy whose camera thumbnail was never cached: the gallery's own (cached by MediaStore).
                 runCatching { app.contentResolver.loadThumbnail(android.net.Uri.parse(file.localUri), android.util.Size(320, 320), null) }
+                    .recoverCatching { localThumbnail(file) ?: throw it } // a picked file's provider may have none
                     .onFailure { log("миниатюра ${file.name} с телефона: ${it.message}") }
                     .getOrNull()
             } else if (conn == ConnState.Connected) {
@@ -1904,6 +2347,124 @@ class CameraController(private val app: Application) {
             }
         } ?: return null
         return bitmap.asImageBitmap().also { memCache.put(file.name, it) }
+    }
+
+    /** Coloured tiles: per file its colour and picture, kept within 24 MB (one version per file). */
+    private val colouredThumbs = object : LruCache<String, Pair<String, ImageBitmap>>(24 shl 20) {
+        override fun sizeOf(key: String, value: Pair<String, ImageBitmap>) = value.second.width * value.second.height * 4
+    }
+
+    /** A colour baked into a small 3D table (see [bake]), per colour and LUT. */
+    private val bakedColours = LruCache<String, IntArray>(32)
+
+    /** Colouring tiles takes at most two cores: the gallery stays smooth while they come. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val tileWork = Dispatchers.Default.limitedParallelism(2)
+
+    /**
+     * A tile's picture: the thumbnail, and for a video with a colour of its own that colour on it — the LUT (I-Log),
+     * exposure / saturation and the «Стиль» grade, the same math as the shaders (sharpening, halation and grain don't
+     * show at this size). The colour is baked once into a 17³ table and the thumbnail looked up in it.
+     */
+    suspend fun tileImage(file: CameraFile): ImageBitmap? {
+        val base = thumbnail(file) ?: return null
+        if (file.kind != MediaKind.VIDEO) return base
+        val key = lookKeys[file.name] ?: return base
+        colouredThumbs.get(file.name)?.takeIf { it.first == key }?.let { return it.second }
+        val look = ColorLook.decode(key) ?: return base
+        val iLog = look.lut && look.strength > 0f && isILog(file)
+        val table = if (iLog) lut() else null
+        val coloured = withContext(tileWork) {
+            val bakeKey = key + "|" + (table != null)
+            val baked = bakedColours.get(bakeKey) ?: bake(look, table).also { bakedColours.put(bakeKey, it) }
+            colourBitmap(base.asAndroidBitmap(), baked)
+        }.asImageBitmap()
+        colouredThumbs.put(file.name, key to coloured)
+        return coloured
+    }
+
+    private val bakeSize = 17
+
+    /** [look] (with Insta360's [lut] for I-Log) for every colour of a 17³ grid, as 0xRRGGBB. */
+    private fun bake(look: ColorLook, lut: CubeLut?): IntArray {
+        val n = bakeSize
+        val matrix = if (look.exposure != 0f || look.saturation != 1f) ColorMath.matrix(look.exposure, look.saturation) else null
+        val grade = if (look.hasStyle) Look.grade(Look.of(look.preset), look.presetStrength, look.film, look.warmth, look.skin) else null
+        val out = IntArray(n * n * n)
+        for (b in 0 until n) for (g in 0 until n) for (r in 0 until n) {
+            var c = floatArrayOf(r / (n - 1f), g / (n - 1f), b / (n - 1f))
+            if (lut != null) c = lut.apply(c, look.strength)
+            if (matrix != null) c = ColorMath.apply(matrix, c).let { v -> FloatArray(3) { v[it].coerceIn(0f, 1f) } }
+            if (grade != null) c = FilmMath.apply(c, grade)
+            fun q(v: Float) = Math.round(v.coerceIn(0f, 1f) * 255f)
+            out[r + n * (g + n * b)] = (q(c[0]) shl 16) or (q(c[1]) shl 8) or q(c[2])
+        }
+        return out
+    }
+
+    /** [src] through the [baked] table (trilinear), no allocation per pixel; stops when the tile's work is cancelled. */
+    private suspend fun colourBitmap(src: Bitmap, baked: IntArray): Bitmap {
+        val bmp = src.copy(Bitmap.Config.ARGB_8888, true)
+        val w = bmp.width
+        val px = IntArray(w * bmp.height)
+        bmp.getPixels(px, 0, w, 0, 0, w, bmp.height)
+        val n = bakeSize
+        val k = (n - 1) / 255f
+        for (i in px.indices) {
+            if (i % (w * 16) == 0) kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val p = px[i]
+            val fr = ((p shr 16) and 0xFF) * k
+            val fg = ((p shr 8) and 0xFF) * k
+            val fb = (p and 0xFF) * k
+            val r0 = minOf(fr.toInt(), n - 2)
+            val g0 = minOf(fg.toInt(), n - 2)
+            val b0 = minOf(fb.toInt(), n - 2)
+            val tr = fr - r0
+            val tg = fg - g0
+            val tb = fb - b0
+            var or = 0f
+            var og = 0f
+            var ob = 0f
+            for (corner in 0..7) {
+                val dr = corner and 1
+                val dg = (corner shr 1) and 1
+                val db = corner shr 2
+                val wgt = (if (dr == 1) tr else 1 - tr) * (if (dg == 1) tg else 1 - tg) * (if (db == 1) tb else 1 - tb)
+                val v = baked[(r0 + dr) + n * ((g0 + dg) + n * (b0 + db))]
+                or += wgt * ((v shr 16) and 0xFF)
+                og += wgt * ((v shr 8) and 0xFF)
+                ob += wgt * (v and 0xFF)
+            }
+            px[i] = (p and -0x1000000) or (Math.round(or).coerceIn(0, 255) shl 16) or (Math.round(og).coerceIn(0, 255) shl 8) or Math.round(ob).coerceIn(0, 255)
+        }
+        bmp.setPixels(px, 0, w, 0, 0, w, bmp.height)
+        return bmp
+    }
+
+    /** A thumbnail made here: a video's frame at 1 s, or the photo decoded small. */
+    private fun localThumbnail(file: CameraFile): Bitmap? {
+        val uri = android.net.Uri.parse(file.localUri ?: return null)
+        return if (file.kind == MediaKind.VIDEO) {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(app, uri)
+                r.getScaledFrameAtTime(1_000_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 320, 320)
+            } finally {
+                r.release()
+            }
+        } else {
+            android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(app.contentResolver, uri)) { d, info, _ ->
+                val k = maxOf(1, maxOf(info.size.width, info.size.height) / 320)
+                d.setTargetSize(info.size.width / k, info.size.height / k)
+                d.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        }
+    }
+
+    /** A gallery file was written again under [name]: its old thumbnail must not be shown. */
+    private fun forgetThumbnail(name: String) {
+        memCache.remove(name)
+        File(thumbDir, "$name.jpg").delete()
     }
 
     /** Temp file + rename: a killed process never leaves a truncated thumbnail behind. */
@@ -1923,7 +2484,8 @@ class CameraController(private val app: Application) {
     fun downloadSelected(overwrite: Boolean) {
         if (isDownloading) return
         // A live photo goes with its clip as one gallery file.
-        val queue = selectedFiles.filter { overwrite || it.name !in downloaded }.sortedBy { it.created }
+        // Only the card's files (a selection of phone files has nothing to download).
+        val queue = selectedFiles.filter { !it.isOnPhone && (overwrite || it.name !in downloaded) }.sortedBy { it.created }
         if (queue.isEmpty()) {
             selected.clear()
             message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")
@@ -1974,8 +2536,12 @@ class CameraController(private val app: Application) {
         CameraService.start(app)
     }
 
+    /** «Стоп» on the notification or the bar: a download, a clip or a save with colour — and a batch of them. */
     fun cancelDownload() {
+        batchJob?.cancel()
         downloadJob?.cancel()
+        exporter?.cancel()
+        exportJob?.cancel()
     }
 
     // ---------- pieces: edits and clips ----------
@@ -1992,16 +2558,6 @@ class CameraController(private val app: Application) {
     }
 
     fun clipName(file: CameraFile, n: Int = 1): String = file.stem + "_HL" + (if (n > 1) "$n" else "") + ".mp4"
-
-    /** A clip of [file] is already in the gallery (saving would replace it). */
-    suspend fun clipExists(file: CameraFile): Boolean = withContext(Dispatchers.IO) { Downloader.galleryUri(app, clipName(file)) != null }
-
-    /** The first clip name of [file] not taken yet: …_HL2.mp4, …_HL3.mp4 … */
-    suspend fun freeClipName(file: CameraFile): String = withContext(Dispatchers.IO) {
-        var n = 2
-        while (Downloader.galleryUri(app, clipName(file, n)) != null) n++
-        clipName(file, n)
-    }
 
     // ---------- the editor's timeline: frames along the whole video ----------
 
@@ -2025,6 +2581,24 @@ class CameraController(private val app: Application) {
             }
         }
     }
+
+    /**
+     * The frame of [file] at exactly [ms], upright, about 1920 px wide — the still the colour is shown on while paused
+     * (the phone's copy, or the camera's light copy the viewer plays). Null when it can't be read.
+     */
+    suspend fun stillFrame(file: CameraFile, ms: Long): android.graphics.Bitmap? = stillLock.withLock {
+        // One decode at a time: a native decode can't be stopped half-way, so they mustn't pile up.
+        withContext(Dispatchers.IO) {
+            val reader = openFrameReader(file) ?: return@withContext null
+            try {
+                reader.exact(ms, 1920)
+            } finally {
+                reader.close()
+            }
+        }
+    }
+
+    private val stillLock = kotlinx.coroutines.sync.Mutex()
 
     private suspend fun openFrameReader(file: CameraFile): FrameReader? = runCatching {
         file.localUri?.let { RemoteFrames.localReader(app, android.net.Uri.parse(it)) }
@@ -2078,7 +2652,7 @@ class CameraController(private val app: Application) {
      * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
      * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
      */
-    fun saveClip(file: CameraFile, marked: List<Highlight>, name: String = clipName(file)) {
+    fun saveClip(file: CameraFile, marked: List<Highlight>, name: String = clipName(file), withSound: Boolean = true) {
         if (isDownloading || marked.isEmpty()) return
         val local = file.localUri
         if (local == null && conn != ConnState.Connected) {
@@ -2113,7 +2687,7 @@ class CameraController(private val app: Application) {
                         ({ ex -> ex.setDataSource(app, uri, null) })
                     }
                     Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
-                        cut = ClipMaker.join(open, pieces, fd) { us ->
+                        cut = ClipMaker.join(open, pieces, fd, withSound) { us ->
                             if (job?.isActive == false) throw CancellationException("остановлено")
                             val now = System.currentTimeMillis()
                             if (now - reportedAt >= 250) {
@@ -2136,6 +2710,8 @@ class CameraController(private val app: Application) {
                         "; ключевые кадры " + keyFrames(file)?.ms.orEmpty()
                             .filter { k -> pieces.any { k >= it.startMs - 5_000 && k <= it.endMs!! } }.joinToString(),
                 )
+                forgetThumbnail(name)
+                lastSaveOk = true
                 loadPhoneFiles()
             } catch (e: CancellationException) {
                 lastResult = tr("Клип не сохранён: остановлено", "Clip not saved: stopped")
@@ -2152,4 +2728,347 @@ class CameraController(private val app: Application) {
         if (local == null) CameraService.start(app)
     }
 
+
+    // ---------- saving: the whole video or the marked pieces, as shot or with the colour ----------
+
+    /** Saving with colour: the file being written and how far (0…100). */
+    data class ExportProgress(val name: String, val percent: Int)
+
+    var export by mutableStateOf<ExportProgress?>(null)
+        private set
+    private var exportJob: Job? = null
+    private var exporter: androidx.media3.transformer.Transformer? = null
+
+    /**
+     * The gallery name of a save: …_HL (marked pieces), …_COLOR (with colour), …_MUTE (no sound), e.g. …_HL_COLOR_MUTE;
+     * [n] > 1 adds a number.
+     */
+    fun saveName(file: CameraFile, pieces: Boolean, color: Boolean, mute: Boolean = false, n: Int = 1): String =
+        file.stem + (if (pieces) "_HL" else "") + (if (color) "_COLOR" else "") + (if (mute) "_MUTE" else "") +
+            (if (n > 1) "$n" else "") + ".mp4"
+
+    suspend fun nameTaken(name: String): Boolean = withContext(Dispatchers.IO) { Downloader.galleryUri(app, name) != null }
+
+    /** The first free name for this kind of save: …2, …3 … */
+    suspend fun freeSaveName(file: CameraFile, pieces: Boolean, color: Boolean, mute: Boolean): String {
+        var n = 2
+        while (nameTaken(saveName(file, pieces, color, mute, n))) n++
+        return saveName(file, pieces, color, mute, n)
+    }
+
+    /**
+     * One way to save a video, whatever is asked: [pieces] null = the whole video, else these pieces as one clip;
+     * [look] null = as shot, else with this colour ([iLog] for the LUT). As shot: the whole is a download, pieces a
+     * clip cut without re-encoding ([saveClip]). With colour it is re-encoded ([exportWithColor]); a file still on the
+     * camera is downloaded first, or with [direct] read straight from the camera (only what is needed — no room on the
+     * phone for the original). Without [sound] the sound is left out — less work: no sound to cut, join or encode; the
+     * whole video as shot then becomes a copy without it (no re-encoding either).
+     */
+    fun save(file: CameraFile, pieces: List<Highlight>?, look: ColorLook?, iLog: Boolean, name: String, direct: Boolean, sound: Boolean) {
+        // The whole video as one piece, to its end (a little past the listed seconds: the copy stops at the end).
+        val whole = listOf(Highlight(0, ((file.durationSec ?: 86_400) + 1) * 1000L))
+        when {
+            look == null && pieces == null && sound -> downloadOne(file)
+            look == null -> saveClip(file, pieces ?: whole, name, sound)
+            else -> exportWithColor(file, look, iLog, pieces, name, direct, sound)
+        }
+    }
+
+    /**
+     * [file] re-encoded with [look] (the viewer's effects in full, see [exportEffects]) into the gallery as [name]: the
+     * original's size and frame rate, its codec (H.265 / H.264, another if the phone has no encoder for it) at its
+     * bitrate. The whole video keeps its sound as is; [pieces] are cut exactly where they are marked (re-encoding
+     * anyway, no key frames needed) and joined, their sound crossfaded at each join as a video editor does — 0.1 s each
+     * side of the cut, overlapping ([AudioJoin]) — and re-encoded (AAC 256 kbit/s). From the phone's copy; a file on the camera is downloaded first, or with [direct]
+     * read from the camera over Wi-Fi. Written to the app's cache first (the transformer takes a file path), then into
+     * the gallery. The Insta360 data at the file's end (marks) isn't carried over. One at a time; «Стоп» cancels.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    fun exportWithColor(file: CameraFile, look: ColorLook, iLog: Boolean, pieces: List<Highlight>?, name: String, direct: Boolean, sound: Boolean = true) {
+        if (exportJob?.isActive == true || isDownloading) return
+        if (file.localUri == null && conn != ConnState.Connected) {
+            message = tr("Чтобы сохранить файл с камеры, подключитесь", "Connect to save a file from the camera")
+            return
+        }
+        exportJob = scope.launch {
+            val tmp = java.io.File(app.cacheDir, "export.mp4")
+            val soundTmp = java.io.File(app.cacheDir, "export.aac")
+            val startedAt = System.currentTimeMillis()
+            try {
+                // The original: the phone's copy; downloaded first when asked so; or the camera's file.
+                var local = file.localUri
+                if (local == null && !direct) {
+                    downloadOne(file)
+                    downloadJob?.join()
+                    local = withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }?.toString()
+                        ?: error(tr("оригинал не скачался", "the original didn't download"))
+                }
+                export = ExportProgress(name, 0)
+                val camera = if (local == null) session.indexSource(file) else null
+                val source = withContext(Dispatchers.IO) {
+                    exportSource(file.size) { ex -> if (camera != null) ex.setDataSource(camera) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) }
+                }
+                if (camera != null) CameraService.start(app)
+                val uri = local ?: previewUrlOf(file)
+                val table = if (iLog && look.lut && look.strength > 0f) lut() else null
+                val effects = exportEffects(table, look, source.lines)
+                // Pieces end where the video does (a piece past it would get sound without picture).
+                val parts = pieces?.let { Highlights.joinTouching(it) }?.let { ps ->
+                    if (source.durationMs <= 0) ps
+                    else ps.mapNotNull { p -> if (p.startMs >= source.durationMs) null else p.copy(endMs = minOf(p.endMs ?: p.startMs, source.durationMs)) }
+                }
+                tmp.delete()
+                // Pieces with sound: the picture first (90 %), then the sound with crossfades and the two together.
+                transform(uri, camera != null, parts, tmp, effects, source, sound) { export = ExportProgress(name, if (parts != null && sound) it * 9 / 10 else it) }
+                val takenAt = file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()
+                withContext(Dispatchers.IO) {
+                    if (parts == null || !sound) {
+                        Downloader.saveClip(app, name, takenAt) { fd ->
+                            java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
+                        }
+                    } else {
+                        val job = coroutineContext[Job]
+                        val audioSource = if (local == null) session.clipSource(file) else null
+                        val audio = ClipAudio.encode(
+                            { ex -> if (audioSource != null) ex.setDataSource(audioSource) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) },
+                            parts,
+                            soundTmp,
+                        ) { job?.isActive == false }
+                        withContext(Dispatchers.Main) { export = ExportProgress(name, 97) }
+                        Downloader.saveClip(app, name, takenAt) { fd -> ClipAudio.mux(tmp, audio, fd) }
+                    }
+                }
+                val sec = (System.currentTimeMillis() - startedAt) / 1000
+                // The picture's length against what was asked: shows at once if the pieces weren't cut.
+                val gotMs = runCatching {
+                    android.media.MediaMetadataRetriever().run {
+                        try {
+                            setDataSource(tmp.absolutePath)
+                            extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                        } finally {
+                            release()
+                        }
+                    }
+                }.getOrNull()
+                val wantedMs = parts?.sumOf { (it.endMs ?: it.startMs) - it.startMs }
+                log("с цветом $name: картинка ${gotMs ?: "?"} мс" + (wantedMs?.let { ", куски $it мс" } ?: ""))
+                log(
+                    "с цветом $name: ${source.mime}, ${source.bitrate / 1_000_000} Мбит/с, ${source.lines} строк, " +
+                        "${effects.size} эффектов, " + (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
+                        (if (camera != null) "с камеры, " else "") + "$sec с",
+                )
+                lastResult = tr("Сохранено: $name", "Saved: $name")
+                forgetThumbnail(name)
+                lastSaveOk = true
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Не сохранено: остановлено", "Not saved: stopped")
+                throw e
+            } catch (e: Exception) {
+                log("с цветом $name: ${e.javaClass.simpleName}: ${e.message} ${e.cause?.message ?: ""}")
+                lastResult = tr("Не удалось сохранить", "Couldn't save") + (e.message?.let { ": $it" } ?: "")
+            } finally {
+                tmp.delete()
+                soundTmp.delete()
+                export = null
+                message = lastResult
+            }
+        }
+    }
+
+    /** A batch save: which video of how many. */
+    data class BatchProgress(val index: Int, val count: Int)
+
+    var batch by mutableStateOf<BatchProgress?>(null)
+        private set
+    private var batchJob: Job? = null
+
+    /** Set by a clip or a save with colour that got into the gallery (a batch counts by it). */
+    private var lastSaveOk = false
+
+    /**
+     * The same save for every video of [files], one after another: [marked] = each one's own pieces (edited, or the
+     * camera's marks; a video without any is skipped), [colour] = each one's own colour (one without stays as shot),
+     * [sound], [direct] as in [save]. A name already taken gets the next free one (nothing is overwritten); the whole
+     * video as shot that is already on the phone is skipped.
+     */
+    fun saveBatch(files: List<CameraFile>, marked: Boolean, colour: Boolean, sound: Boolean, direct: Boolean) {
+        if (batchJob?.isActive == true || isDownloading || exportJob?.isActive == true) return
+        val videos = files.filter { it.kind == MediaKind.VIDEO }
+        if (videos.isEmpty()) return
+        selected.clear()
+        batchJob = scope.launch {
+            var started = 0
+            var failed = 0
+            var skipped = 0
+            try {
+                for ((i, listed) in videos.withIndex()) {
+                    batch = BatchProgress(i + 1, videos.size)
+                    val file = withPhoneCopy(listed)
+                    val limitMs = file.durationSec?.let { (it + 1) * 1000L }
+                    val pieces = if (marked) Highlights.clip(editedPieces(file) ?: Highlights.pieces(highlights(file), limitMs), limitMs) else null
+                    if (marked && pieces.isNullOrEmpty()) { skipped++; continue }
+                    val iLog = isILog(file)
+                    val look = if (colour) look(file)?.takeIf { !it.isPlain(iLog) } else null
+                    val download = pieces == null && look == null && sound
+                    if (download && file.isOnPhone) { skipped++; continue }
+                    val name = if (download) {
+                        file.name
+                    } else {
+                        var n = 1
+                        while (nameTaken(saveName(file, pieces != null, look != null, !sound, n))) n++
+                        saveName(file, pieces != null, look != null, !sound, n)
+                    }
+                    lastSaveOk = false
+                    val before = downloadJob to exportJob
+                    save(file, pieces, look, iLog, name, direct, sound)
+                    // Nothing started (no camera, something else running): a failure, not a success.
+                    if (downloadJob === before.first && exportJob === before.second) { failed++; continue }
+                    downloadJob?.join()
+                    exportJob?.join()
+                    val ok = if (download) withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) != null } else lastSaveOk
+                    if (ok) started++ else failed++
+                }
+                lastResult = tr("Пачка готова: сохранено $started из ${videos.size}", "Batch done: $started of ${videos.size} saved") +
+                    (if (failed > 0) tr(", не удалось $failed (см. журнал)", ", $failed failed (see the log)") else "") +
+                    (if (skipped > 0) tr(", пропущено $skipped (нечего сохранять)", ", $skipped skipped (nothing to save)") else "")
+            } catch (e: CancellationException) {
+                lastResult = tr("Пачка остановлена: сделано $started из ${videos.size}", "Batch stopped: $started of ${videos.size} done")
+                throw e
+            } finally {
+                batch = null
+                message = lastResult
+            }
+        }
+    }
+
+    /** The camera's full file (not its light copy) over Wi-Fi. */
+    private fun previewUrlOf(file: CameraFile) = "http://${CameraTcp.HOST}${file.uri}"
+
+    fun cancelExport() {
+        batchJob?.cancel()
+        exporter?.cancel()
+        exportJob?.cancel()
+        downloadJob?.cancel()
+    }
+
+    /** What the copy keeps from the original: the video codec, its bitrate, the short side (px). */
+    private class ExportSource(val mime: String, val bitrate: Int, val lines: Int, val durationMs: Long)
+
+    private fun exportSource(fileBytes: Long?, open: (android.media.MediaExtractor) -> Unit): ExportSource {
+        val ex = android.media.MediaExtractor()
+        try {
+            open(ex)
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val mime = f.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                if (!mime.startsWith("video/")) continue
+                val w = f.getInteger(android.media.MediaFormat.KEY_WIDTH)
+                val h = f.getInteger(android.media.MediaFormat.KEY_HEIGHT)
+                val trackRate = if (f.containsKey(android.media.MediaFormat.KEY_BIT_RATE)) f.getInteger(android.media.MediaFormat.KEY_BIT_RATE) else 0
+                // Without it in the track: the whole file's rate (size over length), a little over the video's.
+                val durationUs = if (f.containsKey(android.media.MediaFormat.KEY_DURATION)) f.getLong(android.media.MediaFormat.KEY_DURATION) else 0L
+                val rate = trackRate.takeIf { it > 0 } ?: fileBytes?.takeIf { durationUs > 0 }?.let { (it * 8_000_000L / durationUs).toInt() } ?: 0
+                // The original's own codec when it is one of the two every phone encodes; at its bitrate (no less than
+                // 20 Mbit/s for good quality, no more than 200).
+                val out = if (mime == androidx.media3.common.MimeTypes.VIDEO_H265) mime else androidx.media3.common.MimeTypes.VIDEO_H264
+                return ExportSource(out, (if (rate > 0) rate else 60_000_000).coerceIn(20_000_000, 200_000_000), minOf(w, h), durationUs / 1000)
+            }
+            error(tr("в файле нет видео", "no video in the file"))
+        } finally {
+            ex.release()
+        }
+    }
+
+    /**
+     * Runs the transformer on the main thread until it is done; [onPercent] twice a second. [uri]: the phone's copy, or
+     * with [fromCamera] the camera's file over Wi-Fi (our data source, reading only what is needed). [parts] null: the
+     * whole video, its sound copied (left out without [sound]); else those pieces in a row, each cut exactly, without
+     * sound (joined afterwards, see [exportWithColor]).
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    private suspend fun transform(
+        uri: String,
+        fromCamera: Boolean,
+        parts: List<Highlight>?,
+        out: java.io.File,
+        effects: List<androidx.media3.common.Effect>,
+        source: ExportSource,
+        sound: Boolean,
+        onPercent: (Int) -> Unit,
+    ) = kotlinx.coroutines.coroutineScope {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
+            .setRequestedVideoEncoderSettings(androidx.media3.transformer.VideoEncoderSettings.Builder().setBitrate(source.bitrate).build())
+            .setEnableFallback(true)
+            .build()
+        val builder = androidx.media3.transformer.Transformer.Builder(app)
+            .setVideoMimeType(source.mime)
+            .setEncoderFactory(encoders)
+        if (fromCamera) {
+            val camera = previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera"))
+            builder.setAssetLoaderFactory(
+                androidx.media3.transformer.DefaultAssetLoaderFactory(
+                    app,
+                    androidx.media3.transformer.DefaultDecoderFactory.Builder(app).build(),
+                    androidx.media3.common.util.Clock.DEFAULT,
+                    // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(camera),
+                    androidx.media3.datasource.DataSourceBitmapLoader(app),
+                ),
+            )
+        }
+        val t = builder
+            .addListener(object : androidx.media3.transformer.Transformer.Listener {
+                override fun onCompleted(composition: androidx.media3.transformer.Composition, exportResult: androidx.media3.transformer.ExportResult) {
+                    done.complete(Unit)
+                }
+
+                override fun onError(
+                    composition: androidx.media3.transformer.Composition,
+                    exportResult: androidx.media3.transformer.ExportResult,
+                    exportException: androidx.media3.transformer.ExportException,
+                ) {
+                    done.completeExceptionally(exportException)
+                }
+            })
+            .build()
+        exporter = t
+        // A piece: the media item clipped to it, its picture only — the sound of pieces is joined with crossfades
+        // afterwards (ClipAudio), which the transformer can't do.
+        fun item(piece: Highlight?): androidx.media3.transformer.EditedMediaItem {
+            val media = androidx.media3.common.MediaItem.Builder().setUri(uri).apply {
+                if (piece != null) {
+                    setClippingConfiguration(
+                        androidx.media3.common.MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs(piece.startMs)
+                            .setEndPositionMs(piece.endMs ?: piece.startMs)
+                            .build(),
+                    )
+                }
+            }.build()
+            return androidx.media3.transformer.EditedMediaItem.Builder(media)
+                .setRemoveAudio(piece != null || !sound)
+                .setEffects(androidx.media3.transformer.Effects(emptyList(), effects))
+                .build()
+        }
+        val composition = androidx.media3.transformer.Composition.Builder(
+            androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
+        ).build()
+        val ticker = launch {
+            val holder = androidx.media3.transformer.ProgressHolder()
+            while (true) {
+                delay(500)
+                if (t.getProgress(holder) == androidx.media3.transformer.Transformer.PROGRESS_STATE_AVAILABLE) onPercent(holder.progress)
+            }
+        }
+        try {
+            t.start(composition, out.absolutePath)
+            done.await()
+        } finally {
+            ticker.cancel()
+            if (!done.isCompleted) t.cancel()
+            exporter = null
+        }
+    }
 }

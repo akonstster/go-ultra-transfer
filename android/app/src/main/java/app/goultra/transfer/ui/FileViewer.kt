@@ -7,6 +7,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,6 +25,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -68,6 +71,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.SeekParameters
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
@@ -80,6 +87,8 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.RadioButton
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Edit
@@ -112,6 +121,16 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.PlaylistRemove
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material3.Switch
+import app.goultra.transfer.camera.CubeLut
+import app.goultra.transfer.camera.Look
+import androidx.compose.foundation.horizontalScroll
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.Highlight
@@ -179,44 +198,11 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         }
         var choose by remember(file.uri) { mutableStateOf(false) }
         var info by remember(file.uri) { mutableStateOf(false) }
+        // Setting the colour: only the video and the panel — the top bar and the ♥ / «i» / share column hide.
+        var colouring by remember(file.uri) { mutableStateOf(false) }
         if (info) FileInfo(vm, file) { info = false }
-        // A clip of this video already in the gallery: replace it, or keep both (…_HL2.mp4).
-        val scope = rememberCoroutineScope()
-        var replaceClip by remember(file.uri) { mutableStateOf(false) }
-        fun startClip() {
-            scope.launch {
-                if (vm.clipExists(file)) replaceClip = true else { vm.saveClip(file, pieces); onClose() }
-            }
-        }
-        if (replaceClip) {
-            AlertDialog(
-                onDismissRequest = { replaceClip = false },
-                title = { Text(tr("Клип уже есть", "The clip already exists")) },
-                text = {
-                    Text(
-                        tr(
-                            "В галерее уже есть ${vm.clipName(file)}. Заменить его новым или сохранить новый отдельно?",
-                            "${vm.clipName(file)} is already in the gallery. Replace it, or save the new one separately?",
-                        ),
-                    )
-                },
-                confirmButton = {
-                    TextButton({ replaceClip = false; vm.saveClip(file, pieces); onClose() }) { Text(tr("Заменить", "Replace")) }
-                },
-                dismissButton = {
-                    TextButton({
-                        scope.launch {
-                            val name = vm.freeClipName(file)
-                            replaceClip = false
-                            vm.saveClip(file, pieces, name)
-                            onClose()
-                        }
-                    }) { Text(tr("Сохранить отдельно", "Save separately")) }
-                },
-            )
-        }
         when {
-            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock) { ms ->
+            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
@@ -247,7 +233,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
             }
         }
-        Row(
+        if (!colouring) Row(
             Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
                 .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -268,23 +254,20 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 )
             }
             Spacer(Modifier.width(8.dp))
-            if (!file.isOnPhone && file.name !in vm.downloaded) {
-                // With pieces marked: the whole video or one clip of the pieces.
-                Button(
-                    { if (isVideo && pieces.isNotEmpty()) choose = true else { vm.downloadOne(file); onClose() } },
-                    enabled = !vm.isDownloading,
-                ) { Text(tr("Скачать", "Download")) }
-            } else if (isVideo && pieces.isNotEmpty()) {
-                // Already on the phone: a clip of the pieces, made from the phone's copy.
-                Button({ startClip() }, enabled = !vm.isDownloading) {
-                    Icon(Icons.Filled.ContentCut, null, Modifier.size(18.dp))
+            val busy = vm.isDownloading || vm.export != null
+            if (isVideo && (!file.isOnPhone || pieces.isNotEmpty() || vm.look(file) != null)) {
+                // A video: one «Сохранить» for every way (whole / marked, as shot / with colour).
+                Button({ choose = true }, enabled = !busy) {
+                    Icon(Icons.Filled.SaveAlt, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(tr("Клип", "Clip"))
+                    Text(tr("Сохранить", "Save"))
                 }
+            } else if (!isVideo && !file.isOnPhone && file.name !in vm.downloaded) {
+                Button({ vm.downloadOne(file); onClose() }, enabled = !busy) { Text(tr("Скачать", "Download")) }
             }
         }
         // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
-        Column(
+        if (!colouring) Column(
             Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -302,15 +285,14 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             if (file.localUri != null) {
                 IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
             }
+            // An added file: off the list (it stays on the phone), and the viewer closes.
+            if (file.isAdded) {
+                IconButton({ vm.removeAdded(listOf(file)); onClose() }, round) {
+                    Icon(Icons.Filled.PlaylistRemove, tr("Убрать из списка", "Take off the list"), tint = Color.White)
+                }
+            }
         }
-        if (choose) {
-            DownloadChoice(
-                file, pieces, vm.clipName(file),
-                onWhole = { choose = false; vm.downloadOne(file); onClose() },
-                onPieces = { choose = false; startClip() },
-                onDismiss = { choose = false },
-            )
-        }
+        if (choose) SaveDialog(vm, file, pieces, onDismiss = { choose = false }, onStarted = { choose = false; onClose() })
     }
 }
 
@@ -359,37 +341,138 @@ fun share(context: android.content.Context, files: List<CameraFile>) {
     runCatching { context.startActivity(android.content.Intent.createChooser(intent, tr("Поделиться", "Share"))) }
 }
 
-/** «Скачать» for a video with marked pieces: the whole file, or one clip of just the pieces. */
+/**
+ * «Сохранить» for a video — one dialog for every way: what (the whole video / the marked pieces) and how (as shot /
+ * with the colour set in the viewer); a file on the camera with colour: download the original first, or read only
+ * what is needed straight from the camera. The line below says what comes out and how (cut without re-encoding,
+ * fast — or re-encoded, slower). A name already in the gallery: replace it, or save another.
+ */
 @Composable
-private fun DownloadChoice(
-    file: CameraFile,
-    pieces: List<Highlight>,
-    clipName: String,
-    onWhole: () -> Unit,
-    onPieces: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val piecesMs = pieces.sumOf { it.endMs!! - it.startMs }
-    val clipBytes = file.size?.let { size -> file.durationSec?.takeIf { it > 0 }?.let { size * piecesMs / (it * 1000L) } }
+private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<Highlight>, onDismiss: () -> Unit, onStarted: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val look = remember(file.name) { vm.look(file) ?: ColorLook() }
+    val iLog by produceState<Boolean?>(null, file.uri, file.localUri) { value = vm.isILog(file) }
+    val ilog = iLog == true
+    val colourSet = iLog != null && !look.isPlain(ilog)
+    var marked by remember { mutableStateOf(pieces.isNotEmpty()) }
+    var colour by remember(colourSet) { mutableStateOf(colourSet) }
+    var direct by remember { mutableStateOf(false) }
+    var sound by remember { mutableStateOf(true) }
+    var taken by remember { mutableStateOf<String?>(null) }
+    val onCamera = !file.isOnPhone
+    val piecesMs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs }
+    val name = vm.saveName(file, marked, colour, !sound)
+    // Nothing to do: the whole video as shot, with its sound, is already on the phone.
+    val nothing = !marked && !colour && sound && !onCamera
+    // The whole video as shot, with sound: a plain download under the camera's name.
+    val download = !marked && !colour && sound
+    fun start(as_: String) {
+        vm.save(file, if (marked) pieces else null, if (colour) look else null, ilog, as_, direct, sound)
+        onStarted()
+    }
+    val takenName = taken
+    if (takenName != null) {
+        AlertDialog(
+            onDismissRequest = { taken = null },
+            title = { Text(tr("Файл уже есть", "The file already exists")) },
+            text = { Text(tr("В галерее уже есть $takenName. Заменить его или сохранить новый отдельно?", "$takenName is already in the gallery. Replace it, or save the new one separately?")) },
+            confirmButton = { TextButton({ start(takenName) }) { Text(tr("Заменить", "Replace")) } },
+            dismissButton = {
+                TextButton({ scope.launch { start(vm.freeSaveName(file, marked, colour, !sound)) } }) { Text(tr("Сохранить отдельно", "Save separately")) }
+            },
+        )
+        return
+    }
+    @Composable
+    fun Choice(selected: Boolean, enabled: Boolean = true, onClick: () -> Unit, label: String, note: String? = null) {
+        Row(
+            Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected, onClick, enabled = enabled)
+            Column {
+                Text(label, color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant)
+                if (note != null) Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(tr("Скачать видео", "Download the video")) },
+        title = { Text(tr("Сохранить видео", "Save the video")) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(tr("Целиком", "Whole video") + (file.size?.let { " — ${formatSize(it)}" } ?: ""))
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Choice(!marked, onClick = { marked = false }, label = tr("Целиком", "Whole video") + (file.size?.let { " — ${formatSize(it)}" } ?: ""))
+                Choice(
+                    marked, enabled = pieces.isNotEmpty(), onClick = { marked = true },
+                    label = tr("Только отмеченное", "Marked pieces only"),
+                    note = if (pieces.isEmpty()) tr("кусков нет", "no pieces") else "${pieces.size} · " + "%.1f ".format(piecesMs / 1000.0) + tr("с", "s"),
+                )
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Choice(!colour, onClick = { colour = false }, label = tr("Как снято", "As shot"))
+                Choice(
+                    colour, enabled = colourSet, onClick = { colour = true },
+                    label = tr("С моим цветом", "With my colour"),
+                    note = if (colourSet) null else tr("цвет не менялся", "the colour wasn't changed"),
+                )
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                // Without sound: less work (no sound to cut, join or encode).
+                Row(Modifier.fillMaxWidth().clickable { sound = !sound }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("Звук", "Sound"))
+                        Text(
+                            if (sound) tr("сохраняется", "kept") else tr("без звука — быстрее", "no sound — faster"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(sound, { sound = it })
+                }
+                if (onCamera && colour) {
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    Choice(
+                        !direct, onClick = { direct = false },
+                        label = tr("Скачать оригинал, потом сохранить", "Download the original, then save"),
+                        note = tr("надёжнее; оригинал останется на телефоне", "more reliable; the original stays on the phone"),
+                    )
+                    Choice(
+                        direct, onClick = { direct = true },
+                        label = tr("Прямо с камеры", "Straight from the camera"),
+                        note = tr("читается только нужное — место под оригинал не нужно; камера должна быть на связи всё время", "only what is needed is read — no room for the original; the camera must stay connected"),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 Text(
-                    tr("Только отмеченное", "Marked pieces only") + " — ${pieces.size} · " + "%.1f ".format(piecesMs / 1000.0) +
-                        tr("с", "s") + (clipBytes?.let { ", ~${formatSize(it)}" } ?: "") + "\n" +
-                        tr(
-                            "Одним клипом $clipName. Начало куска сдвигается назад к ключевому кадру, с камеры читаются только куски.",
-                            "One clip, $clipName. A piece's start moves back to a key frame; only the pieces are read from the camera.",
-                        ),
+                    when {
+                        nothing -> tr("Видео уже на телефоне.", "The video is already on the phone.")
+                        download -> tr("Скачивание оригинала.", "Downloads the original.")
+                        !colour && !marked -> "$name · " + tr("копия без звука, без перекодирования, быстро.", "a copy without sound, no re-encoding, fast.")
+                        !colour -> "$name · " + tr(
+                            "без перекодирования, быстро, исходное качество; начало куска — с ключевого кадра перед ним.",
+                            "no re-encoding, fast, original quality; a piece starts at the key frame before it.",
+                        )
+                        else -> "$name · " + tr("перекодирование в исходном размере: дольше. ", "re-encoded at full size: slower. ") + when {
+                            !sound -> tr("Без звука.", "No sound.")
+                            marked -> tr("Куски точно по отметкам, звук на стыках сводится кроссфейдом 0,2 с.", "Pieces exactly as marked, the sound crossfaded 0.2 s at the joins.")
+                            else -> tr("Звук копируется как есть.", "The sound is copied as is.")
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
         },
-        confirmButton = { TextButton(onPieces) { Text(tr("Только отмеченное", "Marked only")) } },
-        dismissButton = { TextButton(onWhole) { Text(tr("Целиком", "Whole")) } },
+        confirmButton = {
+            TextButton(
+                {
+                    if (download) {
+                        start(file.name)
+                    } else {
+                        scope.launch { if (vm.nameTaken(name)) taken = name else start(name) }
+                    }
+                },
+                enabled = !nothing && iLog != null,
+            ) { Text(tr("Сохранить", "Save")) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text(tr("Отмена", "Cancel")) } },
     )
 }
 
@@ -403,6 +486,7 @@ private fun VideoPreview(
     onEdit: (List<Highlight>?) -> List<Highlight>,
     active: Boolean,
     onLock: (Boolean) -> Unit,
+    onColouring: (Boolean) -> Unit,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -411,20 +495,189 @@ private fun VideoPreview(
         Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White, modifier = Modifier.padding(24.dp))
         return
     }
-    val player = remember(file.uri) {
+    // Colour: every video goes through the player's effects (they exist only if set up before it starts):
+    // Insta360's LUT for I-Log files, exposure / saturation as a matrix the sliders change live, clipping stripes on
+    // demand. Only the LUT and the stripes rebuild the effects.
+    val iLog by produceState<Boolean?>(null, file.uri, file.localUri) { value = vm.isILog(file) }
+    // (loaded, table): a LUT that failed to load lets the video play as shot instead of waiting for it for ever.
+    val lutState by produceState<Pair<Boolean, CubeLut?>>(false to null) { value = true to vm.lut() }
+    val lut = lutState.second
+    var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
+    val look = saved ?: ColorLook()
+    var colorPanel by remember(file.uri) { mutableStateOf(false) }
+    // A phone copy's size before the player starts, so its effects are made at the preview size from the first frame
+    // (changing them as playback starts could leave it without a picture). The camera's light copy is small anyway.
+    val knownLines by produceState<Int?>(if (file.isOnPhone) null else 0, file.localUri) {
+        if (file.isOnPhone) value = withContext(Dispatchers.IO) { videoShortSide(context, file.localUri) }
+    }
+    val ilog = iLog == true
+    val table = lut
+    if (iLog == null || (ilog && !lutState.first) || knownLines == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
+        return
+    }
+    // The effects didn't show a picture on this phone (or failed): the video is shown as shot.
+    var effectsFailed by remember(file.uri) { mutableStateOf(false) }
+    val effects = !effectsFailed
+    val matrix = remember(file.uri) { LiveColorMatrix(look.exposure, look.saturation) }
+    val sharpen = remember(file.uri) { Sharpen(look.sharpness, look.sharpRadius) }
+    val filmLook = remember(file.uri) { FilmLook(look) }
+    // Insta360's LUT for an I-Log file, its strength live (0 = off); the clipping stripes, shown or not.
+    val liveLut = remember(file.uri, table) { if (ilog && table != null) LiveLut(table, if (look.lut) look.strength else 0f) else null }
+    val stripes = remember(file.uri) { ClippingStripes().also { it.on = vm.clipping } }
+    val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
+    val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
+    // Preview weight. The effects work on a picture no bigger than the screen needs (PLAY_SIZES[level] lines, never
+    // upscaled); a phone that can't keep up goes a step lower, the last step with lighter halation and sharpening
+    // while playing (paused, they are full again — a setting, not a new set of effects).
+    var level by remember(file.uri) { mutableIntStateOf(0) }
+    // «До / после» in the colour panel: the video as shot (the clipping stripes stay, they measure, not grade).
+    var bypass by remember(file.uri) { mutableStateOf(false) }
+    val bypassNow by rememberUpdatedState(bypass)
+    var paused by remember(file.uri) { mutableStateOf(!active) }
+    var sourceLines by remember(file.uri) { mutableIntStateOf(knownLines ?: 0) } // the video's short side
+    var seeks by remember(file.uri) { mutableIntStateOf(0) } // jumps of the position: a paused still is taken again
+    val previewLines = PLAY_SIZES[level].takeIf { sourceLines > it }
+    val light = !paused && level == PLAY_SIZES.lastIndex
+    fun stepDown(why: String): Boolean {
+        if (level == PLAY_SIZES.lastIndex) return false
+        level++
+        vm.log("цвет ${file.name}: $why — превью проще: ${PLAY_SIZES[level]} строк${if (level == PLAY_SIZES.lastIndex) ", облегчённые ореол и резкость" else ""}")
+        return true
+    }
+    fun dropEffects(why: String) {
+        vm.log("цвет ${file.name}: $why — без обработки цвета")
+        effectsFailed = true
+        android.widget.Toast.makeText(context, tr("Цвет на этом телефоне не показывается", "Colour can't be shown on this phone"), android.widget.Toast.LENGTH_LONG).show()
+    }
+    val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
+            if (effects) setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines))
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() { firstFrame[0] = true }
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
+                // Only a paused jump needs a new still (playing, the video goes round with the panel open).
+                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                    if (!playWhenReady) seeks++
+                }
+                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                    if (videoSize.width > 0 && videoSize.height > 0) sourceLines = minOf(videoSize.width, videoSize.height)
+                }
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    vm.log("плеер ${file.name}: ${error.errorCodeName} ${error.message ?: ""} ${error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: ""}")
+                    // Too heavy while playing: a lighter preview first (the effects are set again and the player
+                    // restarted below); with nothing lighter left, no colour.
+                    if (effects && !(playWhenReady && stepDown("ошибка плеера"))) dropEffects("ошибка плеера")
+                }
+            })
+            if (resumeAt[0] > 0) seekTo(resumeAt[0])
             if (source == null) {
                 setMediaItem(MediaItem.fromUri(file.localUri!!)) // the phone's copy: the default (content://) source
             } else {
                 setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(file))))
             }
             playWhenReady = active
-            prepare()
+            // A page not on screen yet (swiping) doesn't take a decoder and a GL pipeline: it prepares when it settles.
+            if (active) prepare()
         }
     }
-    DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
+    // False once the player is released (the page swiped away, the viewer closed): late callers leave it alone.
+    val alive = remember(player) { booleanArrayOf(true) }
+    DisposableEffect(player) { onDispose { alive[0] = false; player.release(); vm.closeTimeline() } }
+    // Paused, the player draws no new frame — not even after a seek to the same spot (tried; many seeks of a 4K video
+    // hung the viewer). When its view is made anew (the panel opened / closed) or its effects are rebuilt, it plays
+    // without sound until one new frame is drawn (at most 0.4 s) and pauses again. Colour changes while paused show on
+    // the still (StillFrame) instead.
+    var redraw by remember(player) { mutableIntStateOf(0) }
+    LaunchedEffect(redraw) {
+        if (redraw == 0) return@LaunchedEffect
+        delay(200)
+        if (player.playWhenReady || player.playbackState != Player.STATE_READY) return@LaunchedEffect
+        if (!alive[0]) return@LaunchedEffect
+        withContext(NonCancellable) {
+            val volume = player.volume
+            val drawn = filmLook.frames.get()
+            player.volume = 0f
+            player.play()
+            // Bypassed, the film look isn't in the chain and counts no frames: a short fixed wait then.
+            withTimeoutOrNull(400L) { while (alive[0] && filmLook.frames.get() == drawn) delay(16) }
+            if (alive[0]) {
+                player.pause()
+                player.volume = volume
+            }
+        }
+    }
+    // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
+    // start). After an error the player starts again with them.
+    // Only the preview size rebuilds the effects (a phone that can't keep up); everything else — the LUT on / off and
+    // its strength, the stripes, before / after — is read by the effects on every frame.
+    val applied = remember(player) { arrayOf<Any>(listOf(previewLines, level)) }
+    LaunchedEffect(player, previewLines, level) {
+        val now = listOf(previewLines, level)
+        if (effects && now != applied[0]) {
+            applied[0] = now
+            player.setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines))
+            if (player.playerError != null) player.prepare() else redraw++
+        }
+    }
+    val shownSwitches = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping, bypass)) }
+    LaunchedEffect(look.lut, look.strength, vm.clipping, bypass) {
+        liveLut?.strength = if (look.lut) look.strength else 0f
+        stripes.on = vm.clipping
+        liveLut?.bypass = bypass
+        matrix.bypass = bypass
+        sharpen.bypass = bypass
+        filmLook.bypass = bypass
+        shownSwitches[0] = listOf(look.lut, look.strength, vm.clipping, bypass)
+    }
+    LaunchedEffect(light) { sharpen.light = light; filmLook.light = light }
+    val shownLook = remember(player) { arrayOf(look) }
+    LaunchedEffect(look) {
+        matrix.set(look.exposure, look.saturation)
+        sharpen.amount = look.sharpness
+        sharpen.radius = look.sharpRadius
+        filmLook.set(look)
+        shownLook[0] = look
+    }
+    // Playing slower than the video's frame rate (frames counted where the film look draws them): a lighter preview.
+    LaunchedEffect(player) {
+        if (!effects) return@LaunchedEffect
+        var last = filmLook.frames.get()
+        var settle = 2 // windows to skip after a start or a change
+        while (true) {
+            delay(2_000)
+            val now = filmLook.frames.get()
+            val drawn = now - last
+            last = now
+            // Bypassed, the film look draws nothing: no measure then.
+            if (bypassNow || !player.isPlaying || player.playbackState != Player.STATE_READY) { settle = 2; continue }
+            if (settle > 0) { settle--; continue }
+            val fps = player.videoFormat?.frameRate?.takeIf { it > 0f } ?: 30f
+            val wanted = fps * player.playbackParameters.speed * 2
+            if (drawn < wanted * 0.8f && stepDown("${drawn / 2} кадров/с из ${Math.round(fps)}")) settle = 2
+        }
+    }
+    // While setting the colour the video goes round, so the change is always in sight.
+    LaunchedEffect(player, colorPanel) { player.repeatMode = if (colorPanel) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
+    // With effects: no frame after 5 s of playing means the picture doesn't come through — back to no effects.
+    LaunchedEffect(player) {
+        if (!effects) return@LaunchedEffect
+        var playedMs = 0
+        while (!firstFrame[0] && playedMs < 5_000) {
+            delay(250)
+            if (player.isPlaying && player.playbackState == Player.STATE_READY) playedMs += 250
+        }
+        if (!firstFrame[0]) dropEffects("нет кадров за 5 с (превью ${previewLines ?: "полное"}, ступень $level, ${sourceLines} строк)")
+    }
     // Swiped away: stop; swiped back: play on.
-    LaunchedEffect(active) { if (active) player.play() else player.pause() }
+    LaunchedEffect(active) {
+        if (active) {
+            if (player.playbackState == Player.STATE_IDLE && player.playerError == null) player.prepare()
+            player.play()
+        } else {
+            player.pause()
+        }
+    }
     // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
     // so the player's own taps (controls, seek bar) still work when not zooming.
     var zoom by remember(file.uri) { mutableFloatStateOf(1f) }
@@ -438,6 +691,7 @@ private fun VideoPreview(
                 onDuration(durationMs)
                 reported = true
             }
+            resumeAt[0] = player.currentPosition
             delay(500)
         }
     }
@@ -445,7 +699,43 @@ private fun VideoPreview(
     // skipped. In the strip the pieces can be edited (kept on the phone): then playback is free, for finding spots.
     var film by remember(file.uri) { mutableStateOf(false) }
     var editing by remember(file.uri) { mutableStateOf(false) }
-    LaunchedEffect(editing) { onLock(editing) }
+    val colouring = colorPanel && !editing
+    // Paused with the colour panel open: the frame as shot, coloured by the same steps in our own view — every change
+    // shows at once and in full (the player draws nothing new while paused).
+    val stillAt = remember(player) { longArrayOf(0) }
+    val still by produceState<android.graphics.Bitmap?>(null, colouring, paused, seeks, effects) {
+        if (!(colouring && paused && effects)) {
+            value = null
+            return@produceState
+        }
+        // The last still stays up while the next is decoded; seeks in a row make one decode (after they settle).
+        delay(300)
+        val at = player.currentPosition
+        vm.stillFrame(file, at)?.let { stillAt[0] = at; value = it }
+    }
+    val stillSteps = remember(player) { listOfNotNull<ColorStep>(liveLut, matrix, sharpen, filmLook, stripes) }
+    // No swiping to the next file while the timeline or the colour sliders own the gestures.
+    LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
+    LaunchedEffect(colouring) {
+        onColouring(colouring)
+        // The panel closed: the before / after and the clipping stripes were checks while setting it — both off.
+        if (!colouring) {
+            bypass = false
+            vm.clippingOff()
+        }
+        // A new layout: back to the picture as it opens.
+        zoom = 1f
+        shift = Offset.Zero
+    }
+    // Swiped away: the zoom too, so the file is as it opens when it comes back.
+    LaunchedEffect(active) { if (!active) { zoom = 1f; shift = Offset.Zero } }
+    // The video's box changes size with the panel and gets a new view: paused, the same frame is drawn into it again.
+    val shownColouring = remember(player) { booleanArrayOf(colouring) }
+    LaunchedEffect(player, colouring) {
+        if (colouring == shownColouring[0]) return@LaunchedEffect
+        shownColouring[0] = colouring
+        redraw++
+    }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
     LaunchedEffect(player, film, editing, pieces) {
         if (!film || editing || pieces.isEmpty()) return@LaunchedEffect
@@ -514,8 +804,9 @@ private fun VideoPreview(
         )
     }
     Column(Modifier.fillMaxSize()) {
+        // Setting the colour: the video keeps the upper part of the screen whatever the panel shows; the panel scrolls.
         Box(
-            Modifier.weight(1f).fillMaxWidth().pointerInput(file.uri) {
+            (if (colouring) Modifier.fillMaxHeight(0.45f).statusBarsPadding() else Modifier.weight(1f)).fillMaxWidth().pointerInput(file.uri) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     do {
@@ -537,16 +828,98 @@ private fun VideoPreview(
                 }
             },
         ) {
-            AndroidView(
-                factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
-                update = { view ->
-                    view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size))
-                    // Only the picture zooms, not the player's controls.
-                    view.videoSurfaceView?.apply { scaleX = zoom; scaleY = zoom; translationX = shift.x; translationY = shift.y }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-            Row(
+            // A new view (and so a new surface) when the colour panel opens or closes: the box changes size, and a
+            // SurfaceView keeps a paused picture where it was until a new frame comes. The fresh one is drawn at once
+            // (the paused frame is redrawn below).
+            key(colouring) {
+                AndroidView(
+                    // Controls only on a tap on the picture, not on their own when the video starts or a slider moves.
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            this.player = player
+                            setShowNextButton(false)
+                            setShowPreviousButton(false)
+                            controllerAutoShow = false
+                            hideController()
+                        }
+                    },
+                    update = { view ->
+                        // The player is made again when the colour effects start or stop: the view must follow it.
+                        if (view.player !== player) view.player = player
+                        view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size))
+                        // Only the picture zooms, not the player's controls.
+                        view.videoSurfaceView?.apply { scaleX = zoom; scaleY = zoom; translationX = shift.x; translationY = shift.y }
+                    },
+                    // The old view lets go of the player, so only the new one gets its pictures.
+                    onRelease = { it.player = null },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            still?.let { frame ->
+                StillFrame(frame, stillSteps, stillAt[0] * 1000, zoom, shift, Modifier.fillMaxSize())
+                // The still's surface covers the player's own controls: a tap anywhere on it plays, and a ▶ shows where.
+                Box(
+                    Modifier.fillMaxSize().pointerInput(player) { detectTapGestures { player.play() } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier.size(64.dp).background(Color(0x99000000), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.Filled.PlayArrow, tr("Воспроизвести", "Play"), Modifier.size(40.dp), tint = Color.White) }
+                }
+            }
+            // The phone couldn't keep up: playing shows a lighter preview (a paused frame is in full).
+            if (effects && level > 0 && !paused) {
+                Text(
+                    tr("упрощённо", "simplified") + " · ${PLAY_SIZES[level]}p",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.align(if (colouring) Alignment.TopStart else Alignment.TopEnd).safeDrawingPadding()
+                        .padding(top = if (colouring) 12.dp else 64.dp, start = 12.dp, end = 12.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+            // Setting the colour: copy / paste the whole colour (to colour several videos alike), before / after (the
+            // processing off while lit) and «Готово», over the video's top. A save in progress shows its percent.
+            if (colouring) Row(
+                Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val saving = vm.export
+                if (saving != null) {
+                    Text(
+                        tr("Сохранение ${saving.percent} %", "Saving ${saving.percent} %"),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+                val round = Modifier.background(Color(0x99000000), CircleShape)
+                IconButton({
+                    vm.copyLook(look)
+                    android.widget.Toast.makeText(context, tr("Цвет скопирован — вставьте его в другом видео", "Colour copied — paste it in another video"), android.widget.Toast.LENGTH_SHORT).show()
+                }, round) {
+                    Icon(Icons.Filled.ContentCopy, tr("Копировать цвет", "Copy the colour"), tint = Color.White)
+                }
+                vm.copiedLook?.let { copied ->
+                    IconButton({
+                        saved = copied
+                        vm.saveLook(file, copied)
+                        android.widget.Toast.makeText(context, tr("Цвет вставлен", "Colour pasted"), android.widget.Toast.LENGTH_SHORT).show()
+                    }, round, enabled = copied != look) {
+                        Icon(Icons.Filled.ContentPaste, tr("Вставить цвет", "Paste the colour"), tint = if (copied != look) Color.White else Color(0x66FFFFFF))
+                    }
+                }
+                IconButton(
+                    { bypass = !bypass },
+                    Modifier.background(if (bypass) MARK_COLOR else Color(0x99000000), CircleShape),
+                ) {
+                    Icon(Icons.Filled.Compare, tr("До / после", "Before / after"), tint = if (bypass) Color.Black else Color.White)
+                }
+                Button({ colorPanel = false }) { Text(tr("Готово", "Done")) }
+            }
+            if (!colouring) Row(
                 Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -562,6 +935,16 @@ private fun VideoPreview(
                     leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
                     colors = chipColors,
                 )
+                // Colour: a LUT (I-Log → Rec.709) with its strength, brightness, saturation — for viewing.
+                if (!editing) {
+                    FilterChip(
+                        selected = !look.isPlain(ilog),
+                        onClick = { colorPanel = !colorPanel },
+                        label = { Text(if (ilog) "I-Log" else tr("Цвет", "Colour")) },
+                        leadingIcon = { Icon(Icons.Filled.Palette, null, tint = if (!look.isPlain(ilog)) MARK_COLOR else Color.White) },
+                        colors = chipColors,
+                    )
+                }
                 // Trimming: the whole video as one piece, its ends on handles in the timeline.
                 if (!editing) {
                     FilterChip(
@@ -574,7 +957,19 @@ private fun VideoPreview(
                 }
             }
         }
-        if (film) {
+        if (colouring) {
+            ColorPanel(
+                Modifier.weight(1f),
+                ilog, look, saved != null, effectsFailed, vm.clipping,
+                onLook = { saved = it; vm.saveLook(file, it) },
+                onLive = { ev, sat -> matrix.set(ev, sat) },
+                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius },
+                onLutLive = { liveLut?.strength = it },
+                onFilmLive = filmLook::set,
+                onClipping = vm::toggleClipping,
+                onReset = { saved = null; vm.saveLook(file, null) },
+            )
+        } else if (film) {
             if (pieces.isNotEmpty() && !editing) {
                 FilmStrip(pieces, frames, current) { i ->
                     current = i
@@ -595,6 +990,8 @@ private fun VideoPreview(
                             android.widget.Toast.makeText(context, tr("Здесь нет места для куска", "No room for a piece here"), android.widget.Toast.LENGTH_SHORT).show()
                         } else {
                             commit(pieces + added, added.startMs)
+                            // The editor showed because there were no pieces: stay in it to add more.
+                            editing = true
                         }
                     },
                     onDelete = { i -> commit(pieces.filterIndexed { j, _ -> j != i }, null) },
@@ -614,6 +1011,230 @@ private fun VideoPreview(
                 }
             }
         }
+    }
+}
+
+/**
+ * The player's effects, in order: the picture made smaller for a lighter preview ([previewLines] lines, at most what
+ * the screen needs), Insta360's [lut] for an I-Log file, exposure / saturation ([matrix]), [sharpen] (on the coloured
+ * picture, as editors do), the [film] look (after the sharpening, so its grain isn't sharpened), the clipping
+ * [stripes]. All of them read their settings on every frame — on / off, strength, before / after included — so the
+ * list stays the same while the video plays (changing it live stopped playback).
+ */
+@OptIn(UnstableApi::class)
+private fun colorEffects(
+    lut: LiveLut?,
+    matrix: LiveColorMatrix,
+    sharpen: Sharpen,
+    film: FilmLook,
+    stripes: ClippingStripes,
+    previewLines: Int?,
+): List<androidx.media3.common.Effect> {
+    val out = mutableListOf<androidx.media3.common.Effect>()
+    if (previewLines != null) out += androidx.media3.effect.Presentation.createForHeight(previewLines)
+    if (lut != null) out += lut
+    out += matrix
+    out += sharpen
+    out += film
+    out += stripes
+    return out
+}
+
+/** The short side (px) of a video on the phone; 0 when it can't be read. */
+private fun videoShortSide(context: android.content.Context, uri: String?): Int {
+    if (uri == null) return 0
+    val r = android.media.MediaMetadataRetriever()
+    return try {
+        r.setDataSource(context, android.net.Uri.parse(uri))
+        val w = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        val h = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        minOf(w, h)
+    } catch (e: Exception) {
+        0
+    } finally {
+        r.release()
+    }
+}
+
+/** Preview sizes (lines), from the first choice to the lightest. */
+private val PLAY_SIZES = intArrayOf(1080, 720, 540)
+
+/**
+ * Colour while viewing (the file stays as shot), on two tabs so the sliders don't cover the video. «Свет и цвет» —
+ * I-Log: Insta360's «I-Log → Rec.709» on / off and its strength; any video: exposure (stops), saturation, sharpness.
+ * «Стиль» — film look presets, the print look (FilmLook), warmth, even skin, grain, halation. Seen as the slider moves;
+ * clipping stripes on / off. Settings are kept per video; «Сбросить» goes back to the default (I-Log: LUT on).
+ */
+@Composable
+private fun ColorPanel(
+    modifier: Modifier,
+    iLog: Boolean,
+    look: ColorLook,
+    changed: Boolean,
+    failed: Boolean,
+    clipping: Boolean,
+    onLook: (ColorLook) -> Unit,
+    onLive: (exposure: Float, saturation: Float) -> Unit,
+    onSharpLive: (amount: Float, radius: Float) -> Unit,
+    onLutLive: (Float) -> Unit,
+    onFilmLive: (ColorLook) -> Unit,
+    onClipping: () -> Unit,
+    onReset: () -> Unit,
+) {
+    var filmTab by remember { mutableStateOf(false) }
+    // The tabs stay; the sliders under them scroll. Before / after and «Готово» sit over the video.
+    Column(modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val tabColors = FilterChipDefaults.filterChipColors(
+                containerColor = Color.Transparent,
+                labelColor = Color.White,
+                selectedContainerColor = Color(0x33FFFFFF),
+                selectedLabelColor = Color.White,
+            )
+            FilterChip(!filmTab, { filmTab = false }, { Text(tr("Свет и цвет", "Light & colour")) }, colors = tabColors)
+            Spacer(Modifier.width(8.dp))
+            FilterChip(
+                filmTab, { filmTab = true }, { Text(tr("Стиль", "Look")) },
+                colors = tabColors,
+                leadingIcon = if (look.film > 0f || look.grain > 0f || look.halation > 0f || look.warmth != 0f ||
+                    look.skin > 0f || (look.preset != 0 && look.presetStrength > 0f)
+                ) {
+                    { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
+                } else null,
+            )
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (filmTab) {
+                FilmSliders(look, onLook, onFilmLive)
+            } else {
+                LightSliders(iLog, look, onLook, onLive, onSharpLive, onLutLive)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = clipping, onCheckedChange = { onClipping() })
+                Spacer(Modifier.width(10.dp))
+                Text(tr("Пересвет и провалы", "Clipping"), color = Color.White, fontSize = 13.sp)
+                Text(tr("  красным / синим", "  red / blue"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
+                if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
+            }
+            if (failed) {
+                Text(
+                    tr("Обработка цвета на этом телефоне не показала картинку — видео показано как снято.", "Colour processing showed no picture on this phone — the video is shown as shot."),
+                    color = MaterialTheme.colorScheme.error,
+                    fontSize = 12.sp,
+                )
+            }
+            Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp)
+        }
+    }
+}
+
+/** «Свет и цвет»: the I-Log LUT and its strength, exposure, saturation, sharpness and its radius. */
+@Composable
+private fun LightSliders(
+    iLog: Boolean,
+    look: ColorLook,
+    onLook: (ColorLook) -> Unit,
+    onLive: (exposure: Float, saturation: Float) -> Unit,
+    onSharpLive: (amount: Float, radius: Float) -> Unit,
+    onLutLive: (Float) -> Unit,
+) {
+    if (iLog) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = look.lut, onCheckedChange = { onLook(look.copy(lut = it)) })
+            Spacer(Modifier.width(10.dp))
+            Text("I-Log → Rec.709", color = Color.White, fontSize = 13.sp)
+        }
+    }
+    // Every slider shows as it moves (the effects read their settings on each frame).
+    if (iLog && look.lut) {
+        LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }, live = onLutLive) {
+            onLook(look.copy(strength = it))
+        }
+    }
+    LookSlider(
+        tr("Экспозиция", "Exposure"), look.exposure, -2f..2f, { "%+.1f EV".format(it) },
+        live = { onLive(it, look.saturation) },
+    ) { onLook(look.copy(exposure = it)) }
+    LookSlider(
+        tr("Насыщенность", "Saturation"), look.saturation, 0f..2f, { "${Math.round(it * 100)} %" },
+        live = { onLive(look.exposure, it) },
+    ) { onLook(look.copy(saturation = it)) }
+    // Unsharp mask on brightness: how much, and how wide the contours it lifts (small = fine texture, large =
+    // shapes; too large shows halos).
+    LookSlider(
+        tr("Резкость", "Sharpness"), look.sharpness, 0f..1f, { "${Math.round(it * 100)} %" },
+        live = { onSharpLive(it, look.sharpRadius) },
+    ) { onLook(look.copy(sharpness = it)) }
+    if (look.sharpness > 0f) {
+        LookSlider(
+            tr("Радиус", "Radius"), look.sharpRadius, 0.5f..3f, { "%.1f ".format(it) + tr("пкс", "px") },
+            live = { onSharpLive(look.sharpness, it) },
+        ) { onLook(look.copy(sharpRadius = it)) }
+    }
+}
+
+/**
+ * «Стиль» (see FilmMath, Looks): a film look preset with its description and strength; the film print — contrast with
+ * a soft shoulder, dense colour, split toning; warmth as a white balance; an even skin tone (skin keeps its hue through
+ * all of it anyway); grain and halation.
+ */
+@Composable
+private fun FilmSliders(look: ColorLook, onLook: (ColorLook) -> Unit, onFilmLive: (ColorLook) -> Unit) {
+    fun percent(v: Float) = "${Math.round(v * 100)} %"
+    val preset = Look.of(look.preset)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (l in Look.entries) {
+            FilterChip(
+                selected = l == preset,
+                onClick = { onLook(look.copy(preset = l.ordinal)) },
+                label = { Text(tr(l.ru, l.en)) },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Color.Transparent, labelColor = Color.White,
+                    selectedContainerColor = Color(0x33FFFFFF), selectedLabelColor = MARK_COLOR,
+                ),
+            )
+        }
+    }
+    if (preset != Look.NONE) {
+        Text(tr(preset.aboutRu, preset.aboutEn), color = Color(0xCCFFFFFF), fontSize = 12.sp)
+        LookSlider(tr("Сила", "Strength"), look.presetStrength, 0f..1f, ::percent, live = { onFilmLive(look.copy(presetStrength = it)) }) {
+            onLook(look.copy(presetStrength = it))
+        }
+    }
+    LookSlider(tr("Плёнка", "Film"), look.film, 0f..1f, ::percent, live = { onFilmLive(look.copy(film = it)) }) {
+        onLook(look.copy(film = it))
+    }
+    LookSlider(
+        tr("Холод ↔ тепло", "Cool ↔ warm"), look.warmth, -1f..1f, { "%+d".format(Math.round(it * 100)) },
+        live = { onFilmLive(look.copy(warmth = it)) },
+    ) { onLook(look.copy(warmth = it)) }
+    // Skin keeps its hue on its own; this evens it out (redness, a green cast from leaves).
+    LookSlider(tr("Ровная кожа", "Even skin"), look.skin, 0f..1f, ::percent, live = { onFilmLive(look.copy(skin = it)) }) {
+        onLook(look.copy(skin = it))
+    }
+    LookSlider(tr("Зерно", "Grain"), look.grain, 0f..1f, ::percent, live = { onFilmLive(look.copy(grain = it)) }) {
+        onLook(look.copy(grain = it))
+    }
+    LookSlider(tr("Ореол", "Halation"), look.halation, 0f..1f, ::percent, live = { onFilmLive(look.copy(halation = it)) }) {
+        onLook(look.copy(halation = it))
+    }
+}
+
+/** One colour setting: name, slider, value; [live] as it moves, [onSet] when it is let go. */
+@Composable
+private fun LookSlider(
+    name: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    label: (Float) -> String,
+    live: (Float) -> Unit = {},
+    onSet: (Float) -> Unit,
+) {
+    var v by remember(value) { mutableFloatStateOf(value) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(name, color = Color.White, fontSize = 13.sp, modifier = Modifier.width(104.dp))
+        Slider(v, { v = it; live(it) }, Modifier.weight(1f), valueRange = range, onValueChangeFinished = { onSet(v) })
+        Text(label(v), color = Color(0xCCFFFFFF), fontSize = 12.sp, modifier = Modifier.width(44.dp), textAlign = TextAlign.End)
     }
 }
 
@@ -925,7 +1546,7 @@ private fun clockTenths(ms: Long): String = "%d:%02d.%d".format(ms / 60_000, ms 
 private const val SKIP_SLACK_MS = 300L
 
 /** The seek bar's default marker colour (media3 ad markers), so the chips match the ticks. */
-private val MARK_COLOR = Color(0xB2FFFF00)
+internal val MARK_COLOR = Color(0xB2FFFF00)
 
 private fun clock(ms: Long): String = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
 

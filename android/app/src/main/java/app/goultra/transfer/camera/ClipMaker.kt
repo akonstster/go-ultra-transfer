@@ -97,13 +97,15 @@ object ClipMaker {
     }
 
     /**
-     * Writes the clip of [pieces] from the video [open] sets up on an extractor, as an mp4 into [out].
-     * Returns the pieces as cut, or throws (IOException from the source, IllegalStateException from the muxer).
+     * Writes the clip of [pieces] from the video [open] sets up on an extractor, as an mp4 into [out]; without
+     * [withSound] the sound track is left out. Returns the pieces as cut, or throws (IOException from the source,
+     * IllegalStateException from the muxer).
      */
     fun join(
         open: (MediaExtractor) -> Unit,
         pieces: List<Highlight>,
         out: FileDescriptor,
+        withSound: Boolean = true,
         onProgress: (Long) -> Unit,
     ): List<Highlight> {
         val ex = MediaExtractor()
@@ -115,7 +117,7 @@ object ClipMaker {
             for (i in 0 until ex.trackCount) {
                 val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
                 if (video < 0 && mime.startsWith("video/")) video = i
-                if (audio < 0 && mime.startsWith("audio/")) audio = i
+                if (withSound && audio < 0 && mime.startsWith("audio/")) audio = i
             }
             require(video >= 0) { "в файле нет видео" }
             val vFormat = ex.getTrackFormat(video)

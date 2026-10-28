@@ -36,6 +36,18 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.LibraryAdd
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Switch
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.RadioButton
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.PlaylistRemove
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -123,7 +135,7 @@ fun GalleryScreen(
                 },
                 actions = {
                     // Delete sits up here, far from «Скачать» at the bottom, and always asks first.
-                    if (selectionCount > 0 && vm.tab == Tab.FILES && vm.conn == ConnState.Connected) {
+                    if (selectionCount > 0 && vm.tab == Tab.FILES && vm.conn == ConnState.Connected && vm.selectedFiles.none { it.isOnPhone }) {
                         var confirm by remember { mutableStateOf(false) }
                         IconButton({ confirm = true }, enabled = !vm.deleting && vm.download == null) {
                             Icon(Icons.Filled.Delete, tr("Удалить с камеры", "Delete from camera"))
@@ -160,6 +172,13 @@ fun GalleryScreen(
                                 },
                                 dismissButton = { TextButton({ confirm = false }) { Text(tr("Отмена", "Cancel")) } },
                             )
+                        }
+                    }
+                    // Videos and photos from elsewhere on the phone, to view, cut and colour (with or without the camera).
+                    if (vm.tab == Tab.FILES && selectionCount == 0) {
+                        val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addFiles(uris) }
+                        IconButton({ pick.launch(arrayOf("video/*", "image/*")) }) {
+                            Icon(Icons.Filled.LibraryAdd, tr("Добавить с телефона", "Add from the phone"))
                         }
                     }
                     if (vm.conn == ConnState.Connected || (vm.tab == Tab.CAMERA && vm.conn == ConnState.Remote)) {
@@ -205,7 +224,7 @@ fun GalleryScreen(
                     vm.tab == Tab.CAMERA -> CameraTab(vm, onConnect, onRecord)
                     vm.conn == ConnState.Connected -> FileGrid(vm)
                     // No camera: what is already on the phone, with the way to connect above it.
-                    vm.phoneFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
+                    vm.listedFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
                         ConnectBar(vm.conn, onConnect)
                         FileGrid(vm)
                     }
@@ -327,7 +346,18 @@ private fun FileGrid(vm: CameraController) {
         // From the camera: the phone's copy when downloaded (a live photo stays the camera's — its cover choice).
         scope.launch { vm.view(vm.withPhoneCopy(file)) }
     }
-    fun selectable(file: CameraFile) = vm.showsPhone || !file.isOnPhone
+    // With the camera there, one selection is either the card's files or the phone's (its first file decides): the
+    // bottom bar then offers what fits — download / delete, or share / paste colour / take off the list.
+    val selectionOnPhone = vm.selectedFiles.firstOrNull()?.isOnPhone
+    fun selectable(file: CameraFile) = vm.showsPhone || selectionOnPhone == null || selectionOnPhone == file.isOnPhone
+    // A file of the other side: say why it isn't taken (no answer felt like a stuck phone).
+    fun notSelectable() {
+        vm.message = if (selectionOnPhone == true) {
+            tr("Выбраны файлы телефона — файлы камеры к ним не добавить. Снимите выбор, чтобы выбрать файлы камеры.", "Phone files are selected — camera files can't join them. Clear the selection to pick camera files.")
+        } else {
+            tr("Выбраны файлы камеры — файлы телефона к ним не добавить. Снимите выбор, чтобы выбрать файлы телефона.", "Camera files are selected — phone files can't join them. Clear the selection to pick phone files.")
+        }
+    }
     vm.viewing?.let { FileViewer(vm, it) { vm.viewing = null } }
     val files = vm.visibleFiles
     val byDay = remember(files) { files.groupBy { it.created?.toLocalDate() } }
@@ -341,17 +371,21 @@ private fun FileGrid(vm: CameraController) {
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val listed = vm.listedFiles
-            val photos = listed.count { it.kind == MediaKind.PHOTO }
-            val videos = listed.size - photos
+            // Counted once per change of the list (vm.filterCounts), not on every tap.
+            val counts = vm.filterCounts
             val pick = { f: Filter -> vm.filter = f; vm.touch() }
-            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${listed.size}", "All ${listed.size}")) })
-            FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото $photos", "Photos $photos")) })
-            FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео $videos", "Videos $videos")) })
-            val favorites = listed.count { it.name in vm.favorites }
-            if (favorites > 0 || vm.filter == Filter.FAVORITE) {
-                FilterChip(vm.filter == Filter.FAVORITE, { pick(Filter.FAVORITE) }, { Text("♥ $favorites") })
+            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${counts.all}", "All ${counts.all}")) })
+            FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото ${counts.photos}", "Photos ${counts.photos}")) })
+            FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео ${counts.videos}", "Videos ${counts.videos}")) })
+            // The rest only when there is something in them (or picked).
+            @Composable
+            fun Extra(f: Filter, count: Int, label: String) {
+                if (count > 0 || vm.filter == f) FilterChip(vm.filter == f, { pick(f) }, { Text("$label $count") })
             }
+            Extra(Filter.FAVORITE, counts.favorites, "♥")
+            Extra(Filter.ADDED, counts.added, tr("Добавленные", "Added"))
+            Extra(Filter.COLOURED, counts.coloured, tr("Свой цвет", "Own colour"))
+            Extra(Filter.SAVED, counts.saved, tr("Сохранённые", "Saved"))
         }
         LazyVerticalGrid(
             state = gridState,
@@ -372,13 +406,23 @@ private fun FileGrid(vm: CameraController) {
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         favorite = file.name in vm.favorites,
+                        coloured = file.kind == MediaKind.VIDEO && vm.hasLook(file),
                         phoneOnly = file.isOnPhone && !vm.showsPhone,
-                        loadThumbnail = vm::thumbnail,
+                        added = file.isAdded,
+                        // With the video's own colour on it; drawn again when a colour changes.
+                        loadThumbnail = vm::tileImage,
+                        colourKey = if (file.kind == MediaKind.VIDEO) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
                         // delete), so files only on the phone just open.
-                        onClick = { if (vm.selected.isEmpty() || !selectable(file)) open(file) else vm.toggle(file) },
-                        onLongClick = { if (selectable(file)) vm.toggle(file) },
+                        onClick = {
+                            when {
+                                vm.selected.isEmpty() -> open(file)
+                                selectable(file) -> vm.toggle(file)
+                                else -> notSelectable()
+                            }
+                        },
+                        onLongClick = { if (selectable(file)) vm.toggle(file) else notSelectable() },
                     )
                 }
             }
@@ -402,14 +446,18 @@ private fun FileTile(
     selected: Boolean,
     downloaded: Boolean,
     favorite: Boolean,
+    coloured: Boolean,
     phoneOnly: Boolean,
+    added: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
+    colourKey: String?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
     // Keyed by size too: a just-shot RAW gets its size a moment later, by then its paired .jpg (the preview) exists.
     // A just-taken shot may not be readable yet (the camera is still writing it): fresh files retry a few times.
-    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size) {
+    // And by the phone copy: a file saved again under the same name is a new gallery item.
+    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size, file.localUri, colourKey) {
         val fresh = file.created?.isAfter(java.time.LocalDateTime.now().minusMinutes(10)) == true
         var attempt = 0
         while (true) {
@@ -448,7 +496,22 @@ private fun FileTile(
                 tint = Color(0xFFFF5252),
             )
         }
-        if (phoneOnly) {
+        if (coloured) {
+            // A colour of its own set in the viewer (or pasted).
+            Box(
+                Modifier.align(Alignment.TopStart).padding(start = if (favorite) 27.dp else 5.dp, top = 5.dp).size(18.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.Palette, tr("Свой цвет", "Own colour"), Modifier.size(12.dp), tint = MARK_COLOR) }
+        }
+        if (added) {
+            // Added from elsewhere on the phone.
+            Box(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.FolderOpen, tr("Добавлен с телефона", "Added from the phone"), Modifier.size(12.dp), tint = Color.White) }
+        } else if (phoneOnly) {
             // Only on the phone (a clip made here, or deleted from the card).
             Box(
                 Modifier.align(Alignment.BottomEnd).padding(4.dp).size(18.dp)
@@ -474,6 +537,91 @@ private fun FileTile(
     }
 }
 
+/** « · пачка 3 из 10» while a batch save runs. */
+private fun batchNote(vm: CameraController): String = vm.batch?.let { tr(" · пачка ${it.index} из ${it.count}", " · batch ${it.index} of ${it.count}") } ?: ""
+
+/** «Сохранить» for the selected videos: one choice for all of them ([BatchSaveDialog]). */
+@Composable
+private fun SaveSelected(vm: CameraController, selection: List<CameraFile>) {
+    val videos = selection.filter { it.kind == MediaKind.VIDEO }
+    if (videos.isEmpty()) return
+    var ask by remember { mutableStateOf(false) }
+    IconButton({ ask = true }, enabled = vm.download == null && vm.export == null) {
+        Icon(Icons.Filled.SaveAlt, tr("Сохранить выбранные видео", "Save the selected videos"), tint = MaterialTheme.colorScheme.primary)
+    }
+    if (ask) BatchSaveDialog(vm, videos) { ask = false }
+}
+
+/**
+ * The save of several videos at once, with the choices of the viewer's «Сохранить» applied to each: whole / each one's
+ * marked pieces, as shot / each one's own colour, sound on / off; camera files with colour downloaded first or read
+ * straight from the camera. Videos with nothing to save are skipped; nothing is overwritten.
+ */
+@Composable
+private fun BatchSaveDialog(vm: CameraController, videos: List<CameraFile>, onDismiss: () -> Unit) {
+    var marked by remember { mutableStateOf(false) }
+    var colour by remember { mutableStateOf(videos.any { vm.hasLook(it) }) }
+    var sound by remember { mutableStateOf(true) }
+    var direct by remember { mutableStateOf(false) }
+    val onCamera = videos.any { !it.isOnPhone }
+    val nothing = !marked && !colour && sound && !onCamera
+    @Composable
+    fun Choice(selected: Boolean, onClick: () -> Unit, label: String, note: String? = null) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(selected, onClick)
+            Column {
+                Text(label)
+                if (note != null) Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("Сохранить ${videos.size} видео", "Save ${videos.size} videos")) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Choice(!marked, { marked = false }, tr("Целиком", "Whole videos"))
+                Choice(marked, { marked = true }, tr("Только отмеченное", "Marked pieces only"), tr("у каждого — свои куски; без кусков — пропускается", "each its own pieces; one without any is skipped"))
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Choice(!colour, { colour = false }, tr("Как снято", "As shot"))
+                Choice(colour, { colour = true }, tr("С моим цветом", "With my colour"), tr("у каждого — свой; без своего цвета — как снято", "each its own; one without stays as shot"))
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Row(Modifier.fillMaxWidth().clickable { sound = !sound }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("Звук", "Sound"))
+                        Text(if (sound) tr("сохраняется", "kept") else tr("без звука — быстрее", "no sound — faster"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(sound, { sound = it })
+                }
+                if (onCamera && colour) {
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    Choice(!direct, { direct = false }, tr("Скачать оригиналы, потом сохранить", "Download the originals, then save"))
+                    Choice(direct, { direct = true }, tr("Прямо с камеры", "Straight from the camera"), tr("только нужное; камера на связи всё время", "only what is needed; the camera stays connected"))
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (nothing) tr("Все эти видео уже на телефоне.", "These videos are already on the phone.")
+                    else tr("По очереди, с общим «Стоп». Занятые имена получат номер — ничего не перезаписывается.", "One after another, one «Stop» for all. Taken names get a number — nothing is overwritten."),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton({ vm.saveBatch(videos, marked, colour, sound, direct); onDismiss() }, enabled = !nothing) { Text(tr("Сохранить", "Save")) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text(tr("Отмена", "Cancel")) } },
+    )
+}
+
+/** The copied colour (from the viewer's colour panel) onto all selected videos at once; shown while one is copied. */
+@Composable
+private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
+    if (vm.copiedLook == null || selection.none { it.kind == MediaKind.VIDEO }) return
+    IconButton(vm::pasteLookToSelected) {
+        Icon(Icons.Filled.ContentPaste, tr("Вставить цвет в выбранные видео", "Paste the colour into the selected videos"), tint = MaterialTheme.colorScheme.primary)
+    }
+}
+
 private fun Modifier.matchParentSizeOverlay(): Modifier = fillMaxSize().background(Color(0x33000000))
 
 @Composable
@@ -494,7 +642,23 @@ private fun Badge(text: String, modifier: Modifier) {
 private fun BottomPanel(vm: CameraController) {
     val progress = vm.download
     val selection = vm.selectedFiles
-    if (progress == null && vm.showsPhone) {
+    // Saving a video with its colour (from the viewer): its own bar, in percent.
+    vm.export?.let { e ->
+        Surface(tonalElevation = 3.dp) {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("Сохранение с цветом · ${e.name}", "Saving with colour · ${e.name}") + batchNote(vm), fontSize = 14.sp)
+                        Text("${e.percent} %", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(vm::cancelExport) { Text(tr("Стоп", "Stop")) }
+                }
+                LinearProgressIndicator(progress = { e.percent / 100f }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+            }
+        }
+        return
+    }
+    if (progress == null && (vm.showsPhone || (selection.isNotEmpty() && selection.all { it.isOnPhone }))) {
         // The phone list: a selection can be shared.
         if (selection.isEmpty()) return
         val context = LocalContext.current
@@ -504,6 +668,14 @@ private fun BottomPanel(vm: CameraController) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
+                PasteColour(vm, selection)
+                SaveSelected(vm, selection)
+                // Added files: off the list (they stay on the phone).
+                if (selection.all { it.isAdded }) {
+                    IconButton({ vm.removeAdded(selection) }) {
+                        Icon(Icons.Filled.PlaylistRemove, tr("Убрать из списка", "Take off the list"), tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
                 Button({ share(context, selection); vm.clearSelection() }) {
                     Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
@@ -520,7 +692,7 @@ private fun BottomPanel(vm: CameraController) {
                 progress != null -> {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(tr("Скачивание ${progress.index} из ${progress.count} · ${progress.name}", "Downloading ${progress.index} of ${progress.count} · ${progress.name}"), fontSize = 14.sp)
+                            Text(tr("Скачивание ${progress.index} из ${progress.count} · ${progress.name}", "Downloading ${progress.index} of ${progress.count} · ${progress.name}") + batchNote(vm), fontSize = 14.sp)
                             Text(
                                 progress.details(),
                                 fontSize = 12.sp,
@@ -540,6 +712,8 @@ private fun BottomPanel(vm: CameraController) {
                         tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}",
                         Modifier.weight(1f),
                     )
+                    PasteColour(vm, selection)
+                    SaveSelected(vm, selection)
                     Button({
                         val already = vm.selectedAlreadyDownloaded
                         if (already > 0) askAlready = already else vm.downloadSelected(overwrite = false)

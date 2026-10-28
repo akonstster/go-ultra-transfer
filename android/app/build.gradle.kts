@@ -12,8 +12,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.11"
+        versionCode = 12
+        versionName = "0.12"
     }
 
     buildTypes {
@@ -53,6 +53,9 @@ dependencies {
     // In-app preview of files still on the camera (the system player cannot reach the camera's Wi-Fi).
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
+    // Colour over I-Log videos in the viewer: a LUT, brightness, saturation (GL effects in the player).
+    implementation("androidx.media3:media3-effect:1.4.1")
+    implementation("androidx.media3:media3-transformer:1.4.1")
 
     testImplementation("junit:junit:4.13.2")
 }

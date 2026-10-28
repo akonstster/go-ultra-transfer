@@ -78,6 +78,127 @@ in the proto) even with marks set from the app; the marks appear only in the fin
 request's reply didn't show the recording at all — the status stays on BLE. Each mark from the app is logged
 («отметка на N с: поставлена»). JPG + DNG stay separate tiles (user's choice).
 
+**Colour for I-Log (viewing only, 28.10):** I-Log is told by the file itself: ExtraMetadata field 22, a string —
+«standard» / «I_Log» (compared on two real files 28.10; the proto's 212.8 color_mode is not sent by the GO Ultra, kept
+as a fallback) —
+from GetFileInfoList for camera files (`CameraFile.iLog`), from the trailer's 0x0101 record for phone copies
+(`LocalTrailer.Info.colorMode`, logged «цвет …: режим N»). I-Log videos get Insta360's «GO Ultra I-Log to Rec.709»
+(app assets, `luts/`, 33³, from Resolve; `CubeLut`) automatically; other videos no LUT. The «I-Log» / «Цвет» chip →
+`ColorPanel` (tabs «Свет и цвет» / «Плёнка»): LUT on/off + strength (I-Log), exposure, saturation, sharpness, film (any video).
+media3 `setVideoEffects` (media3-effect): the effect pipeline exists only if set before the player is prepared, so
+every video player gets it. SDR effects see gamma-encoded BT.709 (Builder default WORKING_COLOR_SPACE_DEFAULT — the
+javadoc's «linear» is stale), so the LUT gets I-Log as encoded. Exposure (stops, ×2^(ev/2.2) encoded) and saturation
+(factor around Rec.709 luma) are one `LiveColorMatrix` (`ColorMath`, unit-tested) read per frame — sliders apply live;
+LUT strength and the clipping stripes (`ClippingStripes`, own GLSL: max channel ≥ 0.98 red / ≤ 0.02 blue, diagonal
+stripes) rebuild the effect list (the stripes are a check, not a setting: not saved, off whenever the colour panel
+closes). Settings in prefs `look2_<name>` (the old `look_` held offsets). No frame after 5 s
+of playing with effects → shown without them. Controls only on a tap; the video loops while the colour panel is open.
+Sharpness: `Sharpen` (luma unsharp mask, 2 rings × 8 taps, threshold, capped). «Плёнка» tab: `FilmLook` (one GLSL
+pass after sharpening, all uniforms live) = `FilmMath` (unit-tested; the shader takes its constants by template, so they
+can't drift): warmth as a WB gain in light → per-channel print curve (log2 contrast ×(1+0.25·film) around 0.18, soft
+exponential shoulder from 0.7, print black 0.0008) → density (light × (1 − 0.3·film·sat²)) → split toning in YCbCr
+(teal in the low-mids, warm in the high-mids; black and white stay neutral) → skin: within ±25° of the 123° skin line
+the shot's hue is kept (warmth and toning don't reach it) and pulled up to 30 % towards the line. Halation: 3 rings × 8
+taps to 2.5 % of the height, randomly turned per pixel, red-orange, added in light before the curve. Grain: value noise
+on a 1080-line grid, two sizes, new per frame (`presentationTimeUs`), weighted to the mid-tones. Checked by compiling
+the shaders with glslangValidator and rendering them in headless Chromium WebGL on a test chart. `ColorLook` now holds
+11 values (`decode` still reads the 4- and 6-value forms). While the panel is open the video keeps the top 45 %, the
+sliders scroll, the top bar / ♥ column / chips hide and the pager is locked.
+Preview weight (phone 4K lagged, then failed): while playing, `Presentation.createForHeight` first in the chain brings
+the picture to 1080 lines (never upscales; the camera's LRV stays as is). `FilmLook.frames` counts frames drawn; 2-s
+windows below 80 % of the format's frame rate (or a player error while playing) step down 1080 → 720 → 540 + light
+halation / sharpening (`light` uniform: one ring of taps), logged «превью проще», label «упрощённо · 720p»; the colour
+is dropped only after the last step. The size is known before the player starts (`videoShortSide`, phone copies),
+so the effects aren't rebuilt as playback starts (a rebuild then left a swiped-to video without frames → «нет кадров за
+5 с»); pause / play only flips the `light` uniform. Paused, media3 1.4.1 with effects draws no new frame, not even after
+a seek to the same spot (and many 4K seeks hung the viewer): after a change (slider let go, panel opened / closed) the
+player plays muted until `FilmLook.frames` moves (≤ 0.4 s) and pauses again. Zoom resets when the panel opens / closes
+and when the page is swiped away.
+«Стиль» tab (was «Плёнка»): `FilmMath.Grade` holds every step (balance, flash, face lift / sky / vignette, print
+curve, density, silver-retention overlay, saturation per hue at 103° / 167° / 241° / 347° with cos⁴ weights, hue turns,
+shadow / mid / highlight toning, skin); `Looks.kt` builds it from the sliders and a preset × strength. Presets are
+models of published facts (ASC / AC articles, Codex, Technicolor, Apollo — sources in the KDoc), tuned by eye to one
+still per film sent by the user; not calibrated against frame statistics yet. Skin protection is always on: the mask
+is hue (full within ±15° of 123°, fading to ±45°) and colour relative to brightness (soft 0.04…0.12 up, 0.4…0.75
+down), so dark and light skins alike — wide soft edges, narrow ones showed as stripes on faces under Amélie; «Ровная кожа»
+pulls skin hues up to 60 % to the line. A preset can lower the guard (`skinGuard`, mixed by strength): Amélie has 0 —
+faces go golden with the rest, as in the film, and guarding against so strong a grade showed its edges. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
+Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
+Saving is one «Сохранить» (top bar for videos only) → `SaveDialog`: whole /
+marked pieces × as shot / with my colour × sound on / off (+ for a camera file with colour: download the original first, or straight
+from the camera). `CameraController.save` picks the way: whole as shot = download; pieces as shot = `saveClip`
+(no re-encoding, starts on key frames, `…_HL`); with colour = `exportWithColor` (media3-transformer 1.4.1, `…_COLOR` /
+`…_HL_COLOR`). Names via `saveName`; a taken name → replace / save separately. Export: `exportEffects` (the viewer's
+effects in full, no preview size / stripes, sharpening radius × lines / 1080), the original's size, frame rate, codec
+(H.265 if the original is, else H.264; the encoder factory falls back), bitrate (track, or file size / length; 20…200
+Mbit/s). Whole: one item, sound copied. Pieces: one clipped item each in a sequence, cut exactly (re-encoding anyway);
+the transformer makes the picture only (`setRemoveAudio`); the sound is joined by `ClipAudio` like a video
+editor's crossfade: at each join the first piece's sound runs 0.1 s past its end fading out while the next one's
+starts 0.1 s before its start fading in (constant power, window centred on the cut, narrowed to half a short piece;
+`AudioJoin`, unit-tested: as long as the picture, exact inside pieces), 10 ms fades at the clip's ends; decoded with
+MediaCodec from the original (phone copy or `session.clipSource`), encoded AAC-LC 256 kbit/s in memory, muxed with
+the picture (`MediaMuxer`, interleaved by time, rotation kept) straight into the gallery item. Without sound (`_MUTE`): clips
+leave the track out (`ClipMaker.join(withSound = false)`; the whole video as shot becomes such a copy instead of a
+download), the transformer removes it, pieces skip `ClipAudio`.
+with `DefaultMediaSourceFactory` over `CameraHttpDataSource` on the full file's URL (not `ProgressiveMediaSource`: it
+ignores the items' clipping — the whole picture came out) (Range reads, only what is needed);
+the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
+(own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit
+output: an I-Log file's 10 bits are not kept. The Insta360 trailer (marks) isn't carried over. Not on the phone yet.
+Colour copy / paste: icons over the video while the panel is open; `copiedLook` in prefs (`look_copied`), pasted as
+that video's look; in the gallery a selection gets a paste icon (`pasteLookToSelected`, videos only) and tiles with a
+look of their own show a palette mark (`hasLook`, redrawn via `lookVersion`). A save replacing a file forgets its
+thumbnail (`forgetThumbnail`; tiles also key on `localUri`). Saving a selection as a batch: to do.
+The viewer's effect list no longer changes while playing (turning the I-Log switch rebuilt it and stopped playback):
+`LiveLut` (the .cube as a 2D atlas texture, `CubeLut.atlas`, blue between two slices, red / green by the texture's
+filtering — matches a CPU trilinear lookup of the real table within 0.9 / 255), strength live (0 = off); the stripes
+(`ClippingStripes.on`) and before / after (`bypass` on each effect) are flags read per frame. Only a preview-size step
+rebuilds the list.
+Paused colour: `StillFrame` (GLSurfaceView over the player, `setZOrderMediaOverlay`) draws the frame at the paused
+position (`FrameReader.exact`, OPTION_CLOSEST, ≤ 1920 wide, upright; phone copy or the camera's LRV) through the
+player's own effect objects as `ColorStep`s (shader + `bind`; media3 runs them via `StepProgram`), ping-ponging two
+FBOs, redrawn when `LiveEdits.version` moves. The player draws nothing new while paused, and a frame caught half-way
+through its chain mixed old and new settings (before / after looked random: «то только стиль, то весь LUT»). The muted
+nudge stays only for a new player view (panel opened / closed) and an effect rebuild.
+Files added from the phone: the «Добавить с телефона» icon (Files tab) opens the system file picker
+(OpenMultipleDocuments, video/* and image/*); the app keeps the URIs (prefs `added_files`) with a persistable read
+permission — nothing copied. `CameraFile.ADDED_PREFIX` uris (`isAdded`), names kept apart («name (2).ext»), listed with
+the app's folder (`localFiles`), a folder badge; everything else (viewer, pieces, colour, save) as for phone copies.
+Video kinds by extension (mp4, mov, m4v, 3gp, mkv, webm). A file whose permission is gone drops off; «Убрать из списка»
+on a selection of added files only forgets them. Filters: all / photos / videos, then ♥, added, own colour, saved
+(…_HL / _COLOR / _MUTE) — shown when not empty. Thumbnails of picked files fall back to a frame / a small decode.
+Batch save: a selection's bottom bar has a save icon → `BatchSaveDialog` (whole / each one's pieces, as shot / each
+one's own colour, sound) → `saveBatch` runs `save` per video in turn (joins its job), skips videos with nothing to
+save, takes the next free name (never overwrites); «пачка i из n» on the bars, «Стоп» stops the batch.
+Gallery tiles of videos with a colour of their own show it: `tileImage` colours the thumbnail on the CPU (CubeLut.apply
+trilinear, ColorMath, FilmMath — no sharpening / halation / grain at that size), cached per look; tiles redraw on
+`lookVersion`.
+Performance review (phone laggy): tiles redraw only when their own video's colour changes (`lookKeys`, an in-memory
+name → look map, instead of a global counter that made every tile reload on each slider release); the colour is baked
+into a 17³ table once per look (`bake`) and thumbnails looked up in it without allocation, on at most two cores,
+cancelled with the tile; coloured tiles cached within 24 MB, one per file; filter counts and the selection are derived
+state. The paused still keeps one GL view for the whole pause (a new frame is swapped in), redraws on `LiveEdits` (a
+StateFlow, not a 16 ms poll), decodes one frame at a time after seeks settle (300 ms), and its frames no longer count as
+the player's. The still is no longer turned twice (the retriever turns frames by the video's rotation already).
+Added files: name, size, length fixed once when added (prefs file `added`), so the list comes up without reading the
+files; a file drops off only if it is gone or its permission was taken away; changes run one at a time. A batch
+counts only saves that got into the gallery.
+Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
+(NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
+the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /
+onUnavailable); one dropped before that is marked abandoned and taken back when the answer comes; a new request waits
+for the previous one's answer.
+Review fixes (after a Poco reboot while testing): a page's player prepares only when the page is on screen; the
+paused-frame nudge leaves a released player alone; the joined sound goes to `cacheDir/export.aac`, not the heap;
+codecs / extractors are released when setup fails; temp files are cleared at start; `lut()` parses once (Mutex) and
+fast; a LUT that fails to load plays the video as shot; pieces are clamped to the video's real length; «i» counts
+frames only for phone files (from the camera the extractor would read the frames' data over Wi-Fi); the
+notification's «Стоп» also stops a save with colour. Still: every video player carries the effect chain even with a
+plain look (the effects must exist before prepare for live sliders).
+«i» for videos: `streamInfo` (MediaExtractor on the phone copy, or the camera's index over Wi-Fi) — video codec, 8 / 10
+bit (codec profile), its bitrate; frame rate counted from frame times over the first 2 s; sound codec, kHz, channels,
+bitrate or «нет»; the whole file's bitrate from the retriever.
+
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
 
@@ -167,7 +288,16 @@ Suggested design (agree with the user first — they review UI decisions; see th
 
 ## How to build / test
 
-See `CLAUDE.md` → "Сборка Android" (JDK 17 path, `gradlew.bat assembleDebug`, adb install). The debug phone is a
+See `CLAUDE.md` → "Сборка Android" (JDK 17 path, `gradlew.bat assembleDebug`, adb install). `CLAUDE.md` lives only on
+the user's PC (gitignored), so cloud sessions don't see it: the steps to give the user (PowerShell, repo root
+`C:\Users\nonroot\myprojects\go-ultra-transfer`; adb is **not** on PATH):
+```
+git pull
+cd android
+.\gradlew.bat assembleDebug
+& C:\Users\nonroot\android-sdk\platform-tools\adb.exe install -r app\build\outputs\apk\debug\app-debug.apk
+```
+The debug phone is a
 Poco X3 (Android 12); the target is a Huawei Mate 80 Pro (logcat doesn't show app logs there — use log.txt).
 The camera must be connected **from our app over Wi-Fi** (live view on the "Камера" tab, or the file list) for TCP
 commands; the camera closes TCP when the user opens playback on the camera itself, and our app disconnects after

@@ -57,6 +57,15 @@ class FrameReader private constructor(private val retriever: MediaMetadataRetrie
         retriever.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, width, width * h / w)
     }.getOrNull()
 
+    /**
+     * The frame at exactly [ms] (decoded from the key frame before it: slower), its long side about [size] — the still
+     * the viewer's colour is shown on while paused. Upright already: the retriever turns frames by the video's rotation
+     * (turning it again laid a vertical video on its side).
+     */
+    fun exact(ms: Long, size: Int): Bitmap? = runCatching {
+        retriever.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST, size, size)
+    }.getOrNull()
+
     fun close() = retriever.release()
 
     companion object {

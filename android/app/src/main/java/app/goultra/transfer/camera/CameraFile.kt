@@ -9,7 +9,9 @@ enum class MediaKind { PHOTO, VIDEO }
  * A file on the camera card — or, with [localUri], its copy already in the phone's gallery (the Files tab without the
  * camera). Metadata comes from GetFileInfoList (ExtraMetadata):
  * 7 creation_time (yyyyMMddHHmmss, wrong for LIV), 9 file_size (approximate), 10 total_time (s),
- * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks).
+ * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks),
+ * 22 colour profile as text («standard», «I_Log» — GO Ultra fw 1.9.29, checked 28.10); 212 shooting_param_info
+ * {8 color_mode: 1 standard, 2 I-Log} in the proto, not sent by the GO Ultra (kept as a fallback).
  */
 data class CameraFile(
     val uri: String,
@@ -20,12 +22,20 @@ data class CameraFile(
     val fps: Int?,
     val created: LocalDateTime?,
     val firstFrameUs: Long? = null,
+    /** Colour profile (1 standard, 2 I-Log, see [colorMode]); null = not in the list (a phone copy: read from its trailer). */
+    val colorMode: Int? = null,
     /** content:// item of the downloaded copy, for a file listed from the phone. */
     val localUri: String? = null,
 ) {
     val isOnPhone: Boolean get() = localUri != null
+
+    /** Shot in I-Log, as the camera's list says; null = it doesn't say. */
+    val iLog: Boolean? get() = colorMode?.let { it == COLOR_MODE_ILOG }
     val name: String get() = uri.substringAfterLast('/')
-    val kind: MediaKind get() = if (name.endsWith(".mp4", ignoreCase = true)) MediaKind.VIDEO else MediaKind.PHOTO
+    val kind: MediaKind get() = if (name.substringAfterLast('.').lowercase() in VIDEO_EXTENSIONS) MediaKind.VIDEO else MediaKind.PHOTO
+
+    /** A file added from elsewhere on the phone (not the camera's, not saved by the app). */
+    val isAdded: Boolean get() = uri.startsWith(ADDED_PREFIX)
     val isLive: Boolean get() = name.startsWith("LIV_")
 
     /** The live photo's picture (LIV_….jpg) — its clip is LIV_….mp4 of the same name. */
@@ -35,6 +45,12 @@ data class CameraFile(
     val stem: String get() = name.substringBeforeLast('.')
 
     companion object {
+        /** Videos by their extension: the camera's .mp4, and what a phone file added to the list may be. */
+        val VIDEO_EXTENSIONS = setOf("mp4", "mov", "m4v", "3gp", "mkv", "webm")
+
+        /** [uri] prefix of files added from the phone (see [isAdded]). */
+        const val ADDED_PREFIX = "/added/"
+
         private val STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
         private val NAME_DATE = Regex("""_(\d{8})_(\d{6})_""")
 
@@ -57,7 +73,25 @@ data class CameraFile(
                 created = createdFromName(uri.substringAfterLast('/'))
                     ?: meta.field(7)?.varint?.let { parseStamp(it.toString()) },
                 firstFrameUs = meta.field(24)?.varint,
+                colorMode = colorMode(meta),
             )
         }
+
+        const val COLOR_MODE_STANDARD = 1
+        const val COLOR_MODE_ILOG = 2
+
+        /**
+         * The colour profile from ExtraMetadata: field 22 as text («standard» / «I_Log», what the GO Ultra writes),
+         * else 212 shooting_param_info → 8 color_mode (the proto's; 3 = Dolby). Null when neither is there.
+         */
+        fun colorMode(meta: List<PbField>): Int? = runCatching {
+            val profile = meta.field(22)?.string?.trim()
+            when {
+                profile == null -> meta.field(212)?.data?.pbFields()?.field(8)?.varint?.toInt()
+                profile.replace("_", "").replace("-", "").equals("ilog", ignoreCase = true) -> COLOR_MODE_ILOG
+                profile.equals("standard", ignoreCase = true) -> COLOR_MODE_STANDARD
+                else -> null
+            }
+        }.getOrNull()
     }
 }
