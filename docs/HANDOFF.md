@@ -85,8 +85,13 @@ from GetFileInfoList for camera files (`CameraFile.iLog`), from the trailer's 0x
 (`LocalTrailer.Info.colorMode`, logged «цвет …: режим N»). I-Log videos get Insta360's «GO Ultra I-Log to Rec.709»
 (app assets, `luts/`, 33³, from Resolve; `CubeLut`) automatically; other videos no LUT. The «I-Log» / «Цвет» chip →
 `ColorPanel`: LUT on/off + strength (I-Log), brightness, saturation (any video), per file in prefs (`look_<name>`).
-media3 `setVideoEffects` (media3-effect): the effect pipeline exists only if set before the player is prepared — on
-for I-Log files and files with settings; a first change on a plain video restarts the player at the same spot.
+media3 `setVideoEffects` (media3-effect): the effect pipeline exists only if set before the player is prepared, so
+every video player gets it. SDR effects see gamma-encoded BT.709 (Builder default WORKING_COLOR_SPACE_DEFAULT — the
+javadoc's «linear» is stale), so the LUT gets I-Log as encoded. Exposure (stops, ×2^(ev/2.2) encoded) and saturation
+(factor around Rec.709 luma) are one `LiveColorMatrix` (`ColorMath`, unit-tested) read per frame — sliders apply live;
+LUT strength and the clipping stripes (`ClippingStripes`, own GLSL: max channel ≥ 0.98 red / ≤ 0.02 blue, diagonal
+stripes) rebuild the effect list. Settings in prefs `look2_<name>` (the old `look_` held offsets). No frame after 5 s
+of playing with effects → shown without them. Controls only on a tap; the video loops while the colour panel is open.
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /

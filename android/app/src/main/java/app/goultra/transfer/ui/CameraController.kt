@@ -66,20 +66,20 @@ sealed interface ConnState {
 enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 
 /**
- * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; brightness
- * and saturation (−1…1, 0 = unchanged) for any video.
+ * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
+ * stops (−2…+2) and saturation as a factor (0 grey … 1 as shot … 2) for any video.
  */
-data class ColorLook(val lut: Boolean = true, val strength: Float = 1f, val brightness: Float = 0f, val saturation: Float = 0f) {
-    fun encode() = "$lut,$strength,$brightness,$saturation"
+data class ColorLook(val lut: Boolean = true, val strength: Float = 1f, val exposure: Float = 0f, val saturation: Float = 1f) {
+    fun encode() = "$lut,$strength,$exposure,$saturation"
 
     /** Nothing to change for a file in [iLog] or not. */
-    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && brightness == 0f && saturation == 0f
+    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f
 
     companion object {
         fun decode(s: String): ColorLook? {
             val p = s.split(',')
             if (p.size != 4) return null
-            return ColorLook(p[0] == "true", p[1].toFloatOrNull() ?: 1f, p[2].toFloatOrNull() ?: 0f, p[3].toFloatOrNull() ?: 0f)
+            return ColorLook(p[0] == "true", p[1].toFloatOrNull() ?: 1f, p[2].toFloatOrNull() ?: 0f, p[3].toFloatOrNull() ?: 1f)
         }
     }
 }
@@ -155,10 +155,19 @@ class CameraController(private val app: Application) {
     }
 
     /** A video's colour settings: null = shown as shot. Kept on the phone per file name. */
-    fun look(file: CameraFile): ColorLook? = prefs.getString("look_" + file.name, null)?.let(ColorLook::decode)
+    fun look(file: CameraFile): ColorLook? = prefs.getString("look2_" + file.name, null)?.let(ColorLook::decode)
 
     fun saveLook(file: CameraFile, look: ColorLook?) {
-        prefs.edit().apply { if (look == null) remove("look_" + file.name) else putString("look_" + file.name, look.encode()) }.apply()
+        prefs.edit().apply { if (look == null) remove("look2_" + file.name) else putString("look2_" + file.name, look.encode()) }.apply()
+    }
+
+    /** Clipping stripes over the video in the viewer (blown whites red, crushed blacks blue), for every video. */
+    var clipping by mutableStateOf(prefs.getBoolean("clipping", false))
+        private set
+
+    fun toggleClipping() {
+        clipping = !clipping
+        prefs.edit().putBoolean("clipping", clipping).apply()
     }
 
     fun toggleFavorite(file: CameraFile) {

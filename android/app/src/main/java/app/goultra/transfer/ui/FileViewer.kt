@@ -414,22 +414,24 @@ private fun VideoPreview(
         Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White, modifier = Modifier.padding(24.dp))
         return
     }
-    // Colour: an I-Log video gets Insta360's LUT on its own; brightness / saturation for any video. The player's effect
-    // pipeline exists only if set up before it starts, so it is there for I-Log files and for videos with settings
-    // (a first change on a plain video restarts the player at the same spot); then changes apply on the fly.
+    // Colour: every video goes through the player's effects (they exist only if set up before it starts):
+    // Insta360's LUT for I-Log files, exposure / saturation as a matrix the sliders change live, clipping stripes on
+    // demand. Only the LUT and the stripes rebuild the effects.
     val iLog by produceState<Boolean?>(null, file.uri, file.localUri) { value = vm.isILog(file) }
     val lut by produceState<CubeLut?>(null) { value = vm.lut() }
     var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
     val look = saved ?: ColorLook()
     var colorPanel by remember(file.uri) { mutableStateOf(false) }
     val ilog = iLog == true
-    if (iLog == null || (ilog && lut == null)) {
+    val table = lut
+    if (iLog == null || (ilog && table == null)) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
         return
     }
     // The effects didn't show a picture on this phone (or failed): the video is shown as shot.
     var effectsFailed by remember(file.uri) { mutableStateOf(false) }
-    val effects = (ilog || saved != null) && !effectsFailed
+    val effects = !effectsFailed
+    val matrix = remember(file.uri) { LiveColorMatrix(look.exposure, look.saturation) }
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
     fun dropEffects(why: String) {
@@ -439,7 +441,7 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(lut, ilog, look))
+            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, vm.clipping))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -458,16 +460,27 @@ private fun VideoPreview(
         }
     }
     DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
-    LaunchedEffect(player, look) { if (effects) player.setVideoEffects(colorEffects(lut, ilog, look)) }
-    // With effects: no frame after 3 s of playing means the picture doesn't come through — back to no effects.
+    // The LUT or the stripes changed: the effects again (not right after the player got them at its start).
+    val applied = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping)) }
+    LaunchedEffect(player, look.lut, look.strength, vm.clipping) {
+        val now = listOf(look.lut, look.strength, vm.clipping)
+        if (effects && now != applied[0]) {
+            applied[0] = now
+            player.setVideoEffects(colorEffects(table, ilog, look, matrix, vm.clipping))
+        }
+    }
+    LaunchedEffect(look.exposure, look.saturation) { matrix.set(look.exposure, look.saturation) }
+    // While setting the colour the video goes round, so the change is always in sight.
+    LaunchedEffect(player, colorPanel) { player.repeatMode = if (colorPanel) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
+    // With effects: no frame after 5 s of playing means the picture doesn't come through — back to no effects.
     LaunchedEffect(player) {
         if (!effects) return@LaunchedEffect
         var playedMs = 0
-        while (!firstFrame[0] && playedMs < 3_000) {
+        while (!firstFrame[0] && playedMs < 5_000) {
             delay(250)
-            if (player.isPlaying) playedMs += 250
+            if (player.isPlaying && player.playbackState == Player.STATE_READY) playedMs += 250
         }
-        if (!firstFrame[0]) dropEffects("нет кадров за 3 с")
+        if (!firstFrame[0]) dropEffects("нет кадров за 5 с")
     }
     // Swiped away: stop; swiped back: play on.
     LaunchedEffect(active) { if (active) player.play() else player.pause() }
@@ -585,7 +598,16 @@ private fun VideoPreview(
             },
         ) {
             AndroidView(
-                factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
+                // Controls only on a tap on the picture, not on their own when the video starts or a slider moves.
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        setShowNextButton(false)
+                        setShowPreviousButton(false)
+                        controllerAutoShow = false
+                        hideController()
+                    }
+                },
                 update = { view ->
                     // The player is made again when the colour effects start or stop: the view must follow it.
                     if (view.player !== player) view.player = player
@@ -635,8 +657,10 @@ private fun VideoPreview(
         }
         if (colorPanel && !editing) {
             ColorPanel(
-                ilog, look, saved != null, effectsFailed,
+                ilog, look, saved != null, effectsFailed, vm.clipping,
                 onLook = { saved = it; vm.saveLook(file, it) },
+                onLive = { ev, sat -> matrix.set(ev, sat) },
+                onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
                 onDone = { colorPanel = false },
             )
@@ -683,19 +707,23 @@ private fun VideoPreview(
     }
 }
 
-/** The player's effects for [look]: the LUT for an I-Log file, brightness, saturation; none = shown as shot. */
+/**
+ * The player's effects: Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure / saturation
+ * [matrix], the clipping stripes when on.
+ */
 @OptIn(UnstableApi::class)
-private fun colorEffects(lut: CubeLut?, iLog: Boolean, look: ColorLook): List<androidx.media3.common.Effect> {
+private fun colorEffects(lut: CubeLut?, iLog: Boolean, look: ColorLook, matrix: LiveColorMatrix, clipping: Boolean): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
     if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
-    if (look.brightness != 0f) out += androidx.media3.effect.Brightness(look.brightness)
-    if (look.saturation != 0f) out += androidx.media3.effect.HslAdjustment.Builder().adjustSaturation(look.saturation * 100f).build()
+    out += matrix
+    if (clipping) out += ClippingStripes()
     return out
 }
 
 /**
  * Colour while viewing (the file stays as shot). I-Log: Insta360's «I-Log → Rec.709» on / off and its strength; any
- * video: brightness, saturation. Settings are kept per video; «Сбросить» goes back to the default (I-Log: LUT on).
+ * video: exposure (stops) and saturation, seen as the slider moves; clipping stripes on / off. Settings are kept per
+ * video; «Сбросить» goes back to the default (I-Log: LUT on).
  */
 @Composable
 private fun ColorPanel(
@@ -703,7 +731,10 @@ private fun ColorPanel(
     look: ColorLook,
     changed: Boolean,
     failed: Boolean,
+    clipping: Boolean,
     onLook: (ColorLook) -> Unit,
+    onLive: (exposure: Float, saturation: Float) -> Unit,
+    onClipping: () -> Unit,
     onReset: () -> Unit,
     onDone: () -> Unit,
 ) {
@@ -718,12 +749,26 @@ private fun ColorPanel(
             }
             Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
         }
-        // Applied when a slider is let go (the LUT strength rebuilds the colour table).
+        // The LUT strength applies when the slider is let go (it rebuilds the colour table); exposure and saturation
+        // show as the slider moves.
         if (iLog && look.lut) {
             LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }) { onLook(look.copy(strength = it)) }
         }
-        LookSlider(tr("Яркость", "Brightness"), look.brightness, -0.5f..0.5f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(brightness = it)) }
-        LookSlider(tr("Насыщенность", "Saturation"), look.saturation, -1f..1f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(saturation = it)) }
+        LookSlider(
+            tr("Экспозиция", "Exposure"), look.exposure, -2f..2f, { "%+.1f EV".format(it) },
+            live = { onLive(it, look.saturation) },
+        ) { onLook(look.copy(exposure = it)) }
+        LookSlider(
+            tr("Насыщенность", "Saturation"), look.saturation, 0f..2f, { "${Math.round(it * 100)} %" },
+            live = { onLive(look.exposure, it) },
+        ) { onLook(look.copy(saturation = it)) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = clipping, onCheckedChange = { onClipping() })
+            Spacer(Modifier.width(10.dp))
+            Text(tr("Пересвет и провалы", "Clipping"), color = Color.White, fontSize = 13.sp)
+            Text(tr("  красным / синим", "  red / blue"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
+            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
+        }
         if (failed) {
             Text(
                 tr("Обработка цвета на этом телефоне не показала картинку — видео показано как снято.", "Colour processing showed no picture on this phone — the video is shown as shot."),
@@ -731,20 +776,24 @@ private fun ColorPanel(
                 fontSize = 12.sp,
             )
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
-            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
-        }
+        Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp)
     }
 }
 
-/** One colour setting: name, slider, value; [onSet] when the slider is let go. */
+/** One colour setting: name, slider, value; [live] as it moves, [onSet] when it is let go. */
 @Composable
-private fun LookSlider(name: String, value: Float, range: ClosedFloatingPointRange<Float>, label: (Float) -> String, onSet: (Float) -> Unit) {
+private fun LookSlider(
+    name: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    label: (Float) -> String,
+    live: (Float) -> Unit = {},
+    onSet: (Float) -> Unit,
+) {
     var v by remember(value) { mutableFloatStateOf(value) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(name, color = Color.White, fontSize = 13.sp, modifier = Modifier.width(104.dp))
-        Slider(v, { v = it }, Modifier.weight(1f), valueRange = range, onValueChangeFinished = { onSet(v) })
+        Slider(v, { v = it; live(it) }, Modifier.weight(1f), valueRange = range, onValueChangeFinished = { onSet(v) })
         Text(label(v), color = Color(0xCCFFFFFF), fontSize = 12.sp, modifier = Modifier.width(44.dp), textAlign = TextAlign.End)
     }
 }
