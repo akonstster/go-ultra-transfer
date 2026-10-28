@@ -10,7 +10,8 @@ enum class MediaKind { PHOTO, VIDEO }
  * camera). Metadata comes from GetFileInfoList (ExtraMetadata):
  * 7 creation_time (yyyyMMddHHmmss, wrong for LIV), 9 file_size (approximate), 10 total_time (s),
  * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks),
- * 212 shooting_param_info {8 color_mode: 1 standard, 2 I-Log, 3 Dolby}.
+ * 22 colour profile as text («standard», «I_Log» — GO Ultra fw 1.9.29, checked 28.10); 212 shooting_param_info
+ * {8 color_mode: 1 standard, 2 I-Log} in the proto, not sent by the GO Ultra (kept as a fallback).
  */
 data class CameraFile(
     val uri: String,
@@ -21,7 +22,7 @@ data class CameraFile(
     val fps: Int?,
     val created: LocalDateTime?,
     val firstFrameUs: Long? = null,
-    /** Metadata 212.8 color_mode (1 standard, 2 I-Log); null = not in the list (a file listed from the phone: read from its trailer). */
+    /** Colour profile (1 standard, 2 I-Log, see [colorMode]); null = not in the list (a phone copy: read from its trailer). */
     val colorMode: Int? = null,
     /** content:// item of the downloaded copy, for a file listed from the phone. */
     val localUri: String? = null,
@@ -67,10 +68,21 @@ data class CameraFile(
             )
         }
 
+        const val COLOR_MODE_STANDARD = 1
         const val COLOR_MODE_ILOG = 2
 
-        /** ExtraMetadata 212 shooting_param_info → 8 color_mode (1 standard, 2 I-Log, 3 Dolby), or null. */
-        fun colorMode(meta: List<PbField>): Int? =
-            runCatching { meta.field(212)?.data?.pbFields()?.field(8)?.varint?.toInt() }.getOrNull()
+        /**
+         * The colour profile from ExtraMetadata: field 22 as text («standard» / «I_Log», what the GO Ultra writes),
+         * else 212 shooting_param_info → 8 color_mode (the proto's; 3 = Dolby). Null when neither is there.
+         */
+        fun colorMode(meta: List<PbField>): Int? = runCatching {
+            val profile = meta.field(22)?.string?.trim()
+            when {
+                profile == null -> meta.field(212)?.data?.pbFields()?.field(8)?.varint?.toInt()
+                profile.replace("_", "").replace("-", "").equals("ilog", ignoreCase = true) -> COLOR_MODE_ILOG
+                profile.equals("standard", ignoreCase = true) -> COLOR_MODE_STANDARD
+                else -> null
+            }
+        }.getOrNull()
     }
 }

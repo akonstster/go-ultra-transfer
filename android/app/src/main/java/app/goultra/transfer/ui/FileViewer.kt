@@ -587,6 +587,8 @@ private fun VideoPreview(
             AndroidView(
                 factory = { ctx -> PlayerView(ctx).apply { this.player = player; setShowNextButton(false); setShowPreviousButton(false) } },
                 update = { view ->
+                    // The player is made again when the colour effects start or stop: the view must follow it.
+                    if (view.player !== player) view.player = player
                     view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size))
                     // Only the picture zooms, not the player's controls.
                     view.videoSurfaceView?.apply { scaleX = zoom; scaleY = zoom; translationX = shift.x; translationY = shift.y }

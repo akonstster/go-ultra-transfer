@@ -78,8 +78,9 @@ in the proto) even with marks set from the app; the marks appear only in the fin
 request's reply didn't show the recording at all — the status stays on BLE. Each mark from the app is logged
 («отметка на N с: поставлена»). JPG + DNG stay separate tiles (user's choice).
 
-**Colour for I-Log (viewing only, 28.10, not yet tested on a phone):** I-Log is told by the file itself:
-ExtraMetadata 212 shooting_param_info → 8 color_mode (1 standard, 2 I-Log, 3 Dolby; proto iliakonnov/insta360-nas) —
+**Colour for I-Log (viewing only, 28.10):** I-Log is told by the file itself: ExtraMetadata field 22, a string —
+«standard» / «I_Log» (compared on two real files 28.10; the proto's 212.8 color_mode is not sent by the GO Ultra, kept
+as a fallback) —
 from GetFileInfoList for camera files (`CameraFile.iLog`), from the trailer's 0x0101 record for phone copies
 (`LocalTrailer.Info.colorMode`, logged «цвет …: режим N»). I-Log videos get Insta360's «GO Ultra I-Log to Rec.709»
 (app assets, `luts/`, 33³, from Resolve; `CubeLut`) automatically; other videos no LUT. The «I-Log» / «Цвет» chip →
