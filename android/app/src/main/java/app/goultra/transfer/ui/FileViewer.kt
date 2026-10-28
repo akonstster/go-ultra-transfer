@@ -71,6 +71,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.SeekParameters
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
@@ -429,9 +433,14 @@ private fun VideoPreview(
     var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
     val look = saved ?: ColorLook()
     var colorPanel by remember(file.uri) { mutableStateOf(false) }
+    // A phone copy's size before the player starts, so its effects are made at the preview size from the first frame
+    // (changing them as playback starts could leave it without a picture). The camera's light copy is small anyway.
+    val knownLines by produceState<Int?>(if (file.isOnPhone) null else 0, file.localUri) {
+        if (file.isOnPhone) value = withContext(Dispatchers.IO) { videoShortSide(context, file.localUri) }
+    }
     val ilog = iLog == true
     val table = lut
-    if (iLog == null || (ilog && table == null)) {
+    if (iLog == null || (ilog && table == null) || knownLines == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
         return
     }
@@ -443,16 +452,16 @@ private fun VideoPreview(
     val filmLook = remember(file.uri) { FilmLook(look) }
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
-    // Preview weight. Playing, the effects work on a picture no bigger than the screen needs (PLAY_SIZES[level] lines,
-    // never upscaled); a phone that can't keep up goes a step lower, the last step with lighter halation and
-    // sharpening. Paused, the frame is done in full: settings are seen as they will be.
+    // Preview weight. The effects work on a picture no bigger than the screen needs (PLAY_SIZES[level] lines, never
+    // upscaled); a phone that can't keep up goes a step lower, the last step with lighter halation and sharpening
+    // while playing (paused, they are full again — a setting, not a new set of effects).
     var level by remember(file.uri) { mutableIntStateOf(0) }
     // «До / после» in the colour panel: the video as shot (the clipping stripes stay, they measure, not grade).
     var bypass by remember(file.uri) { mutableStateOf(false) }
     val bypassNow by rememberUpdatedState(bypass)
     var paused by remember(file.uri) { mutableStateOf(!active) }
-    var sourceLines by remember(file.uri) { mutableIntStateOf(0) } // the video's short side, once the player knows it
-    val previewLines = PLAY_SIZES[level].takeIf { !paused && sourceLines > it }
+    var sourceLines by remember(file.uri) { mutableIntStateOf(knownLines ?: 0) } // the video's short side
+    val previewLines = PLAY_SIZES[level].takeIf { sourceLines > it }
     val light = !paused && level == PLAY_SIZES.lastIndex
     fun stepDown(why: String): Boolean {
         if (level == PLAY_SIZES.lastIndex) return false
@@ -492,13 +501,23 @@ private fun VideoPreview(
         }
     }
     DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
-    // Paused, the player shows no new frame by itself: after a change the same frame is decoded and drawn again
-    // (from the key frame before it, so a moment later). Changes in a row make one redraw.
+    // Paused, the player draws no new frame — not even after a seek to the same spot (tried; many seeks of a 4K video
+    // hung the viewer). After a change (a slider let go, the panel opened / closed) it plays without sound until one new
+    // frame is drawn (at most 0.4 s) and pauses again: the picture moves on by a frame or two.
     var redraw by remember(player) { mutableIntStateOf(0) }
     LaunchedEffect(redraw) {
         if (redraw == 0) return@LaunchedEffect
-        delay(150)
-        if (!player.playWhenReady) player.seekTo(player.currentPosition)
+        delay(200)
+        if (player.playWhenReady || player.playbackState != Player.STATE_READY) return@LaunchedEffect
+        withContext(NonCancellable) {
+            val volume = player.volume
+            val drawn = filmLook.frames.get()
+            player.volume = 0f
+            player.play()
+            withTimeoutOrNull(400) { while (filmLook.frames.get() == drawn) delay(16) }
+            player.pause()
+            player.volume = volume
+        }
     }
     // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
     // start). After an error the player starts again with them.
@@ -548,7 +567,7 @@ private fun VideoPreview(
             delay(250)
             if (player.isPlaying && player.playbackState == Player.STATE_READY) playedMs += 250
         }
-        if (!firstFrame[0]) dropEffects("нет кадров за 5 с")
+        if (!firstFrame[0]) dropEffects("нет кадров за 5 с (превью ${previewLines ?: "полное"}, ступень $level, ${sourceLines} строк)")
     }
     // Swiped away: stop; swiped back: play on.
     LaunchedEffect(active) { if (active) player.play() else player.pause() }
@@ -579,7 +598,12 @@ private fun VideoPreview(
     LaunchedEffect(colouring) {
         onColouring(colouring)
         if (!colouring) bypass = false
+        // A new layout: back to the picture as it opens.
+        zoom = 1f
+        shift = Offset.Zero
     }
+    // Swiped away: the zoom too, so the file is as it opens when it comes back.
+    LaunchedEffect(active) { if (!active) { zoom = 1f; shift = Offset.Zero } }
     // The video's box changes size with the panel and gets a new view: paused, the same frame is drawn into it again.
     val shownColouring = remember(player) { booleanArrayOf(colouring) }
     LaunchedEffect(player, colouring) {
@@ -774,9 +798,9 @@ private fun VideoPreview(
                 Modifier.weight(1f),
                 ilog, look, saved != null, effectsFailed, vm.clipping,
                 onLook = { saved = it; vm.saveLook(file, it) },
-                onLive = { ev, sat -> matrix.set(ev, sat); redraw++ },
-                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius; redraw++ },
-                onFilmLive = { filmLook.set(it); redraw++ },
+                onLive = { ev, sat -> matrix.set(ev, sat) },
+                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius },
+                onFilmLive = filmLook::set,
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
             )
@@ -855,7 +879,23 @@ private fun colorEffects(
     return out
 }
 
-/** Preview sizes while playing (lines), from the first choice to the lightest. */
+/** The short side (px) of a video on the phone; 0 when it can't be read. */
+private fun videoShortSide(context: android.content.Context, uri: String?): Int {
+    if (uri == null) return 0
+    val r = android.media.MediaMetadataRetriever()
+    return try {
+        r.setDataSource(context, android.net.Uri.parse(uri))
+        val w = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        val h = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        minOf(w, h)
+    } catch (e: Exception) {
+        0
+    } finally {
+        r.release()
+    }
+}
+
+/** Preview sizes (lines), from the first choice to the lightest. */
 private val PLAY_SIZES = intArrayOf(1080, 720, 540)
 
 /**

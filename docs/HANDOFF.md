@@ -107,15 +107,12 @@ Preview weight (phone 4K lagged, then failed): while playing, `Presentation.crea
 the picture to 1080 lines (never upscales; the camera's LRV stays as is). `FilmLook.frames` counts frames drawn; 2-s
 windows below 80 % of the format's frame rate (or a player error while playing) step down 1080 → 720 → 540 + light
 halation / sharpening (`light` uniform: one ring of taps), logged «превью проще», label «упрощённо · 720p»; the colour
-is dropped only after the last step. Paused: no Presentation, full effects; after any change (slider, rebuild, panel
-open / close) the paused frame is redrawn by seeking to the same position (debounced 150 ms).
-Colour panel layout: the video keeps the top 45 % and the panel the rest. A SurfaceView keeps a paused picture where
-it was when its box resizes, so the PlayerView is made anew (`key(colouring)`, the old one lets go of the player in
-`onRelease`) and the paused frame is redrawn into it. Tried and dropped: a TextureView (`surface_type="texture_view"`
-let the gallery show through the whole dialog) and the panel over a full-size box with the picture moved up (small
-picture, broken drawing over the zoomed picture, errors on swiping). Before / after: the
-Compare icon over the video's top (next to «Готово», both there while the panel is open) rebuilds the effects with only the preview size and the clipping stripes (reset when the
-panel closes; the slowdown measure skips while bypassed).
+is dropped only after the last step. The size is known before the player starts (`videoShortSide`, phone copies),
+so the effects aren't rebuilt as playback starts (a rebuild then left a swiped-to video without frames → «нет кадров за
+5 с»); pause / play only flips the `light` uniform. Paused, media3 1.4.1 with effects draws no new frame, not even after
+a seek to the same spot (and many 4K seeks hung the viewer): after a change (slider let go, panel opened / closed) the
+player plays muted until `FilmLook.frames` moves (≤ 0.4 s) and pauses again. Zoom resets when the panel opens / closes
+and when the page is swiped away.
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
