@@ -556,7 +556,10 @@ private fun VideoPreview(
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
-                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) { seeks++ }
+                // Only a paused jump needs a new still (playing, the video goes round with the panel open).
+                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                    if (!playWhenReady) seeks++
+                }
                 override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                     if (videoSize.width > 0 && videoSize.height > 0) sourceLines = minOf(videoSize.width, videoSize.height)
                 }
@@ -701,12 +704,14 @@ private fun VideoPreview(
     // shows at once and in full (the player draws nothing new while paused).
     val stillAt = remember(player) { longArrayOf(0) }
     val still by produceState<android.graphics.Bitmap?>(null, colouring, paused, seeks, effects) {
-        value = null
-        if (colouring && paused && effects) {
-            delay(150) // a seek settles first
-            stillAt[0] = player.currentPosition
-            value = vm.stillFrame(file, stillAt[0])
+        if (!(colouring && paused && effects)) {
+            value = null
+            return@produceState
         }
+        // The last still stays up while the next is decoded; seeks in a row make one decode (after they settle).
+        delay(300)
+        val at = player.currentPosition
+        vm.stillFrame(file, at)?.let { stillAt[0] = at; value = it }
     }
     val stillSteps = remember(player) { listOfNotNull<ColorStep>(liveLut, matrix, sharpen, filmLook, stripes) }
     // No swiping to the next file while the timeline or the colour sliders own the gestures.

@@ -371,22 +371,21 @@ private fun FileGrid(vm: CameraController) {
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val listed = vm.listedFiles
-            val photos = listed.count { it.kind == MediaKind.PHOTO }
-            val videos = listed.size - photos
+            // Counted once per change of the list (vm.filterCounts), not on every tap.
+            val counts = vm.filterCounts
             val pick = { f: Filter -> vm.filter = f; vm.touch() }
-            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${listed.size}", "All ${listed.size}")) })
-            FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото $photos", "Photos $photos")) })
-            FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео $videos", "Videos $videos")) })
+            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${counts.all}", "All ${counts.all}")) })
+            FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото ${counts.photos}", "Photos ${counts.photos}")) })
+            FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео ${counts.videos}", "Videos ${counts.videos}")) })
             // The rest only when there is something in them (or picked).
             @Composable
             fun Extra(f: Filter, count: Int, label: String) {
                 if (count > 0 || vm.filter == f) FilterChip(vm.filter == f, { pick(f) }, { Text("$label $count") })
             }
-            Extra(Filter.FAVORITE, listed.count { it.name in vm.favorites }, "♥")
-            Extra(Filter.ADDED, listed.count { it.isAdded }, tr("Добавленные", "Added"))
-            Extra(Filter.COLOURED, listed.count { it.kind == MediaKind.VIDEO && vm.lookVersion >= 0 && vm.hasLook(it) }, tr("Свой цвет", "Own colour"))
-            Extra(Filter.SAVED, listed.count(vm::isSaved), tr("Сохранённые", "Saved"))
+            Extra(Filter.FAVORITE, counts.favorites, "♥")
+            Extra(Filter.ADDED, counts.added, tr("Добавленные", "Added"))
+            Extra(Filter.COLOURED, counts.coloured, tr("Свой цвет", "Own colour"))
+            Extra(Filter.SAVED, counts.saved, tr("Сохранённые", "Saved"))
         }
         LazyVerticalGrid(
             state = gridState,
@@ -407,12 +406,12 @@ private fun FileGrid(vm: CameraController) {
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         favorite = file.name in vm.favorites,
-                        coloured = file.kind == MediaKind.VIDEO && vm.lookVersion >= 0 && vm.hasLook(file),
+                        coloured = file.kind == MediaKind.VIDEO && vm.hasLook(file),
                         phoneOnly = file.isOnPhone && !vm.showsPhone,
                         added = file.isAdded,
                         // With the video's own colour on it; drawn again when a colour changes.
                         loadThumbnail = vm::tileImage,
-                        colourVersion = vm.lookVersion,
+                        colourKey = if (file.kind == MediaKind.VIDEO) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
                         // delete), so files only on the phone just open.
@@ -451,14 +450,14 @@ private fun FileTile(
     phoneOnly: Boolean,
     added: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
-    colourVersion: Int,
+    colourKey: String?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
     // Keyed by size too: a just-shot RAW gets its size a moment later, by then its paired .jpg (the preview) exists.
     // A just-taken shot may not be readable yet (the camera is still writing it): fresh files retry a few times.
     // And by the phone copy: a file saved again under the same name is a new gallery item.
-    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size, file.localUri, colourVersion) {
+    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size, file.localUri, colourKey) {
         val fresh = file.created?.isAfter(java.time.LocalDateTime.now().minusMinutes(10)) == true
         var attempt = 0
         while (true) {

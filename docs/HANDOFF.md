@@ -173,6 +173,16 @@ save, takes the next free name (never overwrites); «пачка i из n» on th
 Gallery tiles of videos with a colour of their own show it: `tileImage` colours the thumbnail on the CPU (CubeLut.apply
 trilinear, ColorMath, FilmMath — no sharpening / halation / grain at that size), cached per look; tiles redraw on
 `lookVersion`.
+Performance review (phone laggy): tiles redraw only when their own video's colour changes (`lookKeys`, an in-memory
+name → look map, instead of a global counter that made every tile reload on each slider release); the colour is baked
+into a 17³ table once per look (`bake`) and thumbnails looked up in it without allocation, on at most two cores,
+cancelled with the tile; coloured tiles cached within 24 MB, one per file; filter counts and the selection are derived
+state. The paused still keeps one GL view for the whole pause (a new frame is swapped in), redraws on `LiveEdits` (a
+StateFlow, not a 16 ms poll), decodes one frame at a time after seeks settle (300 ms), and its frames no longer count as
+the player's. The still is no longer turned twice (the retriever turns frames by the video's rotation already).
+Added files: name, size, length fixed once when added (prefs file `added`), so the list comes up without reading the
+files; a file drops off only if it is gone or its permission was taken away; changes run one at a time. A batch
+counts only saves that got into the gallery.
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
 (NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
 the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /

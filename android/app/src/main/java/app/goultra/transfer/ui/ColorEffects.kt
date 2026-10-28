@@ -16,6 +16,7 @@ import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.FilmMath
 import app.goultra.transfer.camera.Look
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.flow.update
 
 /** The whole frame, -1…1 in x and y, sampled 0…1. */
 private const val VERTEX = """#version 100
@@ -27,13 +28,12 @@ void main() {
 }
 """
 
-/** Bumped by every live setting that changes: a paused still ([StillRenderer]) redraws when it moves. */
+/** Bumped by every live setting that changes: a paused still ([StillRenderer]) redraws when it moves (observed, not polled). */
 object LiveEdits {
-    private val counter = AtomicInteger()
-    val version: Int get() = counter.get()
+    val version = kotlinx.coroutines.flow.MutableStateFlow(0)
 
     fun bump() {
-        counter.incrementAndGet()
+        version.update { it + 1 }
     }
 }
 
@@ -55,7 +55,12 @@ interface ColorStep {
 
 /** A [ColorStep] as one of media3's effects. */
 @OptIn(UnstableApi::class)
-private class StepProgram(useHdr: Boolean, private val step: ColorStep) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
+private class StepProgram(
+    useHdr: Boolean,
+    private val step: ColorStep,
+    /** After each frame the player draws (not the still's): FilmLook counts them. */
+    private val onDrawn: () -> Unit = {},
+) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
     private val glProgram = GlProgram(VERTEX, step.fragment).apply {
         setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
     }
@@ -75,6 +80,7 @@ private class StepProgram(useHdr: Boolean, private val step: ColorStep) : BaseGl
         step.bind(glProgram, resource, width, height, presentationTimeUs)
         glProgram.bindAttributesAndUniforms()
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        onDrawn()
     }
 
     override fun release() {
@@ -341,7 +347,7 @@ class FilmLook(look: ColorLook) : GlEffect, ColorStep {
         LiveEdits.bump()
     }
 
-    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = StepProgram(useHdr, this)
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = StepProgram(useHdr, this) { frames.incrementAndGet() }
 
     override val fragment get() = FILM
 
@@ -374,7 +380,6 @@ class FilmLook(look: ColorLook) : GlEffect, ColorStep {
         p.setFloatUniform("uLight", if (light) 1f else 0f)
         // A new grain pattern on each frame (about 30 a second), the same one for a paused frame.
         p.setFloatUniform("uFrame", ((timeUs / 33_333) % 997).toFloat())
-        frames.incrementAndGet()
     }
 
     private companion object {

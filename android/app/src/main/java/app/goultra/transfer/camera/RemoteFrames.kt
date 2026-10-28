@@ -58,14 +58,12 @@ class FrameReader private constructor(private val retriever: MediaMetadataRetrie
     }.getOrNull()
 
     /**
-     * The frame at exactly [ms] (decoded from the key frame before it: slower), turned upright, about [width] wide —
-     * the still the viewer's colour is shown on while paused.
+     * The frame at exactly [ms] (decoded from the key frame before it: slower), its long side about [size] — the still
+     * the viewer's colour is shown on while paused. Upright already: the retriever turns frames by the video's rotation
+     * (turning it again laid a vertical video on its side).
      */
-    fun exact(ms: Long, width: Int): Bitmap? = runCatching {
-        val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-        val frame = retriever.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST, width, width * h / w) ?: return@runCatching null
-        if (rotation == 0) frame
-        else Bitmap.createBitmap(frame, 0, 0, frame.width, frame.height, android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }, true)
+    fun exact(ms: Long, size: Int): Bitmap? = runCatching {
+        retriever.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST, size, size)
     }.getOrNull()
 
     fun close() = retriever.release()

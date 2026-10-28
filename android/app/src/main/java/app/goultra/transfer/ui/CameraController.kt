@@ -50,6 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.drop
 import androidx.compose.runtime.derivedStateOf
@@ -202,15 +203,20 @@ class CameraController(private val app: Application) {
 
     fun saveLook(file: CameraFile, look: ColorLook?) {
         prefs.edit().apply { if (look == null) remove("look2_" + file.name) else putString("look2_" + file.name, look.encode()) }.apply()
-        lookVersion++
+        lookKeys = if (look == null) lookKeys - file.name else lookKeys + (file.name to look.encode())
     }
 
-    /** Bumped on every colour change: the gallery's tiles redraw their colour mark. */
-    var lookVersion by mutableStateOf(0)
+    /**
+     * The videos with a colour of their own: name → the colour, encoded. In memory (read once), so the gallery asks it
+     * per tile for free, and a tile redraws only when its own video's colour changes.
+     */
+    var lookKeys by mutableStateOf(
+        prefs.all.mapNotNull { (k, v) -> if (k.startsWith("look2_") && v is String) k.removePrefix("look2_") to v else null }.toMap(),
+    )
         private set
 
     /** The video has a colour of its own set in the viewer. */
-    fun hasLook(file: CameraFile): Boolean = prefs.contains("look2_" + file.name)
+    fun hasLook(file: CameraFile): Boolean = file.name in lookKeys
 
     /** The copied colour onto every selected video (photos are left alone); how many got it. */
     fun pasteLookToSelected(): Int {
@@ -651,9 +657,24 @@ class CameraController(private val app: Application) {
             Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
             Filter.FAVORITE -> listedFiles.filter { it.name in favorites }
             Filter.ADDED -> listedFiles.filter { it.isAdded }
-            Filter.COLOURED -> listedFiles.filter { it.kind == MediaKind.VIDEO && lookVersion >= 0 && hasLook(it) }
+            Filter.COLOURED -> listedFiles.filter { it.kind == MediaKind.VIDEO && hasLook(it) }
             Filter.SAVED -> listedFiles.filter(::isSaved)
         }
+    }
+
+    /** The filter chips' counts, worked out once per change of the list, favorites or colours (not per tap). */
+    data class FilterCounts(val all: Int, val photos: Int, val videos: Int, val favorites: Int, val added: Int, val coloured: Int, val saved: Int)
+
+    val filterCounts: FilterCounts by derivedStateOf {
+        val l = listedFiles
+        val photos = l.count { it.kind == MediaKind.PHOTO }
+        FilterCounts(
+            l.size, photos, l.size - photos,
+            l.count { it.name in favorites },
+            l.count { it.isAdded },
+            l.count { it.kind == MediaKind.VIDEO && hasLook(it) },
+            l.count(::isSaved),
+        )
     }
 
     /** A file the app saved: a clip of pieces, a copy with colour or without sound. */
@@ -671,7 +692,31 @@ class CameraController(private val app: Application) {
     var addedFiles by mutableStateOf<List<CameraFile>>(emptyList())
         private set
 
-    private fun addedUris(): Set<String> = prefs.getStringSet("added_files", emptySet()).orEmpty()
+    /**
+     * Added files, one entry each: uri → «name, size, length, width, height, modified», all read once when added. The
+     * name is fixed then (kept apart from every name in the list: colours, pieces and favorites go by name), so the
+     * list comes up without reading the files again.
+     */
+    private val addedStore = app.getSharedPreferences("added", android.content.Context.MODE_PRIVATE)
+    private val addedLock = kotlinx.coroutines.sync.Mutex()
+
+    private fun storedAdded(): List<CameraFile> = addedStore.all.mapNotNull { (uri, v) ->
+        val f = (v as? String)?.split('\t') ?: return@mapNotNull null
+        if (f.size < 6) return@mapNotNull null
+        val name = f[0]
+        CameraFile(
+            uri = CameraFile.ADDED_PREFIX + name,
+            size = f[1].toLongOrNull(),
+            durationSec = f[2].toIntOrNull(),
+            width = f[3].toIntOrNull(),
+            height = f[4].toIntOrNull(),
+            fps = null,
+            created = CameraFile.createdFromName(name) ?: f[5].toLongOrNull()?.let {
+                java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
+            },
+            localUri = uri,
+        )
+    }
 
     /**
      * Adds [uris] to the list — not copied: the app keeps the link and a lasting permission to read it (so they stay
@@ -679,99 +724,129 @@ class CameraController(private val app: Application) {
      */
     fun addFiles(uris: List<android.net.Uri>) {
         if (uris.isEmpty()) return
-        for (u in uris) {
-            runCatching { app.contentResolver.takePersistableUriPermission(u, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-                .onFailure { log("добавить ${u.lastPathSegment}: нет постоянного доступа (${it.message})") }
+        scope.launch {
+            val added = addedLock.withLock {
+                withContext(Dispatchers.IO) {
+                    val taken = (phoneFiles.map { it.name } + files.map { it.name } + storedAdded().map { it.name }).toMutableSet()
+                    var count = 0
+                    for (u in uris) {
+                        if (addedStore.contains(u.toString())) continue
+                        runCatching { app.contentResolver.takePersistableUriPermission(u, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                            .onFailure { log("добавить ${u.lastPathSegment}: нет постоянного доступа (${it.message})") }
+                        val entry = runCatching { describeAdded(u, taken) }.onFailure { log("добавить ${u.lastPathSegment}: ${it.message}") }.getOrNull() ?: continue
+                        taken += entry.first
+                        addedStore.edit().putString(u.toString(), entry.second).apply()
+                        count++
+                    }
+                    count
+                }
+            }
+            addedFiles = storedAdded()
+            message = tr("Добавлено: $added", "Added: $added")
         }
-        prefs.edit().putStringSet("added_files", addedUris() + uris.map { it.toString() }).apply()
-        loadAddedFiles()
-        message = tr("Добавлено: ${uris.size}", "Added: ${uris.size}")
     }
 
     /** Takes [files] off the list (only the app forgets them: nothing is deleted from the phone). */
     fun removeAdded(files: List<CameraFile>) {
         val gone = files.filter { it.isAdded }.mapNotNull { it.localUri }.toSet()
         if (gone.isEmpty()) return
-        for (u in gone) runCatching { app.contentResolver.releasePersistableUriPermission(android.net.Uri.parse(u), android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        prefs.edit().putStringSet("added_files", addedUris() - gone).apply()
         files.forEach { selected.remove(it.name) }
-        loadAddedFiles()
-        message = tr("Убрано из списка: ${gone.size} (на телефоне файлы остались)", "Taken off the list: ${gone.size} (the files stay on the phone)")
-    }
-
-    /**
-     * The added files as list entries: name, size, date from the picker's provider; a video's length and size read from
-     * the file. One whose permission is gone (the file deleted or moved) drops off the list.
-     */
-    private fun loadAddedFiles() {
         scope.launch {
-            val uris = addedUris()
-            val (found, lost) = withContext(Dispatchers.IO) {
-                val found = mutableListOf<CameraFile>()
-                val lost = mutableSetOf<String>()
-                val names = mutableSetOf<String>()
-                for (s in uris) {
-                    val f = runCatching { addedFile(android.net.Uri.parse(s), names) }.getOrNull()
-                    if (f == null) lost += s else { found += f; names += f.name }
-                }
-                found to lost
-            }
-            if (lost.isNotEmpty()) {
-                log("добавленные файлы: недоступно ${lost.size} — убраны из списка")
-                prefs.edit().putStringSet("added_files", addedUris() - lost).apply()
-            }
-            addedFiles = found
+            addedLock.withLock { forgetAdded(gone) }
+            addedFiles = storedAdded()
+            message = tr("Убрано из списка: ${gone.size} (на телефоне файлы остались)", "Taken off the list: ${gone.size} (the files stay on the phone)")
         }
     }
 
-    /** One added file, its name kept apart from [taken] ones (two «video.mp4» from two folders). */
-    private fun addedFile(uri: android.net.Uri, taken: Set<String>): CameraFile? {
+    private fun forgetAdded(uris: Set<String>) {
+        for (u in uris) runCatching { app.contentResolver.releasePersistableUriPermission(android.net.Uri.parse(u), android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        addedStore.edit().apply { uris.forEach(::remove) }.apply()
+    }
+
+    /**
+     * The list from what was stored (no reading of the files); then each one checked quietly: one whose file is gone or
+     * whose permission was taken away drops off — a passing error (a card not mounted yet) leaves it be.
+     */
+    private fun loadAddedFiles() {
+        scope.launch {
+            addedLock.withLock {
+                // Files added by the first version of this (a plain set of links): described now, once.
+                val old = prefs.getStringSet("added_files", null)
+                if (old != null) {
+                    withContext(Dispatchers.IO) {
+                        val taken = storedAdded().map { it.name }.toMutableSet()
+                        for (u in old) {
+                            if (addedStore.contains(u)) continue
+                            runCatching { describeAdded(android.net.Uri.parse(u), taken) }.getOrNull()?.let { (name, line) ->
+                                taken += name
+                                addedStore.edit().putString(u, line).apply()
+                            }
+                        }
+                    }
+                    prefs.edit().remove("added_files").apply()
+                }
+                addedFiles = storedAdded()
+                val lost = withContext(Dispatchers.IO) {
+                    addedStore.all.keys.filter { u ->
+                        try {
+                            app.contentResolver.openFileDescriptor(android.net.Uri.parse(u), "r")?.close()
+                            false
+                        } catch (e: SecurityException) {
+                            true
+                        } catch (e: java.io.FileNotFoundException) {
+                            true
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }.toSet()
+                }
+                if (lost.isNotEmpty()) {
+                    log("добавленные файлы: недоступно ${lost.size} — убраны из списка")
+                    forgetAdded(lost)
+                    addedFiles = storedAdded()
+                }
+            }
+        }
+    }
+
+    /** An added file's name (kept apart from [taken]) and its stored line: name, size, length, width, height, modified. */
+    private fun describeAdded(uri: android.net.Uri, taken: Set<String>): Pair<String, String> {
         var name: String? = null
         var size: Long? = null
         var modified: Long? = null
         app.contentResolver.query(uri, null, null, null, null)?.use { c ->
-            if (!c.moveToFirst()) return null
+            require(c.moveToFirst()) { "пустой ответ" }
             fun col(n: String) = c.getColumnIndex(n).takeIf { it >= 0 && !c.isNull(it) }
             name = col(android.provider.OpenableColumns.DISPLAY_NAME)?.let(c::getString)
             size = col(android.provider.OpenableColumns.SIZE)?.let(c::getLong)
             modified = col(android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)?.let(c::getLong)
-        } ?: return null
-        var shown = name ?: uri.lastPathSegment ?: return null
+        } ?: error("нет ответа")
+        val base = (name ?: uri.lastPathSegment ?: "file").replace('/', '_').replace('\t', ' ')
+        var shown = base
         var n = 2
-        while (shown in taken) shown = (name ?: "file").let { it.substringBeforeLast('.') + " ($n)." + it.substringAfterLast('.') }.also { n++ }
-        var file = CameraFile(
-            uri = CameraFile.ADDED_PREFIX + shown,
-            size = size,
-            durationSec = null,
-            width = null,
-            height = null,
-            fps = null,
-            created = CameraFile.createdFromName(shown) ?: modified?.let {
-                java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
-            },
-            localUri = uri.toString(),
-        )
-        if (file.kind == MediaKind.VIDEO) {
+        while (shown in taken) shown = base.substringBeforeLast('.') + " (${n++})." + base.substringAfterLast('.')
+        var duration: Int? = null
+        var w: Int? = null
+        var h: Int? = null
+        if (shown.substringAfterLast('.').lowercase() in CameraFile.VIDEO_EXTENSIONS) {
             val r = android.media.MediaMetadataRetriever()
             try {
                 r.setDataSource(app, uri)
                 fun meta(k: Int) = r.extractMetadata(k)
-                file = file.copy(
-                    durationSec = meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { ((it + 500) / 1000).toInt() },
-                    width = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull(),
-                    height = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull(),
-                )
+                duration = meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { ((it + 500) / 1000).toInt() }
+                w = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                h = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
             } catch (e: RuntimeException) {
                 log("добавленное видео $shown: ${e.message}")
             } finally {
                 r.release()
             }
         }
-        return file
+        return shown to listOf(shown, size ?: "", duration ?: "", w ?: "", h ?: "", modified ?: "").joinToString("\t")
     }
 
     /** Selected files of the list on screen: the camera's card, or the phone's copies (for sharing). */
-    val selectedFiles: List<CameraFile> get() = listedFiles.filter { it.name in selected }
+    val selectedFiles: List<CameraFile> by derivedStateOf { listedFiles.filter { it.name in selected } }
 
     // ---------- camera info (menu ⋮ → «Камера») ----------
 
@@ -2274,43 +2349,95 @@ class CameraController(private val app: Application) {
         return bitmap.asImageBitmap().also { memCache.put(file.name, it) }
     }
 
-    private val colouredThumbs = LruCache<String, ImageBitmap>(200)
+    /** Coloured tiles: per file its colour and picture, kept within 24 MB (one version per file). */
+    private val colouredThumbs = object : LruCache<String, Pair<String, ImageBitmap>>(24 shl 20) {
+        override fun sizeOf(key: String, value: Pair<String, ImageBitmap>) = value.second.width * value.second.height * 4
+    }
+
+    /** A colour baked into a small 3D table (see [bake]), per colour and LUT. */
+    private val bakedColours = LruCache<String, IntArray>(32)
+
+    /** Colouring tiles takes at most two cores: the gallery stays smooth while they come. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val tileWork = Dispatchers.Default.limitedParallelism(2)
 
     /**
      * A tile's picture: the thumbnail, and for a video with a colour of its own that colour on it — the LUT (I-Log),
-     * exposure / saturation and the «Стиль» grade, worked out on the CPU with the same math as the shaders (FilmMath,
-     * CubeLut.apply; sharpening, halation and grain don't show at this size). Cached per colour.
+     * exposure / saturation and the «Стиль» grade, the same math as the shaders (sharpening, halation and grain don't
+     * show at this size). The colour is baked once into a 17³ table and the thumbnail looked up in it.
      */
     suspend fun tileImage(file: CameraFile): ImageBitmap? {
         val base = thumbnail(file) ?: return null
         if (file.kind != MediaKind.VIDEO) return base
-        val look = look(file) ?: return base
-        val key = file.name + "|" + look.encode()
-        colouredThumbs.get(key)?.let { return it }
-        val table = if (look.lut && look.strength > 0f && isILog(file)) lut() else null
-        return withContext(Dispatchers.Default) {
-            runCatching { colourBitmap(base.asAndroidBitmap(), look, table).asImageBitmap() }
-                .onFailure { log("превью с цветом ${file.name}: ${it.message}") }
-                .getOrNull()
-        }?.also { colouredThumbs.put(key, it) } ?: base
+        val key = lookKeys[file.name] ?: return base
+        colouredThumbs.get(file.name)?.takeIf { it.first == key }?.let { return it.second }
+        val look = ColorLook.decode(key) ?: return base
+        val iLog = look.lut && look.strength > 0f && isILog(file)
+        val table = if (iLog) lut() else null
+        val coloured = withContext(tileWork) {
+            val bakeKey = key + "|" + (table != null)
+            val baked = bakedColours.get(bakeKey) ?: bake(look, table).also { bakedColours.put(bakeKey, it) }
+            colourBitmap(base.asAndroidBitmap(), baked)
+        }.asImageBitmap()
+        colouredThumbs.put(file.name, key to coloured)
+        return coloured
     }
 
-    private fun colourBitmap(src: Bitmap, look: ColorLook, lut: CubeLut?): Bitmap {
-        val bmp = src.copy(Bitmap.Config.ARGB_8888, true)
-        val px = IntArray(bmp.width * bmp.height)
-        bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+    private val bakeSize = 17
+
+    /** [look] (with Insta360's [lut] for I-Log) for every colour of a 17³ grid, as 0xRRGGBB. */
+    private fun bake(look: ColorLook, lut: CubeLut?): IntArray {
+        val n = bakeSize
         val matrix = if (look.exposure != 0f || look.saturation != 1f) ColorMath.matrix(look.exposure, look.saturation) else null
         val grade = if (look.hasStyle) Look.grade(Look.of(look.preset), look.presetStrength, look.film, look.warmth, look.skin) else null
-        for (i in px.indices) {
-            val p = px[i]
-            var c = floatArrayOf(((p shr 16) and 0xFF) / 255f, ((p shr 8) and 0xFF) / 255f, (p and 0xFF) / 255f)
+        val out = IntArray(n * n * n)
+        for (b in 0 until n) for (g in 0 until n) for (r in 0 until n) {
+            var c = floatArrayOf(r / (n - 1f), g / (n - 1f), b / (n - 1f))
             if (lut != null) c = lut.apply(c, look.strength)
             if (matrix != null) c = ColorMath.apply(matrix, c).let { v -> FloatArray(3) { v[it].coerceIn(0f, 1f) } }
             if (grade != null) c = FilmMath.apply(c, grade)
-            fun b(v: Float) = Math.round(v.coerceIn(0f, 1f) * 255f)
-            px[i] = (p and -0x1000000) or (b(c[0]) shl 16) or (b(c[1]) shl 8) or b(c[2])
+            fun q(v: Float) = Math.round(v.coerceIn(0f, 1f) * 255f)
+            out[r + n * (g + n * b)] = (q(c[0]) shl 16) or (q(c[1]) shl 8) or q(c[2])
         }
-        bmp.setPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+        return out
+    }
+
+    /** [src] through the [baked] table (trilinear), no allocation per pixel; stops when the tile's work is cancelled. */
+    private suspend fun colourBitmap(src: Bitmap, baked: IntArray): Bitmap {
+        val bmp = src.copy(Bitmap.Config.ARGB_8888, true)
+        val w = bmp.width
+        val px = IntArray(w * bmp.height)
+        bmp.getPixels(px, 0, w, 0, 0, w, bmp.height)
+        val n = bakeSize
+        val k = (n - 1) / 255f
+        for (i in px.indices) {
+            if (i % (w * 16) == 0) kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val p = px[i]
+            val fr = ((p shr 16) and 0xFF) * k
+            val fg = ((p shr 8) and 0xFF) * k
+            val fb = (p and 0xFF) * k
+            val r0 = minOf(fr.toInt(), n - 2)
+            val g0 = minOf(fg.toInt(), n - 2)
+            val b0 = minOf(fb.toInt(), n - 2)
+            val tr = fr - r0
+            val tg = fg - g0
+            val tb = fb - b0
+            var or = 0f
+            var og = 0f
+            var ob = 0f
+            for (corner in 0..7) {
+                val dr = corner and 1
+                val dg = (corner shr 1) and 1
+                val db = corner shr 2
+                val wgt = (if (dr == 1) tr else 1 - tr) * (if (dg == 1) tg else 1 - tg) * (if (db == 1) tb else 1 - tb)
+                val v = baked[(r0 + dr) + n * ((g0 + dg) + n * (b0 + db))]
+                or += wgt * ((v shr 16) and 0xFF)
+                og += wgt * ((v shr 8) and 0xFF)
+                ob += wgt * (v and 0xFF)
+            }
+            px[i] = (p and -0x1000000) or (Math.round(or).coerceIn(0, 255) shl 16) or (Math.round(og).coerceIn(0, 255) shl 8) or Math.round(ob).coerceIn(0, 255)
+        }
+        bmp.setPixels(px, 0, w, 0, 0, w, bmp.height)
         return bmp
     }
 
@@ -2459,14 +2586,19 @@ class CameraController(private val app: Application) {
      * The frame of [file] at exactly [ms], upright, about 1920 px wide — the still the colour is shown on while paused
      * (the phone's copy, or the camera's light copy the viewer plays). Null when it can't be read.
      */
-    suspend fun stillFrame(file: CameraFile, ms: Long): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
-        val reader = openFrameReader(file) ?: return@withContext null
-        try {
-            reader.exact(ms, 1920)
-        } finally {
-            reader.close()
+    suspend fun stillFrame(file: CameraFile, ms: Long): android.graphics.Bitmap? = stillLock.withLock {
+        // One decode at a time: a native decode can't be stopped half-way, so they mustn't pile up.
+        withContext(Dispatchers.IO) {
+            val reader = openFrameReader(file) ?: return@withContext null
+            try {
+                reader.exact(ms, 1920)
+            } finally {
+                reader.close()
+            }
         }
     }
+
+    private val stillLock = kotlinx.coroutines.sync.Mutex()
 
     private suspend fun openFrameReader(file: CameraFile): FrameReader? = runCatching {
         file.localUri?.let { RemoteFrames.localReader(app, android.net.Uri.parse(it)) }
@@ -2579,6 +2711,7 @@ class CameraController(private val app: Application) {
                             .filter { k -> pieces.any { k >= it.startMs - 5_000 && k <= it.endMs!! } }.joinToString(),
                 )
                 forgetThumbnail(name)
+                lastSaveOk = true
                 loadPhoneFiles()
             } catch (e: CancellationException) {
                 lastResult = tr("Клип не сохранён: остановлено", "Clip not saved: stopped")
@@ -2726,6 +2859,7 @@ class CameraController(private val app: Application) {
                 )
                 lastResult = tr("Сохранено: $name", "Saved: $name")
                 forgetThumbnail(name)
+                lastSaveOk = true
                 loadPhoneFiles()
             } catch (e: CancellationException) {
                 lastResult = tr("Не сохранено: остановлено", "Not saved: stopped")
@@ -2749,6 +2883,9 @@ class CameraController(private val app: Application) {
         private set
     private var batchJob: Job? = null
 
+    /** Set by a clip or a save with colour that got into the gallery (a batch counts by it). */
+    private var lastSaveOk = false
+
     /**
      * The same save for every video of [files], one after another: [marked] = each one's own pieces (edited, or the
      * camera's marks; a video without any is skipped), [colour] = each one's own colour (one without stays as shot),
@@ -2762,6 +2899,7 @@ class CameraController(private val app: Application) {
         selected.clear()
         batchJob = scope.launch {
             var started = 0
+            var failed = 0
             var skipped = 0
             try {
                 for ((i, listed) in videos.withIndex()) {
@@ -2781,12 +2919,18 @@ class CameraController(private val app: Application) {
                         while (nameTaken(saveName(file, pieces != null, look != null, !sound, n))) n++
                         saveName(file, pieces != null, look != null, !sound, n)
                     }
+                    lastSaveOk = false
+                    val before = downloadJob to exportJob
                     save(file, pieces, look, iLog, name, direct, sound)
+                    // Nothing started (no camera, something else running): a failure, not a success.
+                    if (downloadJob === before.first && exportJob === before.second) { failed++; continue }
                     downloadJob?.join()
                     exportJob?.join()
-                    started++
+                    val ok = if (download) withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) != null } else lastSaveOk
+                    if (ok) started++ else failed++
                 }
-                lastResult = tr("Пачка готова: $started из ${videos.size}", "Batch done: $started of ${videos.size}") +
+                lastResult = tr("Пачка готова: сохранено $started из ${videos.size}", "Batch done: $started of ${videos.size} saved") +
+                    (if (failed > 0) tr(", не удалось $failed (см. журнал)", ", $failed failed (see the log)") else "") +
                     (if (skipped > 0) tr(", пропущено $skipped (нечего сохранять)", ", $skipped skipped (nothing to save)") else "")
             } catch (e: CancellationException) {
                 lastResult = tr("Пачка остановлена: сделано $started из ${videos.size}", "Batch stopped: $started of ${videos.size} done")

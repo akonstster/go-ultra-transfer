@@ -14,7 +14,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.UnstableApi
-import kotlinx.coroutines.delay
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -54,8 +53,12 @@ void main() {
  * [frame] in one go whenever a setting changes ([LiveEdits]); the picture is fitted into the view like the player's.
  */
 @OptIn(UnstableApi::class)
-private class StillRenderer(private val frame: Bitmap, private val steps: List<ColorStep>, private val timeUs: Long) :
+private class StillRenderer(first: Bitmap, private val steps: List<ColorStep>, @Volatile var timeUs: Long) :
     GLSurfaceView.Renderer {
+    /** The frame to show; a new one (after a seek) replaces the old in the same view. */
+    @Volatile var next: Bitmap = first
+    private var frame: Bitmap = first
+    private var uploaded: Bitmap? = null
     private var input = 0
     private val targets = IntArray(2)
     private val buffers = IntArray(2)
@@ -78,17 +81,32 @@ private class StillRenderer(private val frame: Bitmap, private val steps: List<C
         setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
     }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        input = texture()
-        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, frame, 0)
-        GLES20.glGenFramebuffers(2, buffers, 0)
-        for (i in 0..1) {
-            targets[i] = texture()
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, frame.width, frame.height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, buffers[i])
-            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, targets[i], 0)
+    /** [next] into the input texture, the two buffers sized to it. */
+    private fun upload() {
+        val f = next
+        if (f === uploaded) return
+        val resize = uploaded?.let { it.width != f.width || it.height != f.height } ?: true
+        frame = f
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, input)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, f, 0)
+        if (resize) {
+            for (i in 0..1) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, targets[i])
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, f.width, f.height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, buffers[i])
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, targets[i], 0)
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        uploaded = f
+    }
+
+    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        // A new context (first, or after the surface was lost): everything made again.
+        uploaded = null
+        input = texture()
+        GLES20.glGenFramebuffers(2, buffers, 0)
+        for (i in 0..1) targets[i] = texture()
         programs = steps.map { program(STEP_VERTEX, it.fragment) }
         resources = IntArray(steps.size) { steps[it].create() }
         screen = program(SCREEN_VERTEX, COPY)
@@ -100,6 +118,7 @@ private class StillRenderer(private val frame: Bitmap, private val steps: List<C
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        upload()
         // Each step from the last result into the other buffer.
         var source = input
         steps.forEachIndexed { i, step ->
@@ -130,24 +149,30 @@ private class StillRenderer(private val frame: Bitmap, private val steps: List<C
 }
 
 /**
- * [frame] (the paused frame, as shot) through [steps] over the player, redrawn as soon as a setting moves; zoomed and
- * moved like the player's picture ([zoom], [shift]).
+ * [frame] (the paused frame, as shot) through [steps] over the player, redrawn when a setting moves ([LiveEdits]) or a
+ * new frame comes (one view for the whole pause); zoomed and moved like the player's picture ([zoom], [shift]).
  */
 @Composable
 fun StillFrame(frame: Bitmap, steps: List<ColorStep>, timeUs: Long, zoom: Float, shift: Offset, modifier: Modifier = Modifier) {
-    val view = remember(frame) { arrayOfNulls<GLSurfaceView>(1) }
+    val renderer = remember { StillRenderer(frame, steps, timeUs) }
+    val view = remember { arrayOfNulls<GLSurfaceView>(1) }
     AndroidView(
         factory = { ctx ->
             GLSurfaceView(ctx).apply {
                 setEGLContextClientVersion(2)
                 // Over the player's own surface.
                 setZOrderMediaOverlay(true)
-                setRenderer(StillRenderer(frame, steps, timeUs))
+                setRenderer(renderer)
                 renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
                 view[0] = this
             }
         },
         update = { v ->
+            if (renderer.next !== frame || renderer.timeUs != timeUs) {
+                renderer.next = frame
+                renderer.timeUs = timeUs
+                v.requestRender()
+            }
             v.scaleX = zoom
             v.scaleY = zoom
             v.translationX = shift.x
@@ -155,16 +180,8 @@ fun StillFrame(frame: Bitmap, steps: List<ColorStep>, timeUs: Long, zoom: Float,
         },
         modifier = modifier,
     )
-    // A setting moved: draw again (a few times a frame at most).
-    LaunchedEffect(frame) {
-        var seen = -1
-        while (true) {
-            val now = LiveEdits.version
-            if (now != seen) {
-                seen = now
-                view[0]?.requestRender()
-            }
-            delay(16)
-        }
+    // A setting moved: draw again.
+    LaunchedEffect(Unit) {
+        LiveEdits.version.collect { view[0]?.requestRender() }
     }
 }

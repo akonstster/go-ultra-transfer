@@ -60,7 +60,14 @@ class CameraWifi(
         // A request still waiting for its answer: wait for it first (see [answered]) — never two at once.
         answered?.takeIf { !it.isCompleted }?.let {
             log("Wi-Fi камеры: жду ответа на прошлый запрос")
-            kotlinx.coroutines.withTimeoutOrNull(timeoutMs + 10_000L) { it.await() }
+            if (kotlinx.coroutines.withTimeoutOrNull(timeoutMs + 10_000L) { it.await() } == null) {
+                // No answer at all: the system's own connection timeout is long past, so taking it back is safe now —
+                // and it mustn't stay registered (requests pile up).
+                callback?.let { cb -> runCatching { cm.unregisterNetworkCallback(cb) } }
+                callback = null
+                abandoned = false
+                log("Wi-Fi камеры: прошлый запрос так и не ответил — снят")
+            }
         }
         release()
         val specifier = WifiNetworkSpecifier.Builder()
