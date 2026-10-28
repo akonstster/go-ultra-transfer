@@ -441,6 +441,20 @@ private fun VideoPreview(
     val filmLook = remember(file.uri) { FilmLook(look) }
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
+    // Preview weight. Playing, the effects work on a picture no bigger than the screen needs (PLAY_SIZES[level] lines,
+    // never upscaled); a phone that can't keep up goes a step lower, the last step with lighter halation and
+    // sharpening. Paused, the frame is done in full: settings are seen as they will be.
+    var level by remember(file.uri) { mutableIntStateOf(0) }
+    var paused by remember(file.uri) { mutableStateOf(!active) }
+    var sourceLines by remember(file.uri) { mutableIntStateOf(0) } // the video's short side, once the player knows it
+    val previewLines = PLAY_SIZES[level].takeIf { !paused && sourceLines > it }
+    val light = !paused && level == PLAY_SIZES.lastIndex
+    fun stepDown(why: String): Boolean {
+        if (level == PLAY_SIZES.lastIndex) return false
+        level++
+        vm.log("цвет ${file.name}: $why — превью проще: ${PLAY_SIZES[level]} строк${if (level == PLAY_SIZES.lastIndex) ", облегчённые ореол и резкость" else ""}")
+        return true
+    }
     fun dropEffects(why: String) {
         vm.log("цвет ${file.name}: $why — без обработки цвета")
         effectsFailed = true
@@ -448,12 +462,18 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping))
+            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
+                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                    if (videoSize.width > 0 && videoSize.height > 0) sourceLines = minOf(videoSize.width, videoSize.height)
+                }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     vm.log("плеер ${file.name}: ${error.errorCodeName} ${error.message ?: ""} ${error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: ""}")
-                    if (effects) dropEffects("ошибка плеера")
+                    // Too heavy while playing: a lighter preview first (the effects are set again and the player
+                    // restarted below); with nothing lighter left, no colour.
+                    if (effects && !(playWhenReady && stepDown("ошибка плеера"))) dropEffects("ошибка плеера")
                 }
             })
             if (resumeAt[0] > 0) seekTo(resumeAt[0])
@@ -467,18 +487,51 @@ private fun VideoPreview(
         }
     }
     DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
-    // The LUT or the stripes changed: the effects again (not right after the player got them at its start).
-    val applied = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping)) }
-    LaunchedEffect(player, look.lut, look.strength, vm.clipping) {
-        val now = listOf(look.lut, look.strength, vm.clipping)
+    // Paused, the player shows no new frame by itself: after a change the same frame is decoded and drawn again
+    // (from the key frame before it, so a moment later). Changes in a row make one redraw.
+    var redraw by remember(player) { mutableIntStateOf(0) }
+    LaunchedEffect(redraw) {
+        if (redraw == 0) return@LaunchedEffect
+        delay(150)
+        if (!player.playWhenReady) player.seekTo(player.currentPosition)
+    }
+    // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
+    // start). After an error the player starts again with them.
+    val applied = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping, previewLines, level)) }
+    LaunchedEffect(player, look.lut, look.strength, vm.clipping, previewLines, level) {
+        val now = listOf(look.lut, look.strength, vm.clipping, previewLines, level)
         if (effects && now != applied[0]) {
             applied[0] = now
-            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping))
+            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines))
+            if (player.playerError != null) player.prepare() else redraw++
         }
     }
-    LaunchedEffect(look.exposure, look.saturation) { matrix.set(look.exposure, look.saturation) }
-    LaunchedEffect(look.sharpness, look.sharpRadius) { sharpen.amount = look.sharpness; sharpen.radius = look.sharpRadius }
-    LaunchedEffect(look) { filmLook.set(look) }
+    LaunchedEffect(light) { sharpen.light = light; filmLook.light = light }
+    val shownLook = remember(player) { arrayOf(look) }
+    LaunchedEffect(look) {
+        matrix.set(look.exposure, look.saturation)
+        sharpen.amount = look.sharpness
+        sharpen.radius = look.sharpRadius
+        filmLook.set(look)
+        if (look != shownLook[0]) { shownLook[0] = look; redraw++ }
+    }
+    // Playing slower than the video's frame rate (frames counted where the film look draws them): a lighter preview.
+    LaunchedEffect(player) {
+        if (!effects) return@LaunchedEffect
+        var last = filmLook.frames.get()
+        var settle = 2 // windows to skip after a start or a change
+        while (true) {
+            delay(2_000)
+            val now = filmLook.frames.get()
+            val drawn = now - last
+            last = now
+            if (!player.isPlaying || player.playbackState != Player.STATE_READY) { settle = 2; continue }
+            if (settle > 0) { settle--; continue }
+            val fps = player.videoFormat?.frameRate?.takeIf { it > 0f } ?: 30f
+            val wanted = fps * player.playbackParameters.speed * 2
+            if (drawn < wanted * 0.8f && stepDown("${drawn / 2} кадров/с из ${Math.round(fps)}")) settle = 2
+        }
+    }
     // While setting the colour the video goes round, so the change is always in sight.
     LaunchedEffect(player, colorPanel) { player.repeatMode = if (colorPanel) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
     // With effects: no frame after 5 s of playing means the picture doesn't come through — back to no effects.
@@ -524,10 +577,7 @@ private fun VideoPreview(
     LaunchedEffect(player, colouring) {
         if (colouring == shownColouring[0]) return@LaunchedEffect
         shownColouring[0] = colouring
-        if (!player.isPlaying) {
-            delay(100)
-            player.seekTo(player.currentPosition)
-        }
+        redraw++
     }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
     LaunchedEffect(player, film, editing, pieces) {
@@ -641,6 +691,17 @@ private fun VideoPreview(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            // The phone couldn't keep up: playing shows a lighter preview (a paused frame is in full).
+            if (effects && level > 0 && !paused) {
+                Text(
+                    tr("упрощённо", "simplified") + " · ${PLAY_SIZES[level]}p",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.align(Alignment.TopEnd).safeDrawingPadding()
+                        .padding(top = if (colouring) 8.dp else 64.dp, end = 12.dp)
+                        .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
             if (!colouring) Row(
                 Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -684,9 +745,9 @@ private fun VideoPreview(
                 Modifier.weight(1f),
                 ilog, look, saved != null, effectsFailed, vm.clipping,
                 onLook = { saved = it; vm.saveLook(file, it) },
-                onLive = { ev, sat -> matrix.set(ev, sat) },
-                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius },
-                onFilmLive = filmLook::set,
+                onLive = { ev, sat -> matrix.set(ev, sat); redraw++ },
+                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius; redraw++ },
+                onFilmLive = { filmLook.set(it); redraw++ },
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
                 onDone = { colorPanel = false },
@@ -735,7 +796,8 @@ private fun VideoPreview(
 }
 
 /**
- * The player's effects, in order: Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure /
+ * The player's effects, in order: the picture made smaller for a lighter preview ([previewLines] lines, while
+ * playing), Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure /
  * saturation [matrix], the live [sharpen] (on the coloured picture, as editors do), the live [film] look (after the
  * sharpening, so its grain isn't sharpened), the clipping stripes when on.
  */
@@ -748,8 +810,10 @@ private fun colorEffects(
     sharpen: Sharpen,
     film: FilmLook,
     clipping: Boolean,
+    previewLines: Int?,
 ): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
+    if (previewLines != null) out += androidx.media3.effect.Presentation.createForHeight(previewLines)
     if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
     out += matrix
     out += sharpen
@@ -757,6 +821,9 @@ private fun colorEffects(
     if (clipping) out += ClippingStripes()
     return out
 }
+
+/** Preview sizes while playing (lines), from the first choice to the lightest. */
+private val PLAY_SIZES = intArrayOf(1080, 720, 540)
 
 /**
  * Colour while viewing (the file stays as shot), on two tabs so the sliders don't cover the video. «Свет и цвет» —

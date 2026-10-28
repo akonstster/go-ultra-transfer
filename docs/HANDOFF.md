@@ -103,6 +103,12 @@ on a 1080-line grid, two sizes, new per frame (`presentationTimeUs`), weighted t
 the shaders with glslangValidator and rendering them in headless Chromium WebGL on a test chart. `ColorLook` now holds
 11 values (`decode` still reads the 4- and 6-value forms). While the panel is open the video keeps the top 45 %, the
 sliders scroll, the top bar / ♥ column / chips hide and the pager is locked.
+Preview weight (phone 4K lagged, then failed): while playing, `Presentation.createForHeight` first in the chain brings
+the picture to 1080 lines (never upscales; the camera's LRV stays as is). `FilmLook.frames` counts frames drawn; 2-s
+windows below 80 % of the format's frame rate (or a player error while playing) step down 1080 → 720 → 540 + light
+halation / sharpening (`light` uniform: one ring of taps), logged «превью проще», label «упрощённо · 720p»; the colour
+is dropped only after the last step. Paused: no Presentation, full effects; after any change (slider, rebuild, panel
+open / close) the paused frame is redrawn by seeking to the same position (debounced 150 ms).
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /

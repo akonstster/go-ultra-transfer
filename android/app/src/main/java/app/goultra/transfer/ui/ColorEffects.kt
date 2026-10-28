@@ -13,6 +13,7 @@ import androidx.media3.effect.GlShaderProgram
 import androidx.media3.effect.RgbMatrix
 import app.goultra.transfer.camera.ColorMath
 import app.goultra.transfer.camera.FilmMath
+import java.util.concurrent.atomic.AtomicInteger
 
 /** The whole frame, -1…1 in x and y, sampled 0…1. */
 private const val VERTEX = """#version 100
@@ -48,6 +49,8 @@ class LiveColorMatrix(ev: Float, saturation: Float) : RgbMatrix {
 class Sharpen(amount: Float, radius: Float) : GlEffect {
     @Volatile var amount = amount
     @Volatile var radius = radius
+    /** The preview can't keep up: one ring of taps instead of two. */
+    @Volatile var light = false
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
 
@@ -69,6 +72,7 @@ class Sharpen(amount: Float, radius: Float) : GlEffect {
             // Up to ×3 at the slider's end: strong, but the cap keeps it clean.
             glProgram.setFloatUniform("uAmount", amount * 3f)
             glProgram.setFloatUniform("uRadius", radius)
+            glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -80,7 +84,7 @@ class Sharpen(amount: Float, radius: Float) : GlEffect {
     }
 
     private companion object {
-        // Blur: the pixel plus two rings of 8 taps at radius and 2 × radius (a rough Gaussian). Detail = brightness
+        // Blur: the pixel plus two rings of 8 taps at radius and 2 × radius (a rough Gaussian; light: the first only). Detail = brightness
         // minus blur; below 0.004 it is noise and stays as is; the boost is capped at ±0.08.
         const val SHARPEN = """#version 100
 precision mediump float;
@@ -88,6 +92,7 @@ uniform sampler2D uTexSampler;
 uniform vec2 uTexel;
 uniform float uAmount;
 uniform float uRadius;
+uniform float uLight;
 varying vec2 vTexSamplingCoord;
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 void main() {
@@ -99,8 +104,11 @@ void main() {
     float a = float(i) * 0.7853982;
     vec2 d = vec2(cos(a), sin(a)) * uRadius * uTexel;
     sum += 2.0 * luma(texture2D(uTexSampler, vTexSamplingCoord + d).rgb);
-    sum += luma(texture2D(uTexSampler, vTexSamplingCoord + 2.0 * d).rgb);
-    weight += 3.0;
+    weight += 2.0;
+    if (uLight < 0.5) {
+      sum += luma(texture2D(uTexSampler, vTexSamplingCoord + 2.0 * d).rgb);
+      weight += 1.0;
+    }
   }
   float detail = l - sum / weight;
   detail = sign(detail) * max(abs(detail) - 0.004, 0.0);
@@ -170,6 +178,10 @@ void main() {
 @OptIn(UnstableApi::class)
 class FilmLook(look: ColorLook) : GlEffect {
     @Volatile private var look = look
+    /** The preview can't keep up: halation from one ring of taps instead of three. */
+    @Volatile var light = false
+    /** Frames drawn so far: how fast the preview really goes. */
+    val frames = AtomicInteger()
 
     fun set(look: ColorLook) {
         this.look = look
@@ -202,10 +214,12 @@ class FilmLook(look: ColorLook) : GlEffect {
             glProgram.setFloatUniform("uSkin", l.skin)
             glProgram.setFloatUniform("uGrain", l.grain)
             glProgram.setFloatUniform("uHalation", l.halation)
+            glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
             // A new grain pattern on each frame (about 30 a second), the same one for a paused frame.
             glProgram.setFloatUniform("uFrame", ((presentationTimeUs / 33_333) % 997).toFloat())
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            frames.incrementAndGet()
         }
 
         override fun release() {
@@ -232,6 +246,7 @@ uniform float uSkin;
 uniform float uGrain;
 uniform float uHalation;
 uniform float uFrame;
+uniform float uLight;
 varying vec2 vTexSamplingCoord;
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -286,7 +301,8 @@ void main() {
 
   vec3 lin = pow(c0, vec3(GAMMA));
 
-  // Halation: three rings of 8 taps out to 2.5 % of the frame's height, turned at random per pixel so no star shows.
+  // Halation: three rings of 8 taps out to 2.5 % of the frame's height (light: one ring), turned at random per pixel so
+  // no star shows.
   if (uHalation > 0.0) {
     float radius = 0.025 / uTexel.y;
     float turn = hash(vec3(gl_FragCoord.xy, 7.0)) * 6.2831853;
@@ -294,7 +310,11 @@ void main() {
     for (int i = 0; i < 8; i++) {
       float a = turn + float(i) * 0.7853982;
       vec2 d = vec2(cos(a), sin(a)) * radius * uTexel;
-      glow += 0.5 * bright(vTexSamplingCoord + 0.33 * d) + 0.33 * bright(vTexSamplingCoord + 0.67 * d) + 0.17 * bright(vTexSamplingCoord + d);
+      if (uLight > 0.5) {
+        glow += bright(vTexSamplingCoord + 0.5 * d);
+      } else {
+        glow += 0.5 * bright(vTexSamplingCoord + 0.33 * d) + 0.33 * bright(vTexSamplingCoord + 0.67 * d) + 0.17 * bright(vTexSamplingCoord + d);
+      }
     }
     glow /= 8.0;
     // Mostly around a bright place, less on it (it is white there anyway).
