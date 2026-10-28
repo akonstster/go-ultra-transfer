@@ -2603,7 +2603,7 @@ class CameraController(private val app: Application) {
             builder.setAssetLoaderFactory(
                 androidx.media3.transformer.DefaultAssetLoaderFactory(
                     app,
-                    androidx.media3.transformer.DefaultDecoderFactory(app),
+                    androidx.media3.transformer.DefaultDecoderFactory.Builder(app).build(),
                     androidx.media3.common.util.Clock.DEFAULT,
                     // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
                     androidx.media3.exoplayer.source.DefaultMediaSourceFactory(camera),
