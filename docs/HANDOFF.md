@@ -194,7 +194,16 @@ Suggested design (agree with the user first — they review UI decisions; see th
 
 ## How to build / test
 
-See `CLAUDE.md` → "Сборка Android" (JDK 17 path, `gradlew.bat assembleDebug`, adb install). The debug phone is a
+See `CLAUDE.md` → "Сборка Android" (JDK 17 path, `gradlew.bat assembleDebug`, adb install). `CLAUDE.md` lives only on
+the user's PC (gitignored), so cloud sessions don't see it: the steps to give the user (PowerShell, repo root
+`C:\Users\nonroot\myprojects\go-ultra-transfer`; adb is **not** on PATH):
+```
+git pull
+cd android
+.\gradlew.bat assembleDebug
+& C:\Users\nonroot\android-sdk\platform-tools\adb.exe install -r app\build\outputs\apk\debug\app-debug.apk
+```
+The debug phone is a
 Poco X3 (Android 12); the target is a Huawei Mate 80 Pro (logcat doesn't show app logs there — use log.txt).
 The camera must be connected **from our app over Wi-Fi** (live view on the "Камера" tab, or the file list) for TCP
 commands; the camera closes TCP when the user opens playback on the camera itself, and our app disconnects after
