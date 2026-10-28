@@ -529,6 +529,7 @@ private fun VideoPreview(
     val bypassNow by rememberUpdatedState(bypass)
     var paused by remember(file.uri) { mutableStateOf(!active) }
     var sourceLines by remember(file.uri) { mutableIntStateOf(knownLines ?: 0) } // the video's short side
+    var seeks by remember(file.uri) { mutableIntStateOf(0) } // jumps of the position: a paused still is taken again
     val previewLines = PLAY_SIZES[level].takeIf { sourceLines > it }
     val light = !paused && level == PLAY_SIZES.lastIndex
     fun stepDown(why: String): Boolean {
@@ -548,6 +549,7 @@ private fun VideoPreview(
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
+                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) { seeks++ }
                 override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                     if (videoSize.width > 0 && videoSize.height > 0) sourceLines = minOf(videoSize.width, videoSize.height)
                 }
@@ -573,8 +575,9 @@ private fun VideoPreview(
     val alive = remember(player) { booleanArrayOf(true) }
     DisposableEffect(player) { onDispose { alive[0] = false; player.release(); vm.closeTimeline() } }
     // Paused, the player draws no new frame — not even after a seek to the same spot (tried; many seeks of a 4K video
-    // hung the viewer). After a change (a slider let go, the panel opened / closed) it plays without sound until one new
-    // frame is drawn (at most 0.4 s) and pauses again: the picture moves on by a frame or two.
+    // hung the viewer). When its view is made anew (the panel opened / closed) or its effects are rebuilt, it plays
+    // without sound until one new frame is drawn (at most 0.4 s) and pauses again. Colour changes while paused show on
+    // the still (StillFrame) instead.
     var redraw by remember(player) { mutableIntStateOf(0) }
     LaunchedEffect(redraw) {
         if (redraw == 0) return@LaunchedEffect
@@ -615,8 +618,7 @@ private fun VideoPreview(
         matrix.bypass = bypass
         sharpen.bypass = bypass
         filmLook.bypass = bypass
-        val now = listOf(look.lut, look.strength, vm.clipping, bypass)
-        if (now != shownSwitches[0]) { shownSwitches[0] = now; redraw++ }
+        shownSwitches[0] = listOf(look.lut, look.strength, vm.clipping, bypass)
     }
     LaunchedEffect(light) { sharpen.light = light; filmLook.light = light }
     val shownLook = remember(player) { arrayOf(look) }
@@ -625,7 +627,7 @@ private fun VideoPreview(
         sharpen.amount = look.sharpness
         sharpen.radius = look.sharpRadius
         filmLook.set(look)
-        if (look != shownLook[0]) { shownLook[0] = look; redraw++ }
+        shownLook[0] = look
     }
     // Playing slower than the video's frame rate (frames counted where the film look draws them): a lighter preview.
     LaunchedEffect(player) {
@@ -688,6 +690,18 @@ private fun VideoPreview(
     var film by remember(file.uri) { mutableStateOf(false) }
     var editing by remember(file.uri) { mutableStateOf(false) }
     val colouring = colorPanel && !editing
+    // Paused with the colour panel open: the frame as shot, coloured by the same steps in our own view — every change
+    // shows at once and in full (the player draws nothing new while paused).
+    val stillAt = remember(player) { longArrayOf(0) }
+    val still by produceState<android.graphics.Bitmap?>(null, colouring, paused, seeks, effects) {
+        value = null
+        if (colouring && paused && effects) {
+            delay(150) // a seek settles first
+            stillAt[0] = player.currentPosition
+            value = vm.stillFrame(file, stillAt[0])
+        }
+    }
+    val stillSteps = remember(player) { listOfNotNull<ColorStep>(liveLut, matrix, sharpen, filmLook, stripes) }
     // No swiping to the next file while the timeline or the colour sliders own the gestures.
     LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
     LaunchedEffect(colouring) {
@@ -828,6 +842,9 @@ private fun VideoPreview(
                     onRelease = { it.player = null },
                     modifier = Modifier.fillMaxSize(),
                 )
+            }
+            still?.let { frame ->
+                StillFrame(frame, stillSteps, stillAt[0] * 1000, zoom, shift, Modifier.fillMaxSize())
             }
             // The phone couldn't keep up: playing shows a lighter preview (a paused frame is in full).
             if (effects && level > 0 && !paused) {

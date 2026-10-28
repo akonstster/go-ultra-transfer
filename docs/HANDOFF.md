@@ -154,6 +154,12 @@ The viewer's effect list no longer changes while playing (turning the I-Log swit
 filtering — matches a CPU trilinear lookup of the real table within 0.9 / 255), strength live (0 = off); the stripes
 (`ClippingStripes.on`) and before / after (`bypass` on each effect) are flags read per frame. Only a preview-size step
 rebuilds the list.
+Paused colour: `StillFrame` (GLSurfaceView over the player, `setZOrderMediaOverlay`) draws the frame at the paused
+position (`FrameReader.exact`, OPTION_CLOSEST, ≤ 1920 wide, upright; phone copy or the camera's LRV) through the
+player's own effect objects as `ColorStep`s (shader + `bind`; media3 runs them via `StepProgram`), ping-ponging two
+FBOs, redrawn when `LiveEdits.version` moves. The player draws nothing new while paused, and a frame caught half-way
+through its chain mixed old and new settings (before / after looked random: «то только стиль, то весь LUT»). The muted
+nudge stays only for a new player view (panel opened / closed) and an effect rebuild.
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
 (NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
 the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /

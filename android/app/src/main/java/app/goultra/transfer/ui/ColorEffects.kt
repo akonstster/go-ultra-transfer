@@ -27,24 +27,101 @@ void main() {
 }
 """
 
+/** Bumped by every live setting that changes: a paused still ([StillRenderer]) redraws when it moves. */
+object LiveEdits {
+    private val counter = AtomicInteger()
+    val version: Int get() = counter.get()
+
+    fun bump() {
+        counter.incrementAndGet()
+    }
+}
+
+/**
+ * One step of the colour: its fragment shader and its settings, set by [bind] at the moment of drawing. The player's
+ * and the transformer's effects ([StepProgram]) and the paused still ([StillRenderer]) draw the very same steps.
+ */
+interface ColorStep {
+    val fragment: String
+
+    /** GL resources of the step in the current context (the LUT's texture); 0 if none. */
+    fun create(): Int = 0
+
+    /** The settings into [p] for a [width] × [height] frame at [timeUs]; [resource] from [create]. */
+    fun bind(p: GlProgram, resource: Int, width: Int, height: Int, timeUs: Long)
+
+    fun destroy(resource: Int) {}
+}
+
+/** A [ColorStep] as one of media3's effects. */
+@OptIn(UnstableApi::class)
+private class StepProgram(useHdr: Boolean, private val step: ColorStep) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
+    private val glProgram = GlProgram(VERTEX, step.fragment).apply {
+        setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
+    }
+    private val resource = step.create()
+    private var width = 1
+    private var height = 1
+
+    override fun configure(inputWidth: Int, inputHeight: Int): Size {
+        width = inputWidth
+        height = inputHeight
+        return Size(inputWidth, inputHeight)
+    }
+
+    override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+        glProgram.use()
+        glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
+        step.bind(glProgram, resource, width, height, presentationTimeUs)
+        glProgram.bindAttributesAndUniforms()
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    override fun release() {
+        super.release()
+        glProgram.delete()
+        step.destroy(resource)
+    }
+}
+
 /**
  * Exposure and saturation as one colour matrix that the player asks for on every frame: the sliders change [matrix]
  * and the picture follows at once, without rebuilding the effects.
  */
 @OptIn(UnstableApi::class)
-class LiveColorMatrix(ev: Float, saturation: Float) : RgbMatrix {
+class LiveColorMatrix(ev: Float, saturation: Float) : RgbMatrix, ColorStep {
     @Volatile private var matrix = ColorMath.matrix(ev, saturation)
     /** «До / после»: no change while set. */
     @Volatile var bypass = false
+        set(v) { field = v; LiveEdits.bump() }
 
     fun set(ev: Float, saturation: Float) {
         matrix = ColorMath.matrix(ev, saturation)
+        LiveEdits.bump()
     }
 
     override fun getMatrix(presentationTimeUs: Long, useHdr: Boolean): FloatArray = if (bypass) IDENTITY else matrix
 
+    // The same matrix as a step of the paused still (the player applies it as an RgbMatrix).
+    override val fragment get() = MATRIX
+
+    override fun bind(p: GlProgram, resource: Int, width: Int, height: Int, timeUs: Long) {
+        p.setFloatsUniform("uMatrix", getMatrix(timeUs, false))
+    }
+
     private companion object {
         val IDENTITY = ColorMath.matrix(0f, 1f)
+
+        const val MATRIX = """#version 100
+precision mediump float;
+uniform sampler2D uTexSampler;
+uniform mat4 uMatrix;
+varying vec2 vTexSamplingCoord;
+void main() {
+  vec4 c = texture2D(uTexSampler, vTexSamplingCoord);
+  gl_FragColor = vec4(clamp((uMatrix * vec4(c.rgb, 1.0)).rgb, 0.0, 1.0), c.a);
+}
+"""
     }
 }
 
@@ -55,46 +132,37 @@ class LiveColorMatrix(ev: Float, saturation: Float) : RgbMatrix {
  * stopped playback when the switch was turned.
  */
 @OptIn(UnstableApi::class)
-class LiveLut(private val lut: CubeLut, strength: Float) : GlEffect {
+class LiveLut(private val lut: CubeLut, strength: Float) : GlEffect, ColorStep {
     @Volatile var strength = strength
+        set(v) { field = v; LiveEdits.bump() }
     /** «До / после»: as shot while set. */
     @Volatile var bypass = false
+        set(v) { field = v; LiveEdits.bump() }
 
-    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = StepProgram(useHdr, this)
 
-    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
-        private val glProgram = GlProgram(VERTEX, SHADER).apply {
-            setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
-        }
-        private val table: Int = IntArray(1).also { ids ->
-            GLES20.glGenTextures(1, ids, 0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
-            val n = lut.size
-            val pixels = java.nio.ByteBuffer.allocateDirect(n * n * n * 4).put(lut.atlas()).apply { position(0) }
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, n * n, n, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        }[0]
+    override val fragment get() = SHADER
 
-        override fun configure(inputWidth: Int, inputHeight: Int) = Size(inputWidth, inputHeight)
+    override fun create(): Int = IntArray(1).also { ids ->
+        GLES20.glGenTextures(1, ids, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+        val n = lut.size
+        val pixels = java.nio.ByteBuffer.allocateDirect(n * n * n * 4).put(lut.atlas()).apply { position(0) }
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, n * n, n, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+    }[0]
 
-        override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
-            glProgram.use()
-            glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
-            glProgram.setSamplerTexIdUniform("uLut", table, /* texUnitIndex= */ 1)
-            glProgram.setFloatUniform("uSize", lut.size.toFloat())
-            glProgram.setFloatUniform("uStrength", if (bypass) 0f else strength)
-            glProgram.bindAttributesAndUniforms()
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        }
+    override fun bind(p: GlProgram, resource: Int, width: Int, height: Int, timeUs: Long) {
+        p.setSamplerTexIdUniform("uLut", resource, /* texUnitIndex= */ 1)
+        p.setFloatUniform("uSize", lut.size.toFloat())
+        p.setFloatUniform("uStrength", if (bypass) 0f else strength)
+    }
 
-        override fun release() {
-            super.release()
-            glProgram.delete()
-            GLES20.glDeleteTextures(1, intArrayOf(table), 0)
-        }
+    override fun destroy(resource: Int) {
+        GLES20.glDeleteTextures(1, intArrayOf(resource), 0)
     }
 
     private companion object {
@@ -133,43 +201,27 @@ void main() {
  * so contours get no bright / dark halos. [amount] 0…1 and [radius] are read on every frame — sliders apply live.
  */
 @OptIn(UnstableApi::class)
-class Sharpen(amount: Float, radius: Float) : GlEffect {
+class Sharpen(amount: Float, radius: Float) : GlEffect, ColorStep {
     @Volatile var amount = amount
+        set(v) { field = v; LiveEdits.bump() }
     @Volatile var radius = radius
+        set(v) { field = v; LiveEdits.bump() }
     /** The preview can't keep up: one ring of taps instead of two. */
     @Volatile var light = false
     /** «До / после»: no sharpening while set. */
     @Volatile var bypass = false
+        set(v) { field = v; LiveEdits.bump() }
 
-    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = StepProgram(useHdr, this)
 
-    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
-        private val glProgram = GlProgram(VERTEX, SHARPEN).apply {
-            setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
-        }
-        private var texel = floatArrayOf(0f, 0f)
+    override val fragment get() = SHARPEN
 
-        override fun configure(inputWidth: Int, inputHeight: Int): Size {
-            texel = floatArrayOf(1f / inputWidth, 1f / inputHeight)
-            return Size(inputWidth, inputHeight)
-        }
-
-        override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
-            glProgram.use()
-            glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
-            glProgram.setFloatsUniform("uTexel", texel)
-            // Up to ×3 at the slider's end: strong, but the cap keeps it clean.
-            glProgram.setFloatUniform("uAmount", if (bypass) 0f else amount * 3f)
-            glProgram.setFloatUniform("uRadius", radius)
-            glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
-            glProgram.bindAttributesAndUniforms()
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        }
-
-        override fun release() {
-            super.release()
-            glProgram.delete()
-        }
+    override fun bind(p: GlProgram, resource: Int, width: Int, height: Int, timeUs: Long) {
+        p.setFloatsUniform("uTexel", floatArrayOf(1f / width, 1f / height))
+        // Up to ×3 at the slider's end: strong, but the cap keeps it clean.
+        p.setFloatUniform("uAmount", if (bypass) 0f else amount * 3f)
+        p.setFloatUniform("uRadius", radius)
+        p.setFloatUniform("uLight", if (light) 1f else 0f)
     }
 
     private companion object {
@@ -213,32 +265,17 @@ void main() {
  * crushed (all channels ≤ [LOW]). The effects see SDR video gamma-encoded, so these are about 250 and 5 of 255.
  */
 @OptIn(UnstableApi::class)
-class ClippingStripes : GlEffect {
+class ClippingStripes : GlEffect, ColorStep {
     /** Shown or not, read on every frame (the effect stays in place either way). */
     @Volatile var on = false
+        set(v) { field = v; LiveEdits.bump() }
 
-    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = StepProgram(useHdr, this)
 
-    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
-        private val glProgram = GlProgram(VERTEX, FRAGMENT).apply {
-            // The whole frame, -1…1 in x and y.
-            setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
-        }
+    override val fragment get() = FRAGMENT
 
-        override fun configure(inputWidth: Int, inputHeight: Int) = Size(inputWidth, inputHeight)
-
-        override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
-            glProgram.use()
-            glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
-            glProgram.setFloatUniform("uOn", if (on) 1f else 0f)
-            glProgram.bindAttributesAndUniforms()
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        }
-
-        override fun release() {
-            super.release()
-            glProgram.delete()
-        }
+    override fun bind(p: GlProgram, resource: Int, width: Int, height: Int, timeUs: Long) {
+        p.setFloatUniform("uOn", if (on) 1f else 0f)
     }
 
     private companion object {
@@ -287,76 +324,57 @@ fun exportEffects(lut: CubeLut?, look: ColorLook, sourceLines: Int): List<androi
  * with everything at 0 the picture passes unchanged.
  */
 @OptIn(UnstableApi::class)
-class FilmLook(look: ColorLook) : GlEffect {
+class FilmLook(look: ColorLook) : GlEffect, ColorStep {
     @Volatile private var look = look
     @Volatile private var grade = gradeOf(look)
     /** The preview can't keep up: halation from one ring of taps instead of three. */
     @Volatile var light = false
     /** «До / после»: the picture as it comes in while set (frames still counted). */
     @Volatile var bypass = false
+        set(v) { field = v; LiveEdits.bump() }
     /** Frames drawn so far: how fast the preview really goes. */
     val frames = AtomicInteger()
 
     fun set(look: ColorLook) {
         this.look = look
         grade = gradeOf(look)
+        LiveEdits.bump()
     }
 
-    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = StepProgram(useHdr, this)
 
-    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
-        private val glProgram = GlProgram(VERTEX, FILM).apply {
-            setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
-        }
-        private var texel = floatArrayOf(0f, 0f)
-        private var grainScale = floatArrayOf(0f, 0f)
+    override val fragment get() = FILM
 
-        override fun configure(inputWidth: Int, inputHeight: Int): Size {
-            texel = floatArrayOf(1f / inputWidth, 1f / inputHeight)
-            // Grain cells of one pixel at 1080 lines, whatever the video's size: the same look on the preview and on 4K.
-            grainScale = floatArrayOf(1080f * inputWidth / inputHeight, 1080f)
-            return Size(inputWidth, inputHeight)
-        }
-
-        override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
-            val off = bypass
-            val l = look
-            val g = if (off) NEUTRAL else grade
-            glProgram.use()
-            glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
-            glProgram.setFloatsUniform("uTexel", texel)
-            glProgram.setFloatsUniform("uGrainScale", grainScale)
-            glProgram.setFloatUniform("uFilm", g.film)
-            glProgram.setFloatUniform("uSkin", g.skin)
-            glProgram.setFloatsUniform("uGains", g.gains())
-            glProgram.setFloatUniform("uFlash", g.flash)
-            glProgram.setFloatUniform("uFaceLift", g.faceLift)
-            glProgram.setFloatUniform("uSkyDark", g.skyDark)
-            glProgram.setFloatUniform("uVignette", g.vignette)
-            glProgram.setFloatUniform("uCurve", g.curveAmount())
-            glProgram.setFloatUniform("uContrast", g.curveContrast())
-            glProgram.setFloatUniform("uBleach", g.bleach)
-            glProgram.setFloatUniform("uSat", g.sat)
-            glProgram.setFloatsUniform("uHueSat", g.hueSat)
-            glProgram.setFloatsUniform("uHueShift", FloatArray(4) { Math.toRadians(g.hueShift[it].toDouble()).toFloat() })
-            glProgram.setFloatsUniform("uShadowTint", g.shadowTint)
-            glProgram.setFloatsUniform("uMidTint", g.midTint)
-            glProgram.setFloatsUniform("uHighTint", g.highTint)
-            glProgram.setFloatUniform("uSkinGuard", g.skinGuard)
-            glProgram.setFloatUniform("uGrain", if (off) 0f else l.grain)
-            glProgram.setFloatUniform("uHalation", if (off) 0f else l.halation)
-            glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
-            // A new grain pattern on each frame (about 30 a second), the same one for a paused frame.
-            glProgram.setFloatUniform("uFrame", ((presentationTimeUs / 33_333) % 997).toFloat())
-            glProgram.bindAttributesAndUniforms()
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            frames.incrementAndGet()
-        }
-
-        override fun release() {
-            super.release()
-            glProgram.delete()
-        }
+    override fun bind(p: GlProgram, resource: Int, width: Int, height: Int, timeUs: Long) {
+        val off = bypass
+        val l = look
+        val g = if (off) NEUTRAL else grade
+        p.setFloatsUniform("uTexel", floatArrayOf(1f / width, 1f / height))
+        // Grain cells of one pixel at 1080 lines, whatever the video's size: the same look on the preview and on 4K.
+        p.setFloatsUniform("uGrainScale", floatArrayOf(1080f * width / height, 1080f))
+        p.setFloatUniform("uFilm", g.film)
+        p.setFloatUniform("uSkin", g.skin)
+        p.setFloatsUniform("uGains", g.gains())
+        p.setFloatUniform("uFlash", g.flash)
+        p.setFloatUniform("uFaceLift", g.faceLift)
+        p.setFloatUniform("uSkyDark", g.skyDark)
+        p.setFloatUniform("uVignette", g.vignette)
+        p.setFloatUniform("uCurve", g.curveAmount())
+        p.setFloatUniform("uContrast", g.curveContrast())
+        p.setFloatUniform("uBleach", g.bleach)
+        p.setFloatUniform("uSat", g.sat)
+        p.setFloatsUniform("uHueSat", g.hueSat)
+        p.setFloatsUniform("uHueShift", FloatArray(4) { Math.toRadians(g.hueShift[it].toDouble()).toFloat() })
+        p.setFloatsUniform("uShadowTint", g.shadowTint)
+        p.setFloatsUniform("uMidTint", g.midTint)
+        p.setFloatsUniform("uHighTint", g.highTint)
+        p.setFloatUniform("uSkinGuard", g.skinGuard)
+        p.setFloatUniform("uGrain", if (off) 0f else l.grain)
+        p.setFloatUniform("uHalation", if (off) 0f else l.halation)
+        p.setFloatUniform("uLight", if (light) 1f else 0f)
+        // A new grain pattern on each frame (about 30 a second), the same one for a paused frame.
+        p.setFloatUniform("uFrame", ((timeUs / 33_333) % 997).toFloat())
+        frames.incrementAndGet()
     }
 
     private companion object {

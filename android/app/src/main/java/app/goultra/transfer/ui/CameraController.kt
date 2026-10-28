@@ -2262,6 +2262,19 @@ class CameraController(private val app: Application) {
         }
     }
 
+    /**
+     * The frame of [file] at exactly [ms], upright, about 1920 px wide — the still the colour is shown on while paused
+     * (the phone's copy, or the camera's light copy the viewer plays). Null when it can't be read.
+     */
+    suspend fun stillFrame(file: CameraFile, ms: Long): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+        val reader = openFrameReader(file) ?: return@withContext null
+        try {
+            reader.exact(ms, 1920)
+        } finally {
+            reader.close()
+        }
+    }
+
     private suspend fun openFrameReader(file: CameraFile): FrameReader? = runCatching {
         file.localUri?.let { RemoteFrames.localReader(app, android.net.Uri.parse(it)) }
             ?: if (conn == ConnState.Connected) session.frameReader(file) else null
