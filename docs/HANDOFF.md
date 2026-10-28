@@ -110,8 +110,9 @@ halation / sharpening (`light` uniform: one ring of taps), logged «превью
 is dropped only after the last step. Paused: no Presentation, full effects; after any change (slider, rebuild, panel
 open / close) the paused frame is redrawn by seeking to the same position (debounced 150 ms).
 The viewer's PlayerView is inflated from `res/layout/player_texture.xml` (`surface_type="texture_view"`): with a
-SurfaceView a paused picture stayed where it was when the panel resized the video box. Before / after: the Compare
-icon in the panel's header rebuilds the effects with only the preview size and the clipping stripes (reset when the
+SurfaceView a paused picture stayed where it was when the panel resized the video box. With it the dialog's content
+black let the gallery show through, so the dialog window gets its own black background and no dim. Before / after: the
+Compare icon over the video's top (next to «Готово», both there while the panel is open) rebuilds the effects with only the preview size and the clipping stripes (reset when the
 panel closes; the slowdown measure skips while bypassed).
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 

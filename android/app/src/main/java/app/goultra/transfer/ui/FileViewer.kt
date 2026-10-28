@@ -139,6 +139,13 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        // The viewer's window itself black and nothing dimmed behind it: with the picture in a TextureView the
+        // gallery showed through the content's own black.
+        val dialogWindow = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        androidx.compose.runtime.SideEffect {
+            dialogWindow?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.BLACK))
+            dialogWindow?.setDimAmount(0f)
+        }
         // Swipe up / down: the next / previous file of the gallery as it is listed (filter included). The list is
         // taken when the viewer opens; each page shows the phone's copy of a file when there is one.
         val list = remember { vm.visibleFiles.takeIf { l -> l.any { it.name == file.name } } ?: listOf(file) }
@@ -706,10 +713,24 @@ private fun VideoPreview(
                     tr("упрощённо", "simplified") + " · ${PLAY_SIZES[level]}p",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.align(Alignment.TopEnd).safeDrawingPadding()
-                        .padding(top = if (colouring) 8.dp else 64.dp, end = 12.dp)
+                    modifier = Modifier.align(if (colouring) Alignment.TopStart else Alignment.TopEnd).safeDrawingPadding()
+                        .padding(top = if (colouring) 12.dp else 64.dp, start = 12.dp, end = 12.dp)
                         .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
                 )
+            }
+            // Setting the colour: before / after (the processing off while lit) and «Готово», over the video's top.
+            if (colouring) Row(
+                Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                IconButton(
+                    { bypass = !bypass },
+                    Modifier.background(if (bypass) MARK_COLOR else Color(0x99000000), CircleShape),
+                ) {
+                    Icon(Icons.Filled.Compare, tr("До / после", "Before / after"), tint = if (bypass) Color.Black else Color.White)
+                }
+                Button({ colorPanel = false }) { Text(tr("Готово", "Done")) }
             }
             if (!colouring) Row(
                 Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
@@ -759,9 +780,6 @@ private fun VideoPreview(
                 onFilmLive = { filmLook.set(it); redraw++ },
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
-                bypass = bypass,
-                onBypass = { bypass = !bypass },
-                onDone = { colorPanel = false },
             )
         } else if (film) {
             if (pieces.isNotEmpty() && !editing) {
@@ -861,12 +879,9 @@ private fun ColorPanel(
     onFilmLive: (ColorLook) -> Unit,
     onClipping: () -> Unit,
     onReset: () -> Unit,
-    bypass: Boolean,
-    onBypass: () -> Unit,
-    onDone: () -> Unit,
 ) {
     var filmTab by remember { mutableStateOf(false) }
-    // The tabs and «Готово» stay; the sliders under them scroll.
+    // The tabs stay; the sliders under them scroll. Before / after and «Готово» sit over the video.
     Column(modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             val tabColors = FilterChipDefaults.filterChipColors(
@@ -884,15 +899,6 @@ private fun ColorPanel(
                     { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
                 } else null,
             )
-            Spacer(Modifier.weight(1f))
-            // Before / after: the processing off while lit.
-            IconButton(
-                onBypass,
-                if (bypass) Modifier.background(MARK_COLOR, CircleShape) else Modifier,
-            ) {
-                Icon(Icons.Filled.Compare, tr("До / после", "Before / after"), tint = if (bypass) Color.Black else Color.White)
-            }
-            Button(onDone, Modifier.padding(start = 4.dp)) { Text(tr("Готово", "Done")) }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (filmTab) {
