@@ -14,6 +14,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import app.goultra.transfer.CameraService
+import app.goultra.transfer.camera.AudioFade
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CameraInfo
@@ -2445,10 +2446,9 @@ class CameraController(private val app: Application) {
             })
             .build()
         exporter = t
-        // A piece: the media item clipped to it; a no-op audio processor makes the transformer decode the sound, so it
-        // is cut at the piece's exact ends (copied, it could only be cut at its own frames). Several pieces in a row
-        // are decoded anyway.
-        fun item(piece: Highlight?): androidx.media3.transformer.EditedMediaItem {
+        // A piece: the media item clipped to it; its sound decoded (the fades below make the transformer do that), so it
+        // is cut at the piece's exact ends — copied, it could only be cut at its own frames — and faded at the joins.
+        fun item(piece: Highlight?, i: Int = 0): androidx.media3.transformer.EditedMediaItem {
             val media = androidx.media3.common.MediaItem.Builder().setUri(uri).apply {
                 if (piece != null) {
                     setClippingConfiguration(
@@ -2459,13 +2459,18 @@ class CameraController(private val app: Application) {
                     )
                 }
             }.build()
-            val audio = if (piece != null) listOf<androidx.media3.common.audio.AudioProcessor>(androidx.media3.common.audio.SonicAudioProcessor()) else emptyList()
+            val audio = if (piece != null) {
+                val us = ((piece.endMs ?: piece.startMs) - piece.startMs) * 1000
+                listOf<androidx.media3.common.audio.AudioProcessor>(FadeProcessor(AudioFade.of(i, parts!!.size, us)))
+            } else {
+                emptyList()
+            }
             return androidx.media3.transformer.EditedMediaItem.Builder(media)
                 .setEffects(androidx.media3.transformer.Effects(audio, effects))
                 .build()
         }
         val composition = androidx.media3.transformer.Composition.Builder(
-            androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
+            androidx.media3.transformer.EditedMediaItemSequence(parts?.mapIndexed { i, p -> item(p, i) } ?: listOf(item(null))),
         ).build()
         val ticker = launch {
             val holder = androidx.media3.transformer.ProgressHolder()
@@ -2494,4 +2499,47 @@ private class HighAudioEncoders(private val base: androidx.media3.transformer.De
 
     override fun createForVideoEncoding(format: androidx.media3.common.Format): androidx.media3.transformer.Codec =
         base.createForVideoEncoding(format)
+}
+
+/** [fade] on a piece's decoded sound (16-bit or float PCM), counted from the piece's first sample. */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+private class FadeProcessor(private val fade: AudioFade) : androidx.media3.common.audio.BaseAudioProcessor() {
+    private var frames = 0L
+
+    override fun onConfigure(
+        inputAudioFormat: androidx.media3.common.audio.AudioProcessor.AudioFormat,
+    ): androidx.media3.common.audio.AudioProcessor.AudioFormat {
+        val e = inputAudioFormat.encoding
+        if (e != androidx.media3.common.C.ENCODING_PCM_16BIT && e != androidx.media3.common.C.ENCODING_PCM_FLOAT) {
+            throw androidx.media3.common.audio.AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
+        }
+        return inputAudioFormat
+    }
+
+    override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
+        val format = inputAudioFormat
+        val float = format.encoding == androidx.media3.common.C.ENCODING_PCM_FLOAT
+        val frameBytes = format.channelCount * (if (float) 4 else 2)
+        val out = replaceOutputBuffer(inputBuffer.remaining())
+        while (inputBuffer.remaining() >= frameBytes) {
+            val g = fade.gain(frames * 1_000_000L / format.sampleRate)
+            repeat(format.channelCount) {
+                if (float) {
+                    out.putFloat(inputBuffer.getFloat() * g)
+                } else {
+                    out.putShort(Math.round(inputBuffer.getShort() * g).coerceIn(-32768, 32767).toShort())
+                }
+            }
+            frames++
+        }
+        out.flip()
+    }
+
+    override fun onFlush() {
+        frames = 0
+    }
+
+    override fun onReset() {
+        frames = 0
+    }
 }

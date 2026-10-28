@@ -131,8 +131,9 @@ from the camera). `CameraController.save` picks the way: whole as shot = downloa
 effects in full, no preview size / stripes, sharpening radius × lines / 1080), the original's size, frame rate, codec
 (H.265 if the original is, else H.264; the encoder factory falls back), bitrate (track, or file size / length; 20…200
 Mbit/s). Whole: one item, sound copied. Pieces: one clipped item each in a sequence, cut exactly (re-encoding anyway);
-the sound is decoded (several items force it; one gets a no-op `SonicAudioProcessor`) so it is cut at the same places,
-re-encoded AAC ≥ 256 kbit/s (`HighAudioEncoders`; the default is 128). From the camera: `DefaultAssetLoaderFactory`
+the sound is decoded (each item's `FadeProcessor` forces it) so it is cut at the same places and faded at the joins —
+0.1 s out + 0.1 s in (`AudioFade`, quarter sine; 20 ms at the clip's ends; not an overlapping crossfade: nothing moves,
+picture and sound stay in step) — re-encoded AAC ≥ 256 kbit/s (`HighAudioEncoders`; the default is 128). From the camera: `DefaultAssetLoaderFactory`
 with `ProgressiveMediaSource` over `CameraHttpDataSource` on the full file's URL (Range reads, only what is needed);
 the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
 (own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit
