@@ -68,8 +68,8 @@ enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 /**
  * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
  * stops (−2…+2), saturation as a factor (0 grey … 1 as shot … 2), sharpness (0…1) and its radius (px) for any video;
- * the «Плёнка» look (FilmLook): how much of it (0…1), warmth (−1 cold … +1 warm), skin protection (0…1), grain and
- * halation (0…1).
+ * the «Стиль» tab (FilmLook): how much of the film print (0…1), warmth (−1 cold … +1 warm), an even skin tone (0…1),
+ * grain and halation (0…1), a film look preset ([Look] ordinal) and its strength.
  */
 data class ColorLook(
     val lut: Boolean = true,
@@ -80,25 +80,31 @@ data class ColorLook(
     val sharpRadius: Float = 1f,
     val film: Float = 0f,
     val warmth: Float = 0f,
-    val skin: Float = 0.5f,
+    val skin: Float = 0f,
     val grain: Float = 0f,
     val halation: Float = 0f,
+    val preset: Int = 0,
+    val presetStrength: Float = 1f,
 ) {
-    fun encode() = "$lut,$strength,$exposure,$saturation,$sharpness,$sharpRadius,$film,$warmth,$skin,$grain,$halation"
+    fun encode() = "$lut,$strength,$exposure,$saturation,$sharpness,$sharpRadius,$film,$warmth,$skin,$grain,$halation,$preset,$presetStrength"
 
-    /** Nothing to change for a file in [iLog] or not (skin protection alone changes nothing). */
+    /** Nothing to change for a file in [iLog] or not. */
     fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f && sharpness == 0f &&
-        film == 0f && warmth == 0f && grain == 0f && halation == 0f
+        film == 0f && warmth == 0f && skin == 0f && grain == 0f && halation == 0f && (preset == 0 || presetStrength == 0f)
 
     companion object {
-        /** Also the shorter forms saved by earlier versions (4 and 6 values). */
+        /**
+         * Also the shorter forms saved by earlier versions (4, 6 and 11 values; in the 11 the skin value was a
+         * protection strength — protection is always on now, so it is dropped).
+         */
         fun decode(s: String): ColorLook? {
             val p = s.split(',')
-            if (p.size != 4 && p.size != 6 && p.size != 11) return null
+            if (p.size != 4 && p.size != 6 && p.size != 11 && p.size != 13) return null
             fun f(i: Int, default: Float) = p.getOrNull(i)?.toFloatOrNull() ?: default
             return ColorLook(
                 p[0] == "true", f(1, 1f), f(2, 0f), f(3, 1f), f(4, 0f), f(5, 1f),
-                f(6, 0f), f(7, 0f), f(8, 0.5f), f(9, 0f), f(10, 0f),
+                f(6, 0f), f(7, 0f), if (p.size == 13) f(8, 0f) else 0f, f(9, 0f), f(10, 0f),
+                p.getOrNull(11)?.toIntOrNull() ?: 0, f(12, 1f),
             )
         }
     }

@@ -113,6 +113,14 @@ so the effects aren't rebuilt as playback starts (a rebuild then left a swiped-t
 a seek to the same spot (and many 4K seeks hung the viewer): after a change (slider let go, panel opened / closed) the
 player plays muted until `FilmLook.frames` moves (≤ 0.4 s) and pauses again. Zoom resets when the panel opens / closes
 and when the page is swiped away.
+«Стиль» tab (was «Плёнка»): `FilmMath.Grade` holds every step (balance, flash, face lift / sky / vignette, print
+curve, density, silver-retention overlay, saturation per hue at 103° / 167° / 241° / 347° with cos⁴ weights, hue turns,
+shadow / mid / highlight toning, skin); `Looks.kt` builds it from the sliders and a preset × strength. Presets are
+models of published facts (ASC / AC articles, Codex, Technicolor, Apollo — sources in the KDoc), tuned by eye to one
+still per film sent by the user; not calibrated against frame statistics yet. Skin protection is always on: the mask
+is hue (±30° of 123°) and colour relative to brightness (0.05…0.36), so dark and light skins alike; «Ровная кожа»
+pulls skin hues up to 60 % to the line. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
+Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /

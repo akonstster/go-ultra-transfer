@@ -123,6 +123,8 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material3.Switch
 import app.goultra.transfer.camera.CubeLut
+import app.goultra.transfer.camera.Look
+import androidx.compose.foundation.horizontalScroll
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.Highlight
@@ -901,7 +903,7 @@ private val PLAY_SIZES = intArrayOf(1080, 720, 540)
 /**
  * Colour while viewing (the file stays as shot), on two tabs so the sliders don't cover the video. «Свет и цвет» —
  * I-Log: Insta360's «I-Log → Rec.709» on / off and its strength; any video: exposure (stops), saturation, sharpness.
- * «Плёнка» — the print look (FilmLook): how much, warmth, skin protection, grain, halation. Seen as the slider moves;
+ * «Стиль» — film look presets, the print look (FilmLook), warmth, even skin, grain, halation. Seen as the slider moves;
  * clipping stripes on / off. Settings are kept per video; «Сбросить» goes back to the default (I-Log: LUT on).
  */
 @Composable
@@ -932,9 +934,11 @@ private fun ColorPanel(
             FilterChip(!filmTab, { filmTab = false }, { Text(tr("Свет и цвет", "Light & colour")) }, colors = tabColors)
             Spacer(Modifier.width(8.dp))
             FilterChip(
-                filmTab, { filmTab = true }, { Text(tr("Плёнка", "Film")) },
+                filmTab, { filmTab = true }, { Text(tr("Стиль", "Look")) },
                 colors = tabColors,
-                leadingIcon = if (look.film > 0f || look.grain > 0f || look.halation > 0f || look.warmth != 0f) {
+                leadingIcon = if (look.film > 0f || look.grain > 0f || look.halation > 0f || look.warmth != 0f ||
+                    look.skin > 0f || (look.preset != 0 && look.presetStrength > 0f)
+                ) {
                     { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
                 } else null,
             )
@@ -1008,12 +1012,33 @@ private fun LightSliders(
 }
 
 /**
- * «Плёнка» (see FilmMath): how much of the print look — contrast with a soft shoulder, dense colour, split toning;
- * warmth as a white balance; skin protection (shown while there is something to protect from); grain and halation.
+ * «Стиль» (see FilmMath, Looks): a film look preset with its description and strength; the film print — contrast with
+ * a soft shoulder, dense colour, split toning; warmth as a white balance; an even skin tone (skin keeps its hue through
+ * all of it anyway); grain and halation.
  */
 @Composable
 private fun FilmSliders(look: ColorLook, onLook: (ColorLook) -> Unit, onFilmLive: (ColorLook) -> Unit) {
     fun percent(v: Float) = "${Math.round(v * 100)} %"
+    val preset = Look.of(look.preset)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (l in Look.entries) {
+            FilterChip(
+                selected = l == preset,
+                onClick = { onLook(look.copy(preset = l.ordinal)) },
+                label = { Text(tr(l.ru, l.en)) },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Color.Transparent, labelColor = Color.White,
+                    selectedContainerColor = Color(0x33FFFFFF), selectedLabelColor = MARK_COLOR,
+                ),
+            )
+        }
+    }
+    if (preset != Look.NONE) {
+        Text(tr(preset.aboutRu, preset.aboutEn), color = Color(0xCCFFFFFF), fontSize = 12.sp)
+        LookSlider(tr("Сила", "Strength"), look.presetStrength, 0f..1f, ::percent, live = { onFilmLive(look.copy(presetStrength = it)) }) {
+            onLook(look.copy(presetStrength = it))
+        }
+    }
     LookSlider(tr("Плёнка", "Film"), look.film, 0f..1f, ::percent, live = { onFilmLive(look.copy(film = it)) }) {
         onLook(look.copy(film = it))
     }
@@ -1021,10 +1046,9 @@ private fun FilmSliders(look: ColorLook, onLook: (ColorLook) -> Unit, onFilmLive
         tr("Холод ↔ тепло", "Cool ↔ warm"), look.warmth, -1f..1f, { "%+d".format(Math.round(it * 100)) },
         live = { onFilmLive(look.copy(warmth = it)) },
     ) { onLook(look.copy(warmth = it)) }
-    if (look.film > 0f || look.warmth != 0f) {
-        LookSlider(tr("Кожа", "Skin"), look.skin, 0f..1f, ::percent, live = { onFilmLive(look.copy(skin = it)) }) {
-            onLook(look.copy(skin = it))
-        }
+    // Skin keeps its hue on its own; this evens it out (redness, a green cast from leaves).
+    LookSlider(tr("Ровная кожа", "Even skin"), look.skin, 0f..1f, ::percent, live = { onFilmLive(look.copy(skin = it)) }) {
+        onLook(look.copy(skin = it))
     }
     LookSlider(tr("Зерно", "Grain"), look.grain, 0f..1f, ::percent, live = { onFilmLive(look.copy(grain = it)) }) {
         onLook(look.copy(grain = it))

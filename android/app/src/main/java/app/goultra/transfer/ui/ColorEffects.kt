@@ -13,6 +13,7 @@ import androidx.media3.effect.GlShaderProgram
 import androidx.media3.effect.RgbMatrix
 import app.goultra.transfer.camera.ColorMath
 import app.goultra.transfer.camera.FilmMath
+import app.goultra.transfer.camera.Look
 import java.util.concurrent.atomic.AtomicInteger
 
 /** The whole frame, -1…1 in x and y, sampled 0…1. */
@@ -170,14 +171,16 @@ void main() {
 }
 
 /**
- * «Плёнка»: the print look of [FilmMath] (warmth, tone curve, density, split toning, skin) plus halation — a red-orange
- * glow around bright places, as light scattered back through the film's layers — and grain: fine, moving with each
- * frame, strongest in the mid-tones, the way it shows on film. Every setting is read on each frame, so sliders apply
- * live; with everything at 0 the picture passes unchanged.
+ * «Стиль»: the grade of [FilmMath] (balance, flash, faces / skies, print curve, density, silver retention, colour per
+ * hue, toning, skin) for the sliders and a preset ([Look]), plus halation — a red-orange glow around bright places, as
+ * light scattered back through the film's layers — the preset's vignette, and grain: fine, moving with each frame,
+ * strongest in the mid-tones, the way it shows on film. Every setting is read on each frame, so sliders apply live;
+ * with everything at 0 the picture passes unchanged.
  */
 @OptIn(UnstableApi::class)
 class FilmLook(look: ColorLook) : GlEffect {
     @Volatile private var look = look
+    @Volatile private var grade = gradeOf(look)
     /** The preview can't keep up: halation from one ring of taps instead of three. */
     @Volatile var light = false
     /** Frames drawn so far: how fast the preview really goes. */
@@ -185,6 +188,7 @@ class FilmLook(look: ColorLook) : GlEffect {
 
     fun set(look: ColorLook) {
         this.look = look
+        grade = gradeOf(look)
     }
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
@@ -205,13 +209,27 @@ class FilmLook(look: ColorLook) : GlEffect {
 
         override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
             val l = look
+            val g = grade
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
             glProgram.setFloatsUniform("uTexel", texel)
             glProgram.setFloatsUniform("uGrainScale", grainScale)
-            glProgram.setFloatUniform("uFilm", l.film)
-            glProgram.setFloatUniform("uWarmth", l.warmth)
-            glProgram.setFloatUniform("uSkin", l.skin)
+            glProgram.setFloatUniform("uFilm", g.film)
+            glProgram.setFloatUniform("uSkin", g.skin)
+            glProgram.setFloatsUniform("uGains", g.gains())
+            glProgram.setFloatUniform("uFlash", g.flash)
+            glProgram.setFloatUniform("uFaceLift", g.faceLift)
+            glProgram.setFloatUniform("uSkyDark", g.skyDark)
+            glProgram.setFloatUniform("uVignette", g.vignette)
+            glProgram.setFloatUniform("uCurve", g.curveAmount())
+            glProgram.setFloatUniform("uContrast", g.curveContrast())
+            glProgram.setFloatUniform("uBleach", g.bleach)
+            glProgram.setFloatUniform("uSat", g.sat)
+            glProgram.setFloatsUniform("uHueSat", g.hueSat)
+            glProgram.setFloatsUniform("uHueShift", FloatArray(4) { Math.toRadians(g.hueShift[it].toDouble()).toFloat() })
+            glProgram.setFloatsUniform("uShadowTint", g.shadowTint)
+            glProgram.setFloatsUniform("uMidTint", g.midTint)
+            glProgram.setFloatsUniform("uHighTint", g.highTint)
             glProgram.setFloatUniform("uGrain", l.grain)
             glProgram.setFloatUniform("uHalation", l.halation)
             glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
@@ -229,8 +247,12 @@ class FilmLook(look: ColorLook) : GlEffect {
     }
 
     private companion object {
-        // The same steps and constants as FilmMath.apply; then halation (before the tone curve, in light, so the curve's
-        // shoulder takes it) and grain (last, on the finished picture).
+        fun gradeOf(look: ColorLook) = Look.grade(Look.of(look.preset), look.presetStrength, look.film, look.warmth, look.skin)
+
+        private fun hue(i: Int) = Math.toRadians(FilmMath.HUES[i].toDouble()).toFloat()
+
+        // The same steps and constants as FilmMath.apply; then halation (before the balance, in light, so the curve's
+        // shoulder takes it), the vignette (with the faces / skies) and grain (last, on the finished picture).
         val FILM = """#version 100
 #ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
@@ -241,8 +263,21 @@ uniform sampler2D uTexSampler;
 uniform vec2 uTexel;
 uniform vec2 uGrainScale;
 uniform float uFilm;
-uniform float uWarmth;
 uniform float uSkin;
+uniform vec3 uGains;
+uniform float uFlash;
+uniform float uFaceLift;
+uniform float uSkyDark;
+uniform float uVignette;
+uniform float uCurve;
+uniform float uContrast;
+uniform float uBleach;
+uniform float uSat;
+uniform vec4 uHueSat;
+uniform vec4 uHueShift;
+uniform vec2 uShadowTint;
+uniform vec2 uMidTint;
+uniform vec2 uHighTint;
 uniform float uGrain;
 uniform float uHalation;
 uniform float uFrame;
@@ -252,6 +287,7 @@ varying vec2 vTexSamplingCoord;
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 const float GAMMA = ${FilmMath.GAMMA};
 const vec2 SKIN_LINE = vec2(${FilmMath.SKIN_CB}, ${FilmMath.SKIN_CR});
+const vec4 HUES = vec4(${hue(0)}, ${hue(1)}, ${hue(2)}, ${hue(3)});
 
 // Hash without sine (Dave Hoskins): even noise on mobile GPUs too.
 float hash(vec3 p) {
@@ -273,18 +309,27 @@ float grainNoise(vec2 p, float frame) {
 }
 
 float tone(float lin) {
-  float stops = log2(max(lin, 1e-5) / ${FilmMath.GREY}) * (1.0 + ${FilmMath.CONTRAST} * uFilm);
+  float stops = log2(max(lin, 1e-5) / ${FilmMath.GREY}) * uContrast;
   float y = ${FilmMath.GREY} * exp2(stops);
   if (y > ${FilmMath.KNEE}) y = ${FilmMath.KNEE} + (1.0 - ${FilmMath.KNEE}) * (1.0 - exp(-(y - ${FilmMath.KNEE}) / (1.0 - ${FilmMath.KNEE})));
-  y = ${FilmMath.BLACK} * uFilm + (1.0 - ${FilmMath.BLACK} * uFilm) * y;
-  return mix(lin, y, uFilm);
+  y = ${FilmMath.BLACK} * uCurve + (1.0 - ${FilmMath.BLACK} * uCurve) * y;
+  return mix(lin, y, uCurve);
 }
 
 float skinMask(float luma, vec2 c) {
   float len = length(c);
   if (len < 1e-4) return 0.0;
   float cosine = dot(c, SKIN_LINE) / len;
-  return smoothstep(0.906, 0.985, cosine) * smoothstep(0.015, 0.05, len) * smoothstep(0.08, 0.2, luma) * (1.0 - smoothstep(0.85, 0.97, luma));
+  float rel = len / max(luma, 0.05);
+  return smoothstep(0.866, 0.966, cosine) * smoothstep(0.05, 0.12, rel) * (1.0 - smoothstep(0.36, 0.45, rel)) *
+    smoothstep(0.03, 0.1, luma) * (1.0 - smoothstep(0.88, 0.98, luma));
+}
+
+vec4 hueWeights(vec2 c) {
+  float a = atan(c.y, c.x);
+  vec4 w = max(cos(vec4(a) - HUES), 0.0);
+  w = w * w;
+  return w * w;
 }
 
 // How much a place glows: only near white.
@@ -297,7 +342,8 @@ void main() {
   vec3 c0 = clamp(src.rgb, 0.0, 1.0);
   float y0 = dot(c0, LUMA);
   vec2 chroma0 = vec2((c0.b - y0) / 1.8556, (c0.r - y0) / 1.5748);
-  float mask = skinMask(y0, chroma0) * uSkin;
+  float len0 = length(chroma0);
+  float mask = skinMask(y0, chroma0);
 
   vec3 lin = pow(c0, vec3(GAMMA));
 
@@ -322,27 +368,42 @@ void main() {
     lin += glow * (1.0 - 0.6 * self) * uHalation * vec3(1.0, 0.28, 0.06);
   }
 
-  float wr = 1.0 + ${FilmMath.WARMTH} * uWarmth;
-  float wb = 1.0 - ${FilmMath.WARMTH} * uWarmth;
-  lin *= vec3(wr, 1.0, wb) / (LUMA.r * wr + LUMA.g + LUMA.b * wb);
+  lin = lin * uGains + uFlash;
+  // Faces lighter, light skies darker, corners darker (stops).
+  float sky = hueWeights(chroma0).w * smoothstep(0.02, 0.06, len0) * smoothstep(0.4, 0.8, y0);
+  vec2 off = (vTexSamplingCoord - 0.5) * 2.0;
+  float corner = smoothstep(0.35, 1.6, dot(off, off));
+  lin *= exp2(uFaceLift * mask - uSkyDark * sky - uVignette * corner);
 
+  if (uCurve > 0.0) lin = vec3(tone(lin.r), tone(lin.g), tone(lin.b));
   if (uFilm > 0.0) {
-    lin = vec3(tone(lin.r), tone(lin.g), tone(lin.b));
     float top = max(lin.r, max(lin.g, lin.b));
     float sat = top > 1e-5 ? (top - min(lin.r, min(lin.g, lin.b))) / top : 0.0;
     lin *= 1.0 - ${FilmMath.DENSITY} * uFilm * sat * sat;
   }
   vec3 g = pow(clamp(lin, 0.0, 1.0), vec3(1.0 / GAMMA));
 
+  // Silver retention: an overlay of the picture's brightness on it.
+  if (uBleach > 0.0) {
+    float l = dot(g, LUMA);
+    vec3 o = l < 0.5 ? 2.0 * g * l : 1.0 - 2.0 * (1.0 - g) * (1.0 - l);
+    g = mix(g, o, uBleach);
+  }
+
   float y = dot(g, LUMA);
   vec2 chroma = vec2((g.b - y) / 1.8556, (g.r - y) / 1.5748);
+  vec4 w = hueWeights(chroma);
+  float satK = max(1.0 + dot(w, uHueSat - 1.0), 0.0) * uSat;
+  float t = dot(w, uHueShift);
+  chroma = vec2(chroma.x * cos(t) - chroma.y * sin(t), chroma.x * sin(t) + chroma.y * cos(t)) * satK;
   float shadows = smoothstep(0.0, 0.12, y) * (1.0 - smoothstep(0.12, 0.55, y));
+  float mids = 4.0 * y * (1.0 - y);
   float highs = smoothstep(0.45, 0.8, y) * (1.0 - 0.7 * smoothstep(0.85, 1.0, y));
-  vec2 toned = chroma + uFilm * (shadows * vec2(${FilmMath.SHADOW_CB}, ${FilmMath.SHADOW_CR}) + highs * vec2(${FilmMath.HIGH_CB}, ${FilmMath.HIGH_CR}));
-  vec2 pulled = chroma;
-  float len0 = length(chroma0);
+  vec2 toned = chroma + uFilm * (shadows * vec2(${FilmMath.SHADOW_CB}, ${FilmMath.SHADOW_CR}) + highs * vec2(${FilmMath.HIGH_CB}, ${FilmMath.HIGH_CR}))
+    + shadows * uShadowTint + mids * uMidTint + highs * uHighTint;
+  vec2 pulled = toned;
   if (len0 > 1e-5) {
-    float k = ${FilmMath.SKIN_PULL} * uSkin * uFilm;
+    float k = ${FilmMath.SKIN_PULL} * uSkin;
     pulled = length(chroma) * normalize((1.0 - k) * chroma0 / len0 + k * SKIN_LINE);
   }
   chroma = mix(toned, pulled, mask);

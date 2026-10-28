@@ -15,8 +15,8 @@ class FilmMathTest {
 
     @Test
     fun offIsIdentity() {
-        assertArrayEquals(orange, FilmMath.apply(orange, 0f, 0f, 0.5f), 2e-3f)
-        assertArrayEquals(skin, FilmMath.apply(skin, 0f, 0f, 1f), 2e-3f)
+        assertArrayEquals(orange, FilmMath.apply(orange, 0f, 0f, 0f), 2e-3f)
+        assertArrayEquals(skin, FilmMath.apply(skin, 0f, 0f, 0f), 2e-3f)
     }
 
     @Test
@@ -55,12 +55,18 @@ class FilmMathTest {
 
     @Test
     fun skinKeepsItsHue() {
-        // Cold and toned: a face turns towards blue unprotected; protected it stays at its hue, nudged to the line.
+        // Cold and toned, a face keeps the hue it was shot with (always, no slider needed).
         val before = FilmMath.hue(skin)
-        val toned = FilmMath.hue(FilmMath.apply(skin, 1f, -1f, 0f))
-        val kept = FilmMath.hue(FilmMath.apply(skin, 1f, -1f, 1f))
-        assertTrue("before $before toned $toned kept $kept", abs(kept - before) <= 2f && abs(kept - 123f) <= abs(before - 123f))
-        // A blue sky is no skin: toned the same either way.
+        val graded = FilmMath.hue(FilmMath.apply(skin, 1f, -1f, 0f))
+        assertTrue("before $before graded $graded", abs(graded - before) <= 1.5f)
+        // A dark skin too: same line, less light and less colour.
+        val dark = floatArrayOf(0.3f, 0.19f, 0.13f)
+        assertTrue(FilmMath.skinMask(0.21f, (0.13f - 0.21f) / 1.8556f, (0.3f - 0.21f) / 1.5748f) > 0.9f)
+        assertEquals(FilmMath.hue(dark), FilmMath.hue(FilmMath.apply(dark, 1f, -1f, 0f)), 1.5f)
+        // «Ровная кожа» turns a reddish face towards the skin line.
+        val red = floatArrayOf(0.80f, 0.55f, 0.52f)
+        assertTrue(abs(FilmMath.hue(FilmMath.apply(red, 0f, 0f, 1f)) - 123f) < abs(FilmMath.hue(red) - 123f) - 5f)
+        // A blue sky is no skin: the skin setting leaves it alone.
         val sky = floatArrayOf(0.35f, 0.55f, 0.85f)
         assertArrayEquals(FilmMath.apply(sky, 1f, -1f, 0f), FilmMath.apply(sky, 1f, -1f, 1f), 1e-4f)
     }
