@@ -90,7 +90,8 @@ every video player gets it. SDR effects see gamma-encoded BT.709 (Builder defaul
 javadoc's «linear» is stale), so the LUT gets I-Log as encoded. Exposure (stops, ×2^(ev/2.2) encoded) and saturation
 (factor around Rec.709 luma) are one `LiveColorMatrix` (`ColorMath`, unit-tested) read per frame — sliders apply live;
 LUT strength and the clipping stripes (`ClippingStripes`, own GLSL: max channel ≥ 0.98 red / ≤ 0.02 blue, diagonal
-stripes) rebuild the effect list. Settings in prefs `look2_<name>` (the old `look_` held offsets). No frame after 5 s
+stripes) rebuild the effect list (the stripes are a check, not a setting: not saved, off whenever the colour panel
+closes). Settings in prefs `look2_<name>` (the old `look_` held offsets). No frame after 5 s
 of playing with effects → shown without them. Controls only on a tap; the video loops while the colour panel is open.
 Sharpness: `Sharpen` (luma unsharp mask, 2 rings × 8 taps, threshold, capped). «Плёнка» tab: `FilmLook` (one GLSL
 pass after sharpening, all uniforms live) = `FilmMath` (unit-tested; the shader takes its constants by template, so they
@@ -148,6 +149,9 @@ Colour copy / paste: icons over the video while the panel is open; `copiedLook` 
 that video's look; in the gallery a selection gets a paste icon (`pasteLookToSelected`, videos only) and tiles with a
 look of their own show a palette mark (`hasLook`, redrawn via `lookVersion`). A save replacing a file forgets its
 thumbnail (`forgetThumbnail`; tiles also key on `localUri`). Saving a selection as a batch: to do.
+«i» for videos: `streamInfo` (MediaExtractor on the phone copy, or the camera's index over Wi-Fi) — video codec, 8 / 10
+bit (codec profile), its bitrate; frame rate counted from frame times over the first 2 s; sound codec, kHz, channels,
+bitrate or «нет»; the whole file's bitrate from the retriever.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.

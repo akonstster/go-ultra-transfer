@@ -218,12 +218,16 @@ class CameraController(private val app: Application) {
     }
 
     /** Clipping stripes over the video in the viewer (blown whites red, crushed blacks blue), for every video. */
-    var clipping by mutableStateOf(prefs.getBoolean("clipping", false))
+    /** A check while setting the colour, not a setting: off at start, and off again when the colour panel closes. */
+    var clipping by mutableStateOf(false)
         private set
 
     fun toggleClipping() {
         clipping = !clipping
-        prefs.edit().putBoolean("clipping", clipping).apply()
+    }
+
+    fun clippingOff() {
+        clipping = false
     }
 
     fun toggleFavorite(file: CameraFile) {
@@ -1906,6 +1910,15 @@ class CameraController(private val app: Application) {
         add("Избранное", "Favorite", if (file.name in favorites) "♥" else null)
         val local = file.localUri?.let(android.net.Uri::parse)
         if (file.kind == MediaKind.VIDEO) {
+            // The streams as the file has them (codecs, frame rate, sound): the phone's copy, or the camera's file over
+            // Wi-Fi (its index only).
+            val streams = runCatching {
+                when {
+                    local != null -> streamInfo { it.setDataSource(app, local, null) }
+                    conn == ConnState.Connected -> session.indexSource(file).let { src -> streamInfo { it.setDataSource(src) } }
+                    else -> null
+                }
+            }.onFailure { log("сведения ${file.name}: ${it.message}") }.getOrNull()
             if (local != null) {
                 val r = android.media.MediaMetadataRetriever()
                 try {
@@ -1914,9 +1927,11 @@ class CameraController(private val app: Application) {
                     val w = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
                     val h = meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
                     if (w != null && h != null) add("Разрешение", "Resolution", "$w × $h")
-                    add("Кадров/с", "Frame rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()?.let { "%.2f".format(it) } ?: file.fps)
+                    add("Кадров/с", "Frame rate", streams?.fps ?: meta(android.media.MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull()?.let { "%.2f".format(it) } ?: file.fps)
+                    add("Видео", "Video", streams?.video)
+                    add("Звук", "Sound", streams?.audio ?: streams?.let { tr("нет", "none") })
                     add("Длительность", "Length", meta(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { formatDuration((it / 1000).toInt()) })
-                    add("Битрейт", "Bit rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") })
+                    add("Битрейт", "Bit rate", meta(android.media.MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()?.let { "${it / 1_000_000} " + tr("Мбит/с (весь файл)", "Mbit/s (whole file)") })
                     add("Поворот", "Rotation", meta(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.takeIf { it != "0" }?.let { "$it°" })
                     add("Место", "Location", meta(android.media.MediaMetadataRetriever.METADATA_KEY_LOCATION))
                 } catch (e: RuntimeException) {
@@ -1926,7 +1941,9 @@ class CameraController(private val app: Application) {
                 }
             } else {
                 if (file.width != null && file.height != null) add("Разрешение", "Resolution", "${file.width} × ${file.height}")
-                add("Кадров/с", "Frame rate", file.fps)
+                add("Кадров/с", "Frame rate", streams?.fps ?: file.fps)
+                add("Видео", "Video", streams?.video)
+                add("Звук", "Sound", streams?.audio ?: streams?.let { tr("нет", "none") })
                 add("Длительность", "Length", file.durationSec?.let(::formatDuration))
             }
             add("Отметок", "Highlights", highlights(file).size.takeIf { it > 0 })
@@ -1962,6 +1979,85 @@ class CameraController(private val app: Application) {
             add("Живое фото", "Live photo", if (file.isLive) tr("да", "yes") else null)
         }
         out
+    }
+
+    /** A video's streams as text: the video codec and bit depth and rate, the frame rate, the sound (null: none). */
+    private class Streams(val video: String?, val fps: String?, val audio: String?)
+
+    /**
+     * The tracks of a video ([open] sets the extractor's source). The frame rate is counted from the frames' times over
+     * the first two seconds (the container's own figure is often missing); bit depth from the codec profile.
+     */
+    private fun streamInfo(open: (android.media.MediaExtractor) -> Unit): Streams {
+        val ex = android.media.MediaExtractor()
+        try {
+            open(ex)
+            var video: String? = null
+            var fps: String? = null
+            var audio: String? = null
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val mime = f.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                fun int(key: String) = if (f.containsKey(key)) runCatching { f.getInteger(key) }.getOrNull() else null
+                val kbps = int(android.media.MediaFormat.KEY_BIT_RATE)?.takeIf { it > 0 }
+                if (mime.startsWith("video/") && video == null) {
+                    val tenBit = when (mime) {
+                        android.media.MediaFormat.MIMETYPE_VIDEO_HEVC -> int(android.media.MediaFormat.KEY_PROFILE) in setOf(
+                            android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
+                            android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
+                        )
+                        android.media.MediaFormat.MIMETYPE_VIDEO_AVC -> int(android.media.MediaFormat.KEY_PROFILE) == android.media.MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10
+                        else -> false
+                    }
+                    video = listOfNotNull(
+                        codecName(mime),
+                        if (tenBit) tr("10 бит", "10-bit") else tr("8 бит", "8-bit"),
+                        kbps?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") },
+                    ).joinToString(" · ")
+                    // Frames over the first 2 s, by their times (the index only, no picture data read).
+                    ex.selectTrack(i)
+                    ex.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                    val first = ex.sampleTime
+                    var count = 0
+                    var last = first
+                    while (ex.sampleTime >= 0 && ex.sampleTime - first < 2_000_000) {
+                        last = ex.sampleTime
+                        count++
+                        if (!ex.advance()) break
+                    }
+                    ex.unselectTrack(i)
+                    val counted = if (count > 1 && last > first) (count - 1) * 1_000_000.0 / (last - first) else null
+                    fps = (counted ?: int(android.media.MediaFormat.KEY_FRAME_RATE)?.toDouble())?.let { "%.2f".format(it) }
+                } else if (mime.startsWith("audio/") && audio == null) {
+                    val channels = int(android.media.MediaFormat.KEY_CHANNEL_COUNT)
+                    audio = listOfNotNull(
+                        codecName(mime),
+                        int(android.media.MediaFormat.KEY_SAMPLE_RATE)?.let { "%.1f ".format(it / 1000.0) + tr("кГц", "kHz") },
+                        when (channels) {
+                            null -> null
+                            1 -> tr("моно", "mono")
+                            2 -> tr("стерео", "stereo")
+                            else -> "$channels " + tr("кан.", "ch")
+                        },
+                        kbps?.let { "${it / 1000} " + tr("кбит/с", "kbit/s") },
+                    ).joinToString(" · ")
+                }
+            }
+            return Streams(video, fps, audio)
+        } finally {
+            ex.release()
+        }
+    }
+
+    private fun codecName(mime: String) = when (mime) {
+        android.media.MediaFormat.MIMETYPE_VIDEO_HEVC -> "H.265 (HEVC)"
+        android.media.MediaFormat.MIMETYPE_VIDEO_AVC -> "H.264 (AVC)"
+        "video/av01" -> "AV1"
+        "video/x-vnd.on2.vp9" -> "VP9"
+        android.media.MediaFormat.MIMETYPE_AUDIO_AAC -> "AAC"
+        "audio/opus" -> "Opus"
+        "audio/raw" -> "PCM"
+        else -> mime.substringAfter('/')
     }
 
     /** «Скачать» from the viewer: just this file. */

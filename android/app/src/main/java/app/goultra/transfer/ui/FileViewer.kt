@@ -660,7 +660,11 @@ private fun VideoPreview(
     LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
     LaunchedEffect(colouring) {
         onColouring(colouring)
-        if (!colouring) bypass = false
+        // The panel closed: the before / after and the clipping stripes were checks while setting it — both off.
+        if (!colouring) {
+            bypass = false
+            vm.clippingOff()
+        }
         // A new layout: back to the picture as it opens.
         zoom = 1f
         shift = Offset.Zero
