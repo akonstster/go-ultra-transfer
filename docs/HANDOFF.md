@@ -78,6 +78,13 @@ in the proto) even with marks set from the app; the marks appear only in the fin
 request's reply didn't show the recording at all — the status stays on BLE. Each mark from the app is logged
 («отметка на N с: поставлена»). JPG + DNG stay separate tiles (user's choice).
 
+**Colour for I-Log (viewing only, 28.10, not yet tested on a phone):** «Цвет» chip in the viewer → `ColorPanel`: a
+.cube LUT loaded from the phone (`CubeLut`, copied to filesDir/lut.cube — Insta360's file is not shipped: its licence
+is unclear), on/off, strength (mixed with identity), brightness, saturation; per file in prefs (`look_<name>`). media3
+`setVideoEffects` (lib media3-effect): the effect pipeline only exists if effects are set before the player is
+prepared, so with a LUT loaded every video player gets them (empty list when off) and changes apply live. Exporting
+with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
+
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
 

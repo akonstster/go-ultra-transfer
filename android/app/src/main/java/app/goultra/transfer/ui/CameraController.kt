@@ -22,6 +22,7 @@ import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.ClipMaker
+import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.KeyFrames
 import app.goultra.transfer.camera.FrameReader
 import app.goultra.transfer.camera.Mp4Index
@@ -64,6 +65,16 @@ sealed interface ConnState {
 
 enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 
+/** Colour over an I-Log video: how much of the LUT (0…1), brightness and saturation (−1…1, 0 = unchanged). */
+data class ColorLook(val strength: Float = 1f, val brightness: Float = 0f, val saturation: Float = 0f) {
+    fun encode() = "$strength,$brightness,$saturation"
+
+    companion object {
+        fun decode(s: String): ColorLook? = s.split(',').mapNotNull { it.toFloatOrNull() }.takeIf { it.size == 3 }
+            ?.let { (a, b, c) -> ColorLook(a, b, c) }
+    }
+}
+
 enum class Tab { FILES, CAMERA }
 
 data class DownloadProgress(
@@ -101,6 +112,34 @@ class CameraController(private val app: Application) {
     /** Files marked with the heart, by name (the camera's file and its phone copy share it); kept on the phone. */
     var favorites by mutableStateOf(prefs.getStringSet("favorites", emptySet())!!.toSet())
         private set
+
+    // ---------- colour: a LUT for I-Log videos, shown in the viewer (the file stays as shot) ----------
+
+    private val lutFile = File(app.filesDir, "lut.cube")
+
+    /** The colour table loaded from the phone (e.g. Insta360's I-Log → Rec.709), or null. Not shipped: the user's file. */
+    var lut by mutableStateOf(runCatching { lutFile.takeIf { it.exists() }?.readText()?.let(CubeLut::parse) }.getOrNull())
+        private set
+
+    /** Reads a .cube file chosen on the phone; on success it replaces the current table. Returns an error, or null. */
+    suspend fun importLut(uri: android.net.Uri): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val text = app.contentResolver.openInputStream(uri)!!.use { it.readBytes().decodeToString() }
+            val parsed = CubeLut.parse(text)
+            lutFile.writeText(text)
+            parsed
+        }.fold(
+            onSuccess = { lut = it; log("LUT загружен: ${it.title} ${it.size}³"); null },
+            onFailure = { log("LUT не загружен: ${it.message}"); tr("Это не таблица LUT (.cube)", "Not a LUT (.cube) file") },
+        )
+    }
+
+    /** A video's colour settings: null = shown as shot. Kept on the phone per file name. */
+    fun look(file: CameraFile): ColorLook? = prefs.getString("look_" + file.name, null)?.let(ColorLook::decode)
+
+    fun saveLook(file: CameraFile, look: ColorLook?) {
+        prefs.edit().apply { if (look == null) remove("look_" + file.name) else putString("look_" + file.name, look.encode()) }.apply()
+    }
 
     fun toggleFavorite(file: CameraFile) {
         favorites = if (file.name in favorites) favorites - file.name else favorites + file.name
