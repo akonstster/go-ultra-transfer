@@ -52,7 +52,8 @@ enum class Look(val ru: String, val en: String, val aboutRu: String, val aboutEn
      * there is hardly any blue → red ×1.25, yellow ×1.15, green ×1.2 turned 20° towards gold, blue ×0.25 (approx.). Matched
      * by eye to a still of the film (the Sacré-Cœur ride): white stone and clouds gone yellow-olive, brown-olive
      * shadows, saturated reds and oranges → a strong olive-yellow toning of the mid-tones and highlights, warm shadows,
-     * colour ×1.05.
+     * colour ×1.05. Faces go golden with the rest, as in the still — and keeping their hue against so strong a
+     * grade showed its edges on faces — so no skin guard here.
      */
     AMELIE(
         "Амели", "Amélie",
@@ -104,6 +105,7 @@ enum class Look(val ru: String, val en: String, val aboutRu: String, val aboutEn
                 shadowTint = mix(floatArrayOf(0f, 0f), p.shadowTint),
                 midTint = mix(floatArrayOf(0f, 0f), p.midTint),
                 highTint = mix(floatArrayOf(0f, 0f), p.highTint),
+                skinGuard = mix(1f, p.skinGuard),
             )
         }
 
@@ -136,6 +138,7 @@ enum class Look(val ru: String, val en: String, val aboutRu: String, val aboutEn
                 shadowTint = floatArrayOf(-0.025f, 0.008f),
                 midTint = floatArrayOf(-0.055f, -0.005f),
                 highTint = floatArrayOf(-0.06f, -0.008f),
+                skinGuard = 0f,
             )
             REVENANT -> Grade(
                 wb = FilmMath.temperatureGains(5500f, 7000f),

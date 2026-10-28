@@ -230,6 +230,7 @@ class FilmLook(look: ColorLook) : GlEffect {
             glProgram.setFloatsUniform("uShadowTint", g.shadowTint)
             glProgram.setFloatsUniform("uMidTint", g.midTint)
             glProgram.setFloatsUniform("uHighTint", g.highTint)
+            glProgram.setFloatUniform("uSkinGuard", g.skinGuard)
             glProgram.setFloatUniform("uGrain", l.grain)
             glProgram.setFloatUniform("uHalation", l.halation)
             glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
@@ -278,6 +279,7 @@ uniform vec4 uHueShift;
 uniform vec2 uShadowTint;
 uniform vec2 uMidTint;
 uniform vec2 uHighTint;
+uniform float uSkinGuard;
 uniform float uGrain;
 uniform float uHalation;
 uniform float uFrame;
@@ -402,10 +404,10 @@ void main() {
   vec2 toned = chroma + uFilm * (shadows * vec2(${FilmMath.SHADOW_CB}, ${FilmMath.SHADOW_CR}) + highs * vec2(${FilmMath.HIGH_CB}, ${FilmMath.HIGH_CR}))
     + shadows * uShadowTint + mids * uMidTint + highs * uHighTint;
   vec2 pulled = toned;
-  if (len0 > 1e-5) {
-    float k = ${FilmMath.SKIN_PULL} * uSkin;
-    pulled = length(chroma) * normalize((1.0 - k) * chroma0 / len0 + k * SKIN_LINE);
-  }
+  if (len0 > 1e-5) pulled = mix(toned, length(chroma) * chroma0 / len0, uSkinGuard);
+  float plen = length(pulled);
+  float k = ${FilmMath.SKIN_PULL} * uSkin;
+  if (plen > 1e-5 && k > 0.0) pulled = plen * normalize((1.0 - k) * pulled / plen + k * SKIN_LINE);
   chroma = mix(toned, pulled, mask);
   float r = y + 1.5748 * chroma.y;
   float b = y + 1.8556 * chroma.x;

@@ -120,7 +120,8 @@ models of published facts (ASC / AC articles, Codex, Technicolor, Apollo — sou
 still per film sent by the user; not calibrated against frame statistics yet. Skin protection is always on: the mask
 is hue (full within ±15° of 123°, fading to ±45°) and colour relative to brightness (soft 0.04…0.12 up, 0.4…0.75
 down), so dark and light skins alike — wide soft edges, narrow ones showed as stripes on faces under Amélie; «Ровная кожа»
-pulls skin hues up to 60 % to the line. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
+pulls skin hues up to 60 % to the line. A preset can lower the guard (`skinGuard`, mixed by strength): Amélie has 0 —
+faces go golden with the rest, as in the film, and guarding against so strong a grade showed its edges. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
 Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 

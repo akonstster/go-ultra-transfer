@@ -66,7 +66,8 @@ object FilmMath {
      * Everything the grade does, from the sliders and a preset ([Looks.grade]); the defaults change nothing.
      * [wb]: light gains (luma kept); [flash]: light added; [faceLift] / [skyDark] / [vignette]: stops; [contrast]: extra
      * contrast per stop and [curve] how much of the print curve (both on top of [film]); [bleach] 0…1; [sat] overall
-     * and [hueSat] / [hueShift] (degrees) per hue of [HUES]; [shadowTint] / [midTint] / [highTint]: Cb, Cr.
+     * and [hueSat] / [hueShift] (degrees) per hue of [HUES]; [shadowTint] / [midTint] / [highTint]: Cb, Cr;
+     * [skinGuard]: how much skin keeps its shot hue (1; a preset that recolours everything, faces too, sets less).
      */
     class Grade(
         val film: Float = 0f,
@@ -86,6 +87,7 @@ object FilmMath {
         val shadowTint: FloatArray = floatArrayOf(0f, 0f),
         val midTint: FloatArray = floatArrayOf(0f, 0f),
         val highTint: FloatArray = floatArrayOf(0f, 0f),
+        val skinGuard: Float = 1f,
     ) {
         /** Light gains of warmth and [wb] together, brightness kept. */
         fun gains(): FloatArray {
@@ -194,18 +196,23 @@ object FilmMath {
             shadows * grade.shadowTint[0] + mids * grade.midTint[0] + highs * grade.highTint[0]
         val tcr = cr + grade.film * (SHADOW_CR * shadows + HIGH_CR * highs) +
             shadows * grade.shadowTint[1] + mids * grade.midTint[1] + highs * grade.highTint[1]
-        // Skin: the shot's hue (before balance, hue turns and toning) turned part of the way to the skin line, at the
-        // graded strength.
+        // Skin: the shot's hue (before balance, hue turns and toning) at the graded strength, as much as [skinGuard]
+        // says; then turned part of the way to the skin line.
         val c = sqrt(cb * cb + cr * cr)
         var pcb = tcb
         var pcr = tcr
         if (c0 > 1e-5f) {
-            val k = SKIN_PULL * grade.skin
-            val dx = (1f - k) * cb0 / c0 + k * SKIN_CB
-            val dy = (1f - k) * cr0 / c0 + k * SKIN_CR
+            pcb = tcb + (c * cb0 / c0 - tcb) * grade.skinGuard
+            pcr = tcr + (c * cr0 / c0 - tcr) * grade.skinGuard
+        }
+        val pc = sqrt(pcb * pcb + pcr * pcr)
+        val k = SKIN_PULL * grade.skin
+        if (pc > 1e-5f && k > 0f) {
+            val dx = (1f - k) * pcb / pc + k * SKIN_CB
+            val dy = (1f - k) * pcr / pc + k * SKIN_CR
             val d = sqrt(dx * dx + dy * dy)
-            pcb = c * dx / d
-            pcr = c * dy / d
+            pcb = pc * dx / d
+            pcr = pc * dy / d
         }
         cb = tcb + (pcb - tcb) * mask
         cr = tcr + (pcr - tcr) * mask

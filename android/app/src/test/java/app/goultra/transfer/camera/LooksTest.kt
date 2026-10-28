@@ -50,6 +50,9 @@ class LooksTest {
         assertTrue(s[2] - s[0] < (sky[2] - sky[0]) * 0.5f)
         val grey = graded(Look.AMELIE, floatArrayOf(0.6f, 0.6f, 0.6f))
         assertTrue(grey[0] > grey[2] && grey[1] > grey[2]) // yellow cast
+        // No skin guard: a face goes golden with the rest (its hue moves towards yellow, 167°).
+        val f = graded(Look.AMELIE, face)
+        assertTrue("face ${FilmMath.hue(f)} from ${FilmMath.hue(face)}", FilmMath.hue(f) > FilmMath.hue(face) + 5f)
     }
 
     @Test
