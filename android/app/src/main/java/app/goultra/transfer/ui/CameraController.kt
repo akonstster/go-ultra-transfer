@@ -418,7 +418,6 @@ class CameraController(private val app: Application) {
         // A save with colour cut short by the process dying leaves its temp files (gigabytes for a long 4K video).
         File(app.cacheDir, "export.mp4").delete()
         File(app.cacheDir, "export.aac").delete()
-        loadAddedFiles()
     }
 
     init {
@@ -3070,5 +3069,11 @@ class CameraController(private val app: Application) {
             if (!done.isCompleted) t.cancel()
             exporter = null
         }
+    }
+
+    // Last in the class: everything it uses (the lock, the store) exists only once the fields above are made — called
+    // from an earlier init it crashed the app at start.
+    init {
+        loadAddedFiles()
     }
 }
