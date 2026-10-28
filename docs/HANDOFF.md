@@ -144,6 +144,10 @@ ignores the items' clipping — the whole picture came out) (Range reads, only w
 the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
 (own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit
 output: an I-Log file's 10 bits are not kept. The Insta360 trailer (marks) isn't carried over. Not on the phone yet.
+Colour copy / paste: icons over the video while the panel is open; `copiedLook` in prefs (`look_copied`), pasted as
+that video's look; in the gallery a selection gets a paste icon (`pasteLookToSelected`, videos only) and tiles with a
+look of their own show a palette mark (`hasLook`, redrawn via `lookVersion`). A save replacing a file forgets its
+thumbnail (`forgetThumbnail`; tiles also key on `localUri`). Saving a selection as a batch: to do.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.
