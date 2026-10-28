@@ -1471,7 +1471,7 @@ private fun clockTenths(ms: Long): String = "%d:%02d.%d".format(ms / 60_000, ms 
 private const val SKIP_SLACK_MS = 300L
 
 /** The seek bar's default marker colour (media3 ad markers), so the chips match the ticks. */
-private val MARK_COLOR = Color(0xB2FFFF00)
+internal val MARK_COLOR = Color(0xB2FFFF00)
 
 private fun clock(ms: Long): String = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
 

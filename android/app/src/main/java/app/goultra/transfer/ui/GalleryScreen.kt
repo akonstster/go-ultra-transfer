@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -372,6 +374,7 @@ private fun FileGrid(vm: CameraController) {
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         favorite = file.name in vm.favorites,
+                        coloured = file.kind == MediaKind.VIDEO && vm.lookVersion >= 0 && vm.hasLook(file),
                         phoneOnly = file.isOnPhone && !vm.showsPhone,
                         loadThumbnail = vm::thumbnail,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
@@ -402,6 +405,7 @@ private fun FileTile(
     selected: Boolean,
     downloaded: Boolean,
     favorite: Boolean,
+    coloured: Boolean,
     phoneOnly: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
     onClick: () -> Unit,
@@ -449,6 +453,14 @@ private fun FileTile(
                 tint = Color(0xFFFF5252),
             )
         }
+        if (coloured) {
+            // A colour of its own set in the viewer (or pasted).
+            Box(
+                Modifier.align(Alignment.TopStart).padding(start = if (favorite) 27.dp else 5.dp, top = 5.dp).size(18.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.Palette, tr("Свой цвет", "Own colour"), Modifier.size(12.dp), tint = MARK_COLOR) }
+        }
         if (phoneOnly) {
             // Only on the phone (a clip made here, or deleted from the card).
             Box(
@@ -472,6 +484,15 @@ private fun FileTile(
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Filled.Check, tr("Выбрано", "Selected"), Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onPrimary) }
         }
+    }
+}
+
+/** The copied colour (from the viewer's colour panel) onto all selected videos at once; shown while one is copied. */
+@Composable
+private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
+    if (vm.copiedLook == null || selection.none { it.kind == MediaKind.VIDEO }) return
+    IconButton(vm::pasteLookToSelected) {
+        Icon(Icons.Filled.ContentPaste, tr("Вставить цвет в выбранные видео", "Paste the colour into the selected videos"), tint = MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -521,6 +542,7 @@ private fun BottomPanel(vm: CameraController) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
+                PasteColour(vm, selection)
                 Button({ share(context, selection); vm.clearSelection() }) {
                     Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
@@ -557,6 +579,7 @@ private fun BottomPanel(vm: CameraController) {
                         tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}",
                         Modifier.weight(1f),
                     )
+                    PasteColour(vm, selection)
                     Button({
                         val already = vm.selectedAlreadyDownloaded
                         if (already > 0) askAlready = already else vm.downloadSelected(overwrite = false)

@@ -189,6 +189,23 @@ class CameraController(private val app: Application) {
 
     fun saveLook(file: CameraFile, look: ColorLook?) {
         prefs.edit().apply { if (look == null) remove("look2_" + file.name) else putString("look2_" + file.name, look.encode()) }.apply()
+        lookVersion++
+    }
+
+    /** Bumped on every colour change: the gallery's tiles redraw their colour mark. */
+    var lookVersion by mutableStateOf(0)
+        private set
+
+    /** The video has a colour of its own set in the viewer. */
+    fun hasLook(file: CameraFile): Boolean = prefs.contains("look2_" + file.name)
+
+    /** The copied colour onto every selected video (photos are left alone); how many got it. */
+    fun pasteLookToSelected(): Int {
+        val look = copiedLook ?: return 0
+        val videos = selectedFiles.filter { it.kind == MediaKind.VIDEO }
+        videos.forEach { saveLook(it, look) }
+        message = tr("Цвет вставлен в ${videos.size} видео", "Colour pasted into ${videos.size} videos")
+        return videos.size
     }
 
     /** A video's whole colour, copied to paste onto other videos (kept across restarts); null: nothing copied. */
