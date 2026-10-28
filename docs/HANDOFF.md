@@ -149,6 +149,16 @@ Colour copy / paste: icons over the video while the panel is open; `copiedLook` 
 that video's look; in the gallery a selection gets a paste icon (`pasteLookToSelected`, videos only) and tiles with a
 look of their own show a palette mark (`hasLook`, redrawn via `lookVersion`). A save replacing a file forgets its
 thumbnail (`forgetThumbnail`; tiles also key on `localUri`). Saving a selection as a batch: to do.
+The viewer's effect list no longer changes while playing (turning the I-Log switch rebuilt it and stopped playback):
+`LiveLut` (the .cube as a 2D atlas texture, `CubeLut.atlas`, blue between two slices, red / green by the texture's
+filtering — matches a CPU trilinear lookup of the real table within 0.9 / 255), strength live (0 = off); the stripes
+(`ClippingStripes.on`) and before / after (`bypass` on each effect) are flags read per frame. Only a preview-size step
+rebuilds the list.
+Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
+(NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
+the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /
+onUnavailable); one dropped before that is marked abandoned and taken back when the answer comes; a new request waits
+for the previous one's answer.
 Review fixes (after a Poco reboot while testing): a page's player prepares only when the page is on screen; the
 paused-frame nudge leaves a released player alone; the joined sound goes to `cacheDir/export.aac`, not the heap;
 codecs / extractors are released when setup fails; temp files are cleared at start; `lut()` parses once (Mutex) and

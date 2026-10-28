@@ -515,6 +515,9 @@ private fun VideoPreview(
     val matrix = remember(file.uri) { LiveColorMatrix(look.exposure, look.saturation) }
     val sharpen = remember(file.uri) { Sharpen(look.sharpness, look.sharpRadius) }
     val filmLook = remember(file.uri) { FilmLook(look) }
+    // Insta360's LUT for an I-Log file, its strength live (0 = off); the clipping stripes, shown or not.
+    val liveLut = remember(file.uri, table) { if (ilog && table != null) LiveLut(table, if (look.lut) look.strength else 0f) else null }
+    val stripes = remember(file.uri) { ClippingStripes().also { it.on = vm.clipping } }
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
     // Preview weight. The effects work on a picture no bigger than the screen needs (PLAY_SIZES[level] lines, never
@@ -541,7 +544,7 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines, bypass))
+            if (effects) setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
@@ -584,7 +587,7 @@ private fun VideoPreview(
             player.volume = 0f
             player.play()
             // Bypassed, the film look isn't in the chain and counts no frames: a short fixed wait then.
-            withTimeoutOrNull(if (bypass) 80L else 400L) { while (alive[0] && filmLook.frames.get() == drawn) delay(16) }
+            withTimeoutOrNull(400L) { while (alive[0] && filmLook.frames.get() == drawn) delay(16) }
             if (alive[0]) {
                 player.pause()
                 player.volume = volume
@@ -593,14 +596,27 @@ private fun VideoPreview(
     }
     // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
     // start). After an error the player starts again with them.
-    val applied = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping, previewLines, level, bypass)) }
-    LaunchedEffect(player, look.lut, look.strength, vm.clipping, previewLines, level, bypass) {
-        val now = listOf(look.lut, look.strength, vm.clipping, previewLines, level, bypass)
+    // Only the preview size rebuilds the effects (a phone that can't keep up); everything else — the LUT on / off and
+    // its strength, the stripes, before / after — is read by the effects on every frame.
+    val applied = remember(player) { arrayOf<Any>(listOf(previewLines, level)) }
+    LaunchedEffect(player, previewLines, level) {
+        val now = listOf(previewLines, level)
         if (effects && now != applied[0]) {
             applied[0] = now
-            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines, bypass))
+            player.setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines))
             if (player.playerError != null) player.prepare() else redraw++
         }
+    }
+    val shownSwitches = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping, bypass)) }
+    LaunchedEffect(look.lut, look.strength, vm.clipping, bypass) {
+        liveLut?.strength = if (look.lut) look.strength else 0f
+        stripes.on = vm.clipping
+        liveLut?.bypass = bypass
+        matrix.bypass = bypass
+        sharpen.bypass = bypass
+        filmLook.bypass = bypass
+        val now = listOf(look.lut, look.strength, vm.clipping, bypass)
+        if (now != shownSwitches[0]) { shownSwitches[0] = now; redraw++ }
     }
     LaunchedEffect(light) { sharpen.light = light; filmLook.light = light }
     val shownLook = remember(player) { arrayOf(look) }
@@ -909,6 +925,7 @@ private fun VideoPreview(
                 onLook = { saved = it; vm.saveLook(file, it) },
                 onLive = { ev, sat -> matrix.set(ev, sat) },
                 onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius },
+                onLutLive = { liveLut?.strength = it },
                 onFilmLive = filmLook::set,
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
@@ -959,34 +976,28 @@ private fun VideoPreview(
 }
 
 /**
- * The player's effects, in order: the picture made smaller for a lighter preview ([previewLines] lines, while
- * playing), Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure /
- * saturation [matrix], the live [sharpen] (on the coloured picture, as editors do), the live [film] look (after the
- * sharpening, so its grain isn't sharpened), the clipping stripes when on. [bypass]: only the size and the stripes.
+ * The player's effects, in order: the picture made smaller for a lighter preview ([previewLines] lines, at most what
+ * the screen needs), Insta360's [lut] for an I-Log file, exposure / saturation ([matrix]), [sharpen] (on the coloured
+ * picture, as editors do), the [film] look (after the sharpening, so its grain isn't sharpened), the clipping
+ * [stripes]. All of them read their settings on every frame — on / off, strength, before / after included — so the
+ * list stays the same while the video plays (changing it live stopped playback).
  */
 @OptIn(UnstableApi::class)
 private fun colorEffects(
-    lut: CubeLut?,
-    iLog: Boolean,
-    look: ColorLook,
+    lut: LiveLut?,
     matrix: LiveColorMatrix,
     sharpen: Sharpen,
     film: FilmLook,
-    clipping: Boolean,
+    stripes: ClippingStripes,
     previewLines: Int?,
-    bypass: Boolean,
 ): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
     if (previewLines != null) out += androidx.media3.effect.Presentation.createForHeight(previewLines)
-    if (bypass) {
-        if (clipping) out += ClippingStripes()
-        return out
-    }
-    if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
+    if (lut != null) out += lut
     out += matrix
     out += sharpen
     out += film
-    if (clipping) out += ClippingStripes()
+    out += stripes
     return out
 }
 
@@ -1026,6 +1037,7 @@ private fun ColorPanel(
     onLook: (ColorLook) -> Unit,
     onLive: (exposure: Float, saturation: Float) -> Unit,
     onSharpLive: (amount: Float, radius: Float) -> Unit,
+    onLutLive: (Float) -> Unit,
     onFilmLive: (ColorLook) -> Unit,
     onClipping: () -> Unit,
     onReset: () -> Unit,
@@ -1056,7 +1068,7 @@ private fun ColorPanel(
             if (filmTab) {
                 FilmSliders(look, onLook, onFilmLive)
             } else {
-                LightSliders(iLog, look, onLook, onLive, onSharpLive)
+                LightSliders(iLog, look, onLook, onLive, onSharpLive, onLutLive)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(checked = clipping, onCheckedChange = { onClipping() })
@@ -1085,6 +1097,7 @@ private fun LightSliders(
     onLook: (ColorLook) -> Unit,
     onLive: (exposure: Float, saturation: Float) -> Unit,
     onSharpLive: (amount: Float, radius: Float) -> Unit,
+    onLutLive: (Float) -> Unit,
 ) {
     if (iLog) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1093,10 +1106,11 @@ private fun LightSliders(
             Text("I-Log → Rec.709", color = Color.White, fontSize = 13.sp)
         }
     }
-    // The LUT strength applies when the slider is let go (it rebuilds the colour table); exposure and saturation
-    // show as the slider moves.
+    // Every slider shows as it moves (the effects read their settings on each frame).
     if (iLog && look.lut) {
-        LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }) { onLook(look.copy(strength = it)) }
+        LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }, live = onLutLive) {
+            onLook(look.copy(strength = it))
+        }
     }
     LookSlider(
         tr("Экспозиция", "Exposure"), look.exposure, -2f..2f, { "%+.1f EV".format(it) },

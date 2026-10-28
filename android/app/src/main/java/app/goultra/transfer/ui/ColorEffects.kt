@@ -34,12 +34,97 @@ void main() {
 @OptIn(UnstableApi::class)
 class LiveColorMatrix(ev: Float, saturation: Float) : RgbMatrix {
     @Volatile private var matrix = ColorMath.matrix(ev, saturation)
+    /** «До / после»: no change while set. */
+    @Volatile var bypass = false
 
     fun set(ev: Float, saturation: Float) {
         matrix = ColorMath.matrix(ev, saturation)
     }
 
-    override fun getMatrix(presentationTimeUs: Long, useHdr: Boolean): FloatArray = matrix
+    override fun getMatrix(presentationTimeUs: Long, useHdr: Boolean): FloatArray = if (bypass) IDENTITY else matrix
+
+    private companion object {
+        val IDENTITY = ColorMath.matrix(0f, 1f)
+    }
+}
+
+/**
+ * Insta360's I-Log LUT as a live effect: the table in a texture (33 slices side by side, [CubeLut.atlas]), looked up
+ * with blue between two slices and red / green by the texture's own filtering, mixed with the picture by [strength]
+ * (0 = as shot). On / off and the strength are read on every frame — no rebuilding of the player's effects, which
+ * stopped playback when the switch was turned.
+ */
+@OptIn(UnstableApi::class)
+class LiveLut(private val lut: CubeLut, strength: Float) : GlEffect {
+    @Volatile var strength = strength
+    /** «До / после»: as shot while set. */
+    @Volatile var bypass = false
+
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
+
+    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
+        private val glProgram = GlProgram(VERTEX, SHADER).apply {
+            setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
+        }
+        private val table: Int = IntArray(1).also { ids ->
+            GLES20.glGenTextures(1, ids, 0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+            val n = lut.size
+            val pixels = java.nio.ByteBuffer.allocateDirect(n * n * n * 4).put(lut.atlas()).apply { position(0) }
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, n * n, n, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        }[0]
+
+        override fun configure(inputWidth: Int, inputHeight: Int) = Size(inputWidth, inputHeight)
+
+        override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+            glProgram.use()
+            glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
+            glProgram.setSamplerTexIdUniform("uLut", table, /* texUnitIndex= */ 1)
+            glProgram.setFloatUniform("uSize", lut.size.toFloat())
+            glProgram.setFloatUniform("uStrength", if (bypass) 0f else strength)
+            glProgram.bindAttributesAndUniforms()
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
+        override fun release() {
+            super.release()
+            glProgram.delete()
+            GLES20.glDeleteTextures(1, intArrayOf(table), 0)
+        }
+    }
+
+    private companion object {
+        const val SHADER = """#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+uniform sampler2D uTexSampler;
+uniform sampler2D uLut;
+uniform float uSize;
+uniform float uStrength;
+varying vec2 vTexSamplingCoord;
+void main() {
+  vec4 c = texture2D(uTexSampler, vTexSamplingCoord);
+  vec3 v = clamp(c.rgb, 0.0, 1.0);
+  float n = uSize;
+  float b = v.b * (n - 1.0);
+  float b0 = floor(b);
+  float b1 = min(b0 + 1.0, n - 1.0);
+  // Texel centres: red across a slice, green down; never into the next slice.
+  float x = v.r * (n - 1.0) + 0.5;
+  float y = (v.g * (n - 1.0) + 0.5) / n;
+  vec3 lo = texture2D(uLut, vec2((b0 * n + x) / (n * n), y)).rgb;
+  vec3 hi = texture2D(uLut, vec2((b1 * n + x) / (n * n), y)).rgb;
+  gl_FragColor = vec4(mix(c.rgb, mix(lo, hi, b - b0), uStrength), c.a);
+}
+"""
+    }
 }
 
 /**
@@ -53,6 +138,8 @@ class Sharpen(amount: Float, radius: Float) : GlEffect {
     @Volatile var radius = radius
     /** The preview can't keep up: one ring of taps instead of two. */
     @Volatile var light = false
+    /** «До / после»: no sharpening while set. */
+    @Volatile var bypass = false
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
 
@@ -72,7 +159,7 @@ class Sharpen(amount: Float, radius: Float) : GlEffect {
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
             glProgram.setFloatsUniform("uTexel", texel)
             // Up to ×3 at the slider's end: strong, but the cap keeps it clean.
-            glProgram.setFloatUniform("uAmount", amount * 3f)
+            glProgram.setFloatUniform("uAmount", if (bypass) 0f else amount * 3f)
             glProgram.setFloatUniform("uRadius", radius)
             glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
             glProgram.bindAttributesAndUniforms()
@@ -127,9 +214,12 @@ void main() {
  */
 @OptIn(UnstableApi::class)
 class ClippingStripes : GlEffect {
+    /** Shown or not, read on every frame (the effect stays in place either way). */
+    @Volatile var on = false
+
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
 
-    private class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
+    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
         private val glProgram = GlProgram(VERTEX, FRAGMENT).apply {
             // The whole frame, -1…1 in x and y.
             setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
@@ -140,6 +230,7 @@ class ClippingStripes : GlEffect {
         override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
+            glProgram.setFloatUniform("uOn", if (on) 1f else 0f)
             glProgram.bindAttributesAndUniforms()
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -157,12 +248,13 @@ class ClippingStripes : GlEffect {
         const val FRAGMENT = """#version 100
 precision mediump float;
 uniform sampler2D uTexSampler;
+uniform float uOn;
 varying vec2 vTexSamplingCoord;
 void main() {
   vec4 c = texture2D(uTexSampler, vTexSamplingCoord);
   float top = max(c.r, max(c.g, c.b));
   // Diagonal stripes 8 px wide, 16 px apart, fixed on the screen so they read as a marker, not as the picture.
-  bool stripe = mod(gl_FragCoord.x + gl_FragCoord.y, 16.0) < 8.0;
+  bool stripe = uOn > 0.5 && mod(gl_FragCoord.x + gl_FragCoord.y, 16.0) < 8.0;
   if (stripe && top >= $HIGH) c.rgb = vec3(1.0, 0.1, 0.1);
   else if (stripe && top <= $LOW) c.rgb = vec3(0.15, 0.4, 1.0);
   gl_FragColor = c;
@@ -180,7 +272,7 @@ void main() {
 @OptIn(UnstableApi::class)
 fun exportEffects(lut: CubeLut?, look: ColorLook, sourceLines: Int): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
-    if (lut != null) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
+    if (lut != null) out += LiveLut(lut, look.strength)
     if (look.exposure != 0f || look.saturation != 1f) out += LiveColorMatrix(look.exposure, look.saturation)
     if (look.sharpness > 0f) out += Sharpen(look.sharpness, look.sharpRadius * maxOf(1f, sourceLines / 1080f))
     if (look.hasStyle) out += FilmLook(look)
@@ -200,6 +292,8 @@ class FilmLook(look: ColorLook) : GlEffect {
     @Volatile private var grade = gradeOf(look)
     /** The preview can't keep up: halation from one ring of taps instead of three. */
     @Volatile var light = false
+    /** «До / после»: the picture as it comes in while set (frames still counted). */
+    @Volatile var bypass = false
     /** Frames drawn so far: how fast the preview really goes. */
     val frames = AtomicInteger()
 
@@ -225,8 +319,9 @@ class FilmLook(look: ColorLook) : GlEffect {
         }
 
         override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+            val off = bypass
             val l = look
-            val g = grade
+            val g = if (off) NEUTRAL else grade
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
             glProgram.setFloatsUniform("uTexel", texel)
@@ -248,8 +343,8 @@ class FilmLook(look: ColorLook) : GlEffect {
             glProgram.setFloatsUniform("uMidTint", g.midTint)
             glProgram.setFloatsUniform("uHighTint", g.highTint)
             glProgram.setFloatUniform("uSkinGuard", g.skinGuard)
-            glProgram.setFloatUniform("uGrain", l.grain)
-            glProgram.setFloatUniform("uHalation", l.halation)
+            glProgram.setFloatUniform("uGrain", if (off) 0f else l.grain)
+            glProgram.setFloatUniform("uHalation", if (off) 0f else l.halation)
             glProgram.setFloatUniform("uLight", if (light) 1f else 0f)
             // A new grain pattern on each frame (about 30 a second), the same one for a paused frame.
             glProgram.setFloatUniform("uFrame", ((presentationTimeUs / 33_333) % 997).toFloat())
@@ -265,6 +360,8 @@ class FilmLook(look: ColorLook) : GlEffect {
     }
 
     private companion object {
+        val NEUTRAL = FilmMath.Grade()
+
         fun gradeOf(look: ColorLook) = Look.grade(Look.of(look.preset), look.presetStrength, look.film, look.warmth, look.skin)
 
         private fun hue(i: Int) = Math.toRadians(FilmMath.HUES[i].toDouble()).toFloat()

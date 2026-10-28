@@ -23,6 +23,22 @@ class CubeLut private constructor(val title: String?, val size: Int, private val
         }
     }
 
+    /**
+     * The table as one RGBA 8-bit image for a 2D texture: [size] slices of [size] × [size] side by side — blue picks the
+     * slice, red goes across within it, green down; [size]² wide, [size] high.
+     */
+    fun atlas(): ByteArray {
+        val w = size * size
+        val out = ByteArray(w * size * 4)
+        for (b in 0 until size) for (g in 0 until size) for (r in 0 until size) {
+            val i = 3 * (r + size * (g + size * b))
+            val o = 4 * (g * w + b * size + r)
+            for (c in 0..2) out[o + c] = Math.round(rgb[i + c].coerceIn(0f, 1f) * 255f).toByte()
+            out[o + 3] = -1
+        }
+        return out
+    }
+
     companion object {
         private val SPACES = Regex("\\s+")
 

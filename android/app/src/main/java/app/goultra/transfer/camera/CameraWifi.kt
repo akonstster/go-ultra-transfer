@@ -23,7 +23,15 @@ class CameraWifi(
     private val onLost: () -> Unit = {},
 ) {
     private val cm = context.getSystemService(ConnectivityManager::class.java)
-    private var callback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var callback: ConnectivityManager.NetworkCallback? = null
+    /**
+     * The current request's answer (available / unavailable). Taking a request back while the system is still
+     * connecting crashes Android 12's Wi-Fi service (its connection timeout fires on a request already cleared:
+     * NullPointerException in WifiNetworkFactory, system restart — seen on the Poco). So a request is only taken back
+     * once answered; one dropped before that is [abandoned] and taken back when its answer comes.
+     */
+    @Volatile private var answered: CompletableDeferred<Unit>? = null
+    @Volatile private var abandoned = false
     private var processBound = false
 
     @Volatile var link: CameraLink? = null
@@ -49,6 +57,11 @@ class CameraWifi(
     }
 
     private suspend fun connectOnce(creds: WifiCreds, bssid: MacAddress?, timeoutMs: Int): CameraLink? {
+        // A request still waiting for its answer: wait for it first (see [answered]) — never two at once.
+        answered?.takeIf { !it.isCompleted }?.let {
+            log("Wi-Fi камеры: жду ответа на прошлый запрос")
+            kotlinx.coroutines.withTimeoutOrNull(timeoutMs + 10_000L) { it.await() }
+        }
         release()
         val specifier = WifiNetworkSpecifier.Builder()
             .setSsid(creds.ssid)
@@ -61,10 +74,15 @@ class CameraWifi(
             .setNetworkSpecifier(specifier)
             .build()
         val result = CompletableDeferred<Network?>()
+        val answer = CompletableDeferred<Unit>()
+        answered = answer
+        abandoned = false
         // Location info in the callback (Android 12+): the BSSID to remember; needs the location permission.
         val flags = if (Build.VERSION.SDK_INT >= 31) ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO else 0
         val cb = object : ConnectivityManager.NetworkCallback(flags) {
             override fun onAvailable(n: Network) {
+                answer.complete(Unit)
+                if (takeBackIfAbandoned(this)) return
                 result.complete(n)
             }
 
@@ -78,7 +96,9 @@ class CameraWifi(
             }
 
             override fun onUnavailable() {
+                answer.complete(Unit)
                 log("Wi-Fi камеры недоступен (отказ или таймаут)")
+                takeBackIfAbandoned(this)
                 result.complete(null)
             }
 
@@ -119,9 +139,26 @@ class CameraWifi(
         return false
     }
 
-    fun release() {
-        callback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+    /** [cb]'s answer came after it was dropped: take the request back now. */
+    private fun takeBackIfAbandoned(cb: ConnectivityManager.NetworkCallback): Boolean {
+        if (!abandoned || callback !== cb) return false
+        runCatching { cm.unregisterNetworkCallback(cb) }
         callback = null
+        abandoned = false
+        log("Wi-Fi камеры: брошенный запрос снят после ответа")
+        return true
+    }
+
+    fun release() {
+        val cb = callback
+        if (cb != null && answered?.isCompleted == false) {
+            // Still connecting: taken back when the answer comes (see [answered]).
+            abandoned = true
+            log("Wi-Fi камеры: запрос ещё подключается — сниму после ответа")
+        } else {
+            cb?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+            callback = null
+        }
         link = null
         if (processBound) {
             cm.bindProcessToNetwork(null)
