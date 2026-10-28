@@ -345,6 +345,14 @@ private fun FileGrid(vm: CameraController) {
     // bottom bar then offers what fits — download / delete, or share / paste colour / take off the list.
     val selectionOnPhone = vm.selectedFiles.firstOrNull()?.isOnPhone
     fun selectable(file: CameraFile) = vm.showsPhone || selectionOnPhone == null || selectionOnPhone == file.isOnPhone
+    // A file of the other side: say why it isn't taken (no answer felt like a stuck phone).
+    fun notSelectable() {
+        vm.message = if (selectionOnPhone == true) {
+            tr("Выбраны файлы телефона — файлы камеры к ним не добавить. Снимите выбор, чтобы выбрать файлы камеры.", "Phone files are selected — camera files can't join them. Clear the selection to pick camera files.")
+        } else {
+            tr("Выбраны файлы камеры — файлы телефона к ним не добавить. Снимите выбор, чтобы выбрать файлы телефона.", "Camera files are selected — phone files can't join them. Clear the selection to pick phone files.")
+        }
+    }
     vm.viewing?.let { FileViewer(vm, it) { vm.viewing = null } }
     val files = vm.visibleFiles
     val byDay = remember(files) { files.groupBy { it.created?.toLocalDate() } }
@@ -401,8 +409,14 @@ private fun FileGrid(vm: CameraController) {
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
                         // delete), so files only on the phone just open.
-                        onClick = { if (vm.selected.isEmpty() || !selectable(file)) open(file) else vm.toggle(file) },
-                        onLongClick = { if (selectable(file)) vm.toggle(file) },
+                        onClick = {
+                            when {
+                                vm.selected.isEmpty() -> open(file)
+                                selectable(file) -> vm.toggle(file)
+                                else -> notSelectable()
+                            }
+                        },
+                        onLongClick = { if (selectable(file)) vm.toggle(file) else notSelectable() },
                     )
                 }
             }
