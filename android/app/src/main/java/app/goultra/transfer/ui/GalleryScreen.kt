@@ -494,6 +494,22 @@ private fun Badge(text: String, modifier: Modifier) {
 private fun BottomPanel(vm: CameraController) {
     val progress = vm.download
     val selection = vm.selectedFiles
+    // Saving a video with its colour (from the viewer): its own bar, in percent.
+    vm.export?.let { e ->
+        Surface(tonalElevation = 3.dp) {
+            Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("Сохранение с цветом · ${e.name}", "Saving with colour · ${e.name}"), fontSize = 14.sp)
+                        Text("${e.percent} %", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(vm::cancelExport) { Text(tr("Стоп", "Stop")) }
+                }
+                LinearProgressIndicator(progress = { e.percent / 100f }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+            }
+        }
+        return
+    }
     if (progress == null && vm.showsPhone) {
         // The phone list: a selection can be shared.
         if (selection.isEmpty()) return

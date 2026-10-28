@@ -121,6 +121,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material3.Switch
 import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.Look
@@ -743,12 +744,38 @@ private fun VideoPreview(
                         .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
-            // Setting the colour: before / after (the processing off while lit) and «Готово», over the video's top.
+            // Setting the colour: save with colour, before / after (the processing off while lit) and «Готово», over the
+            // video's top.
             if (colouring) Row(
                 Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                val saving = vm.export
+                if (saving != null) {
+                    Text(
+                        tr("Сохранение ${saving.percent} %", "Saving ${saving.percent} %"),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                } else {
+                    IconButton(
+                        {
+                            when {
+                                !file.isOnPhone -> android.widget.Toast.makeText(context, tr("Сначала скачайте видео на телефон", "Download the video to the phone first"), android.widget.Toast.LENGTH_LONG).show()
+                                look.isPlain(ilog) -> android.widget.Toast.makeText(context, tr("Цвет не менялся — сохранять нечего", "The colour wasn't changed — nothing to save"), android.widget.Toast.LENGTH_SHORT).show()
+                                else -> {
+                                    vm.exportWithColor(file, look, ilog)
+                                    android.widget.Toast.makeText(context, tr("Сохраняю с цветом в исходном размере — это займёт время", "Saving with colour at full size — this takes a while"), android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        Modifier.background(Color(0x99000000), CircleShape),
+                    ) {
+                        Icon(Icons.Filled.SaveAlt, tr("Сохранить с цветом", "Save with colour"), tint = Color.White)
+                    }
+                }
                 IconButton(
                     { bypass = !bypass },
                     Modifier.background(if (bypass) MARK_COLOR else Color(0x99000000), CircleShape),

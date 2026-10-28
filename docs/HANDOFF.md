@@ -123,7 +123,14 @@ down), so dark and light skins alike — wide soft edges, narrow ones showed as 
 pulls skin hues up to 60 % to the line. A preset can lower the guard (`skinGuard`, mixed by strength): Amélie has 0 —
 faces go golden with the rest, as in the film, and guarding against so strong a grade showed its edges. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
 Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
-Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
+Save with colour (the save icon over the video while the panel is open; phone copies only): `exportWithColor` runs
+media3-transformer 1.4.1 with `exportEffects` — the same effects in full (no preview size, no stripes, only those that
+change something; the sharpening radius widened by lines / 1080 since it was set on a ≤ 1080 preview). The original's
+size and frame rate; H.265 if the original is, else H.264 (the encoder factory falls back to what the phone has); the
+original's bitrate (track or file), kept within 20…200 Mbit/s; audio copied, not re-encoded. Written to
+`cacheDir/export.mp4`, then into the gallery as `…_COLOR.mp4` (`_COLOR2`… when taken) via `Downloader.saveClip`.
+Progress (`ProgressHolder`, 2 Hz) in its own bar at the gallery's bottom and over the video; «Стоп» cancels. 8-bit
+output: an I-Log file's 10 bits are not kept. The Insta360 trailer (marks) isn't carried over. Not on the phone yet.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.

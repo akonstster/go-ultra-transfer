@@ -12,6 +12,7 @@ import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import androidx.media3.effect.RgbMatrix
 import app.goultra.transfer.camera.ColorMath
+import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.FilmMath
 import app.goultra.transfer.camera.Look
 import java.util.concurrent.atomic.AtomicInteger
@@ -168,6 +169,22 @@ void main() {
 }
 """
     }
+}
+
+/**
+ * The effects for saving a video with its colour, in the order the viewer uses: Insta360's [lut] (an I-Log file with
+ * the LUT on), exposure / saturation, sharpening, the «Стиль» look — only those that change something, in full: no
+ * preview size, no clipping stripes. The sharpening radius was set on a preview of at most 1080 lines, so it is
+ * widened by [sourceLines] / 1080 to look the same on the full picture (halation and grain are sized by the frame).
+ */
+@OptIn(UnstableApi::class)
+fun exportEffects(lut: CubeLut?, look: ColorLook, sourceLines: Int): List<androidx.media3.common.Effect> {
+    val out = mutableListOf<androidx.media3.common.Effect>()
+    if (lut != null) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
+    if (look.exposure != 0f || look.saturation != 1f) out += LiveColorMatrix(look.exposure, look.saturation)
+    if (look.sharpness > 0f) out += Sharpen(look.sharpness, look.sharpRadius * maxOf(1f, sourceLines / 1080f))
+    if (look.hasStyle) out += FilmLook(look)
+    return out
 }
 
 /**
