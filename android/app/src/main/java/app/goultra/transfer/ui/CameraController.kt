@@ -2313,7 +2313,8 @@ class CameraController(private val app: Application) {
     fun downloadSelected(overwrite: Boolean) {
         if (isDownloading) return
         // A live photo goes with its clip as one gallery file.
-        val queue = selectedFiles.filter { overwrite || it.name !in downloaded }.sortedBy { it.created }
+        // Only the card's files (a selection of phone files has nothing to download).
+        val queue = selectedFiles.filter { !it.isOnPhone && (overwrite || it.name !in downloaded) }.sortedBy { it.created }
         if (queue.isEmpty()) {
             selected.clear()
             message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")

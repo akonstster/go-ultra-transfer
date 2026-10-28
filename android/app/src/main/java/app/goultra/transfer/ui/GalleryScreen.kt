@@ -130,7 +130,7 @@ fun GalleryScreen(
                 },
                 actions = {
                     // Delete sits up here, far from «Скачать» at the bottom, and always asks first.
-                    if (selectionCount > 0 && vm.tab == Tab.FILES && vm.conn == ConnState.Connected) {
+                    if (selectionCount > 0 && vm.tab == Tab.FILES && vm.conn == ConnState.Connected && vm.selectedFiles.none { it.isOnPhone }) {
                         var confirm by remember { mutableStateOf(false) }
                         IconButton({ confirm = true }, enabled = !vm.deleting && vm.download == null) {
                             Icon(Icons.Filled.Delete, tr("Удалить с камеры", "Delete from camera"))
@@ -341,7 +341,10 @@ private fun FileGrid(vm: CameraController) {
         // From the camera: the phone's copy when downloaded (a live photo stays the camera's — its cover choice).
         scope.launch { vm.view(vm.withPhoneCopy(file)) }
     }
-    fun selectable(file: CameraFile) = vm.showsPhone || !file.isOnPhone
+    // With the camera there, one selection is either the card's files or the phone's (its first file decides): the
+    // bottom bar then offers what fits — download / delete, or share / paste colour / take off the list.
+    val selectionOnPhone = vm.selectedFiles.firstOrNull()?.isOnPhone
+    fun selectable(file: CameraFile) = vm.showsPhone || selectionOnPhone == null || selectionOnPhone == file.isOnPhone
     vm.viewing?.let { FileViewer(vm, it) { vm.viewing = null } }
     val files = vm.visibleFiles
     val byDay = remember(files) { files.groupBy { it.created?.toLocalDate() } }
@@ -558,7 +561,7 @@ private fun BottomPanel(vm: CameraController) {
         }
         return
     }
-    if (progress == null && vm.showsPhone) {
+    if (progress == null && (vm.showsPhone || (selection.isNotEmpty() && selection.all { it.isOnPhone }))) {
         // The phone list: a selection can be shared.
         if (selection.isEmpty()) return
         val context = LocalContext.current
