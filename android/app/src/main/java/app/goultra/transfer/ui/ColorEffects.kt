@@ -321,8 +321,8 @@ float skinMask(float luma, vec2 c) {
   if (len < 1e-4) return 0.0;
   float cosine = dot(c, SKIN_LINE) / len;
   float rel = len / max(luma, 0.05);
-  return smoothstep(0.866, 0.966, cosine) * smoothstep(0.05, 0.12, rel) * (1.0 - smoothstep(0.36, 0.45, rel)) *
-    smoothstep(0.03, 0.1, luma) * (1.0 - smoothstep(0.88, 0.98, luma));
+  return smoothstep(0.707, 0.966, cosine) * smoothstep(0.04, 0.12, rel) * (1.0 - smoothstep(0.4, 0.75, rel)) *
+    smoothstep(0.02, 0.1, luma) * (1.0 - smoothstep(0.85, 1.0, luma));
 }
 
 vec4 hueWeights(vec2 c) {

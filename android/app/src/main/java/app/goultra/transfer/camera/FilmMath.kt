@@ -115,17 +115,19 @@ object FilmMath {
     fun tone(lin: Float, film: Float): Float = tone(lin, film, 1f + CONTRAST * film)
 
     /**
-     * How much of skin a colour is (0…1): within about ±30° of the skin line, its colour in proportion to its brightness
-     * (so dark and light skins alike — a dark skin has less colour in absolute terms; skins measure 0.2…0.3), not grey,
-     * not a saturated orange (about 0.45 and up), not black or white.
+     * How much of skin a colour is (0…1): fully within ±15° of the skin line (a face's hues, redder cheeks included),
+     * fading out to ±45°; its colour in proportion to its brightness (so dark and light skins alike — a dark skin has
+     * less colour in absolute terms; skins measure 0.2…0.3, their shadow sides more), not grey, fading out for
+     * saturated oranges, not black or white. All edges wide and soft: across a face, noise and compression move hue and
+     * colour from pixel to pixel, and a narrow edge showed as stripes where a preset moved colours far.
      */
     fun skinMask(luma: Float, cb: Float, cr: Float): Float {
         val c = sqrt(cb * cb + cr * cr)
         if (c < 1e-4f) return 0f
         val cos = (cb * SKIN_CB + cr * SKIN_CR) / c
         val rel = c / max(luma, 0.05f)
-        return smooth(0.866f, 0.966f, cos) * smooth(0.05f, 0.12f, rel) * (1f - smooth(0.36f, 0.45f, rel)) *
-            smooth(0.03f, 0.1f, luma) * (1f - smooth(0.88f, 0.98f, luma))
+        return smooth(0.707f, 0.966f, cos) * smooth(0.04f, 0.12f, rel) * (1f - smooth(0.4f, 0.75f, rel)) *
+            smooth(0.02f, 0.1f, luma) * (1f - smooth(0.85f, 1f, luma))
     }
 
     /** The weight of each of [HUES] for a colour of hue [angle] (radians). */

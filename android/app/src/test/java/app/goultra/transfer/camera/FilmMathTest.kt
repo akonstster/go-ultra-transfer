@@ -72,6 +72,28 @@ class FilmMathTest {
     }
 
     @Test
+    fun skinMaskHasNoSteps() {
+        // Across a face hue, colour and brightness wander from pixel to pixel: the mask must follow smoothly, or a
+        // preset that moves colours far shows its edge as stripes. Full on a face's own hues (±15° of 123°).
+        fun mask(deg: Double, rel: Float, luma: Float): Float {
+            val c = rel * luma
+            val a = Math.toRadians(deg)
+            return FilmMath.skinMask(luma, (c * kotlin.math.cos(a)).toFloat(), (c * kotlin.math.sin(a)).toFloat())
+        }
+        for (deg in 108..138) assertEquals(1f, mask(deg.toDouble(), 0.25f, 0.4f), 1e-3f)
+        for (deg in 60..190) {
+            val step = abs(mask(deg + 1.0, 0.25f, 0.4f) - mask(deg.toDouble(), 0.25f, 0.4f))
+            assertTrue("at $deg°: $step", step < 0.06f)
+        }
+        // From a skin's colour (0.2…0.3, more in shadows) up to a saturated orange.
+        for (i in 15..100) {
+            val rel = i / 100f
+            val step = abs(mask(123.0, rel + 0.01f, 0.4f) - mask(123.0, rel, 0.4f))
+            assertTrue("at $rel: $step", step < 0.06f)
+        }
+    }
+
+    @Test
     fun warmthIsWarmer() {
         val grey = floatArrayOf(0.5f, 0.5f, 0.5f)
         val warm = FilmMath.apply(grey, 0f, 1f, 0f)
