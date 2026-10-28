@@ -7,6 +7,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -182,6 +184,8 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         }
         var choose by remember(file.uri) { mutableStateOf(false) }
         var info by remember(file.uri) { mutableStateOf(false) }
+        // Setting the colour: only the video and the panel — the top bar and the ♥ / «i» / share column hide.
+        var colouring by remember(file.uri) { mutableStateOf(false) }
         if (info) FileInfo(vm, file) { info = false }
         // A clip of this video already in the gallery: replace it, or keep both (…_HL2.mp4).
         val scope = rememberCoroutineScope()
@@ -219,7 +223,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             )
         }
         when {
-            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock) { ms ->
+            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
@@ -250,7 +254,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
             }
         }
-        Row(
+        if (!colouring) Row(
             Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
                 .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -287,7 +291,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             }
         }
         // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
-        Column(
+        if (!colouring) Column(
             Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -406,6 +410,7 @@ private fun VideoPreview(
     onEdit: (List<Highlight>?) -> List<Highlight>,
     active: Boolean,
     onLock: (Boolean) -> Unit,
+    onColouring: (Boolean) -> Unit,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -433,6 +438,7 @@ private fun VideoPreview(
     val effects = !effectsFailed
     val matrix = remember(file.uri) { LiveColorMatrix(look.exposure, look.saturation) }
     val sharpen = remember(file.uri) { Sharpen(look.sharpness, look.sharpRadius) }
+    val filmLook = remember(file.uri) { FilmLook(look) }
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
     fun dropEffects(why: String) {
@@ -442,7 +448,7 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, vm.clipping))
+            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -467,11 +473,12 @@ private fun VideoPreview(
         val now = listOf(look.lut, look.strength, vm.clipping)
         if (effects && now != applied[0]) {
             applied[0] = now
-            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, vm.clipping))
+            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping))
         }
     }
     LaunchedEffect(look.exposure, look.saturation) { matrix.set(look.exposure, look.saturation) }
     LaunchedEffect(look.sharpness, look.sharpRadius) { sharpen.amount = look.sharpness; sharpen.radius = look.sharpRadius }
+    LaunchedEffect(look) { filmLook.set(look) }
     // While setting the colour the video goes round, so the change is always in sight.
     LaunchedEffect(player, colorPanel) { player.repeatMode = if (colorPanel) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
     // With effects: no frame after 5 s of playing means the picture doesn't come through — back to no effects.
@@ -507,7 +514,10 @@ private fun VideoPreview(
     // skipped. In the strip the pieces can be edited (kept on the phone): then playback is free, for finding spots.
     var film by remember(file.uri) { mutableStateOf(false) }
     var editing by remember(file.uri) { mutableStateOf(false) }
-    LaunchedEffect(editing) { onLock(editing) }
+    val colouring = colorPanel && !editing
+    // No swiping to the next file while the timeline or the colour sliders own the gestures.
+    LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
+    LaunchedEffect(colouring) { onColouring(colouring) }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
     LaunchedEffect(player, film, editing, pieces) {
         if (!film || editing || pieces.isEmpty()) return@LaunchedEffect
@@ -576,8 +586,9 @@ private fun VideoPreview(
         )
     }
     Column(Modifier.fillMaxSize()) {
+        // Setting the colour: the video keeps the upper part of the screen whatever the panel shows; the panel scrolls.
         Box(
-            Modifier.weight(1f).fillMaxWidth().pointerInput(file.uri) {
+            (if (colouring) Modifier.fillMaxHeight(0.45f).statusBarsPadding() else Modifier.weight(1f)).fillMaxWidth().pointerInput(file.uri) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     do {
@@ -619,7 +630,7 @@ private fun VideoPreview(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
-            Row(
+            if (!colouring) Row(
                 Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -657,12 +668,14 @@ private fun VideoPreview(
                 }
             }
         }
-        if (colorPanel && !editing) {
+        if (colouring) {
             ColorPanel(
+                Modifier.weight(1f),
                 ilog, look, saved != null, effectsFailed, vm.clipping,
                 onLook = { saved = it; vm.saveLook(file, it) },
                 onLive = { ev, sat -> matrix.set(ev, sat) },
                 onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius },
+                onFilmLive = filmLook::set,
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
                 onDone = { colorPanel = false },
@@ -712,7 +725,8 @@ private fun VideoPreview(
 
 /**
  * The player's effects, in order: Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure /
- * saturation [matrix], the live [sharpen] (on the coloured picture, as editors do), the clipping stripes when on.
+ * saturation [matrix], the live [sharpen] (on the coloured picture, as editors do), the live [film] look (after the
+ * sharpening, so its grain isn't sharpened), the clipping stripes when on.
  */
 @OptIn(UnstableApi::class)
 private fun colorEffects(
@@ -721,23 +735,27 @@ private fun colorEffects(
     look: ColorLook,
     matrix: LiveColorMatrix,
     sharpen: Sharpen,
+    film: FilmLook,
     clipping: Boolean,
 ): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
     if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
     out += matrix
     out += sharpen
+    out += film
     if (clipping) out += ClippingStripes()
     return out
 }
 
 /**
- * Colour while viewing (the file stays as shot). I-Log: Insta360's «I-Log → Rec.709» on / off and its strength; any
- * video: exposure (stops) and saturation, seen as the slider moves; clipping stripes on / off. Settings are kept per
- * video; «Сбросить» goes back to the default (I-Log: LUT on).
+ * Colour while viewing (the file stays as shot), on two tabs so the sliders don't cover the video. «Свет и цвет» —
+ * I-Log: Insta360's «I-Log → Rec.709» on / off and its strength; any video: exposure (stops), saturation, sharpness.
+ * «Плёнка» — the print look (FilmLook): how much, warmth, skin protection, grain, halation. Seen as the slider moves;
+ * clipping stripes on / off. Settings are kept per video; «Сбросить» goes back to the default (I-Log: LUT on).
  */
 @Composable
 private fun ColorPanel(
+    modifier: Modifier,
     iLog: Boolean,
     look: ColorLook,
     changed: Boolean,
@@ -746,61 +764,125 @@ private fun ColorPanel(
     onLook: (ColorLook) -> Unit,
     onLive: (exposure: Float, saturation: Float) -> Unit,
     onSharpLive: (amount: Float, radius: Float) -> Unit,
+    onFilmLive: (ColorLook) -> Unit,
     onClipping: () -> Unit,
     onReset: () -> Unit,
     onDone: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    var filmTab by remember { mutableStateOf(false) }
+    // The tabs and «Готово» stay; the sliders under them scroll.
+    Column(modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (iLog) {
-                Switch(checked = look.lut, onCheckedChange = { onLook(look.copy(lut = it)) })
-                Spacer(Modifier.width(10.dp))
-                Text("I-Log → Rec.709", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-            } else {
-                Text(tr("Обычное видео (не I-Log)", "A standard video (not I-Log)"), color = Color(0xCCFFFFFF), fontSize = 13.sp, modifier = Modifier.weight(1f))
-            }
+            val tabColors = FilterChipDefaults.filterChipColors(
+                containerColor = Color.Transparent,
+                labelColor = Color.White,
+                selectedContainerColor = Color(0x33FFFFFF),
+                selectedLabelColor = Color.White,
+            )
+            FilterChip(!filmTab, { filmTab = false }, { Text(tr("Свет и цвет", "Light & colour")) }, colors = tabColors)
+            Spacer(Modifier.width(8.dp))
+            FilterChip(
+                filmTab, { filmTab = true }, { Text(tr("Плёнка", "Film")) },
+                colors = tabColors,
+                leadingIcon = if (look.film > 0f || look.grain > 0f || look.halation > 0f || look.warmth != 0f) {
+                    { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
+                } else null,
+            )
+            Spacer(Modifier.weight(1f))
             Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
         }
-        // The LUT strength applies when the slider is let go (it rebuilds the colour table); exposure and saturation
-        // show as the slider moves.
-        if (iLog && look.lut) {
-            LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }) { onLook(look.copy(strength = it)) }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            if (filmTab) {
+                FilmSliders(look, onLook, onFilmLive)
+            } else {
+                LightSliders(iLog, look, onLook, onLive, onSharpLive)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = clipping, onCheckedChange = { onClipping() })
+                Spacer(Modifier.width(10.dp))
+                Text(tr("Пересвет и провалы", "Clipping"), color = Color.White, fontSize = 13.sp)
+                Text(tr("  красным / синим", "  red / blue"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
+                if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
+            }
+            if (failed) {
+                Text(
+                    tr("Обработка цвета на этом телефоне не показала картинку — видео показано как снято.", "Colour processing showed no picture on this phone — the video is shown as shot."),
+                    color = MaterialTheme.colorScheme.error,
+                    fontSize = 12.sp,
+                )
+            }
+            Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp)
         }
-        LookSlider(
-            tr("Экспозиция", "Exposure"), look.exposure, -2f..2f, { "%+.1f EV".format(it) },
-            live = { onLive(it, look.saturation) },
-        ) { onLook(look.copy(exposure = it)) }
-        LookSlider(
-            tr("Насыщенность", "Saturation"), look.saturation, 0f..2f, { "${Math.round(it * 100)} %" },
-            live = { onLive(look.exposure, it) },
-        ) { onLook(look.copy(saturation = it)) }
-        // Unsharp mask on brightness: how much, and how wide the contours it lifts (small = fine texture, large =
-        // shapes; too large shows halos).
-        LookSlider(
-            tr("Резкость", "Sharpness"), look.sharpness, 0f..1f, { "${Math.round(it * 100)} %" },
-            live = { onSharpLive(it, look.sharpRadius) },
-        ) { onLook(look.copy(sharpness = it)) }
-        if (look.sharpness > 0f) {
-            LookSlider(
-                tr("Радиус", "Radius"), look.sharpRadius, 0.5f..3f, { "%.1f ".format(it) + tr("пкс", "px") },
-                live = { onSharpLive(look.sharpness, it) },
-            ) { onLook(look.copy(sharpRadius = it)) }
-        }
+    }
+}
+
+/** «Свет и цвет»: the I-Log LUT and its strength, exposure, saturation, sharpness and its radius. */
+@Composable
+private fun LightSliders(
+    iLog: Boolean,
+    look: ColorLook,
+    onLook: (ColorLook) -> Unit,
+    onLive: (exposure: Float, saturation: Float) -> Unit,
+    onSharpLive: (amount: Float, radius: Float) -> Unit,
+) {
+    if (iLog) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Switch(checked = clipping, onCheckedChange = { onClipping() })
+            Switch(checked = look.lut, onCheckedChange = { onLook(look.copy(lut = it)) })
             Spacer(Modifier.width(10.dp))
-            Text(tr("Пересвет и провалы", "Clipping"), color = Color.White, fontSize = 13.sp)
-            Text(tr("  красным / синим", "  red / blue"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
-            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
+            Text("I-Log → Rec.709", color = Color.White, fontSize = 13.sp)
         }
-        if (failed) {
-            Text(
-                tr("Обработка цвета на этом телефоне не показала картинку — видео показано как снято.", "Colour processing showed no picture on this phone — the video is shown as shot."),
-                color = MaterialTheme.colorScheme.error,
-                fontSize = 12.sp,
-            )
+    }
+    // The LUT strength applies when the slider is let go (it rebuilds the colour table); exposure and saturation
+    // show as the slider moves.
+    if (iLog && look.lut) {
+        LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }) { onLook(look.copy(strength = it)) }
+    }
+    LookSlider(
+        tr("Экспозиция", "Exposure"), look.exposure, -2f..2f, { "%+.1f EV".format(it) },
+        live = { onLive(it, look.saturation) },
+    ) { onLook(look.copy(exposure = it)) }
+    LookSlider(
+        tr("Насыщенность", "Saturation"), look.saturation, 0f..2f, { "${Math.round(it * 100)} %" },
+        live = { onLive(look.exposure, it) },
+    ) { onLook(look.copy(saturation = it)) }
+    // Unsharp mask on brightness: how much, and how wide the contours it lifts (small = fine texture, large =
+    // shapes; too large shows halos).
+    LookSlider(
+        tr("Резкость", "Sharpness"), look.sharpness, 0f..1f, { "${Math.round(it * 100)} %" },
+        live = { onSharpLive(it, look.sharpRadius) },
+    ) { onLook(look.copy(sharpness = it)) }
+    if (look.sharpness > 0f) {
+        LookSlider(
+            tr("Радиус", "Radius"), look.sharpRadius, 0.5f..3f, { "%.1f ".format(it) + tr("пкс", "px") },
+            live = { onSharpLive(look.sharpness, it) },
+        ) { onLook(look.copy(sharpRadius = it)) }
+    }
+}
+
+/**
+ * «Плёнка» (see FilmMath): how much of the print look — contrast with a soft shoulder, dense colour, split toning;
+ * warmth as a white balance; skin protection (shown while there is something to protect from); grain and halation.
+ */
+@Composable
+private fun FilmSliders(look: ColorLook, onLook: (ColorLook) -> Unit, onFilmLive: (ColorLook) -> Unit) {
+    fun percent(v: Float) = "${Math.round(v * 100)} %"
+    LookSlider(tr("Плёнка", "Film"), look.film, 0f..1f, ::percent, live = { onFilmLive(look.copy(film = it)) }) {
+        onLook(look.copy(film = it))
+    }
+    LookSlider(
+        tr("Холод ↔ тепло", "Cool ↔ warm"), look.warmth, -1f..1f, { "%+d".format(Math.round(it * 100)) },
+        live = { onFilmLive(look.copy(warmth = it)) },
+    ) { onLook(look.copy(warmth = it)) }
+    if (look.film > 0f || look.warmth != 0f) {
+        LookSlider(tr("Кожа", "Skin"), look.skin, 0f..1f, ::percent, live = { onFilmLive(look.copy(skin = it)) }) {
+            onLook(look.copy(skin = it))
         }
-        Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp)
+    }
+    LookSlider(tr("Зерно", "Grain"), look.grain, 0f..1f, ::percent, live = { onFilmLive(look.copy(grain = it)) }) {
+        onLook(look.copy(grain = it))
+    }
+    LookSlider(tr("Ореол", "Halation"), look.halation, 0f..1f, ::percent, live = { onFilmLive(look.copy(halation = it)) }) {
+        onLook(look.copy(halation = it))
     }
 }
 

@@ -12,6 +12,7 @@ import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import androidx.media3.effect.RgbMatrix
 import app.goultra.transfer.camera.ColorMath
+import app.goultra.transfer.camera.FilmMath
 
 /** The whole frame, -1…1 in x and y, sampled 0…1. */
 private const val VERTEX = """#version 100
@@ -155,6 +156,188 @@ void main() {
   if (stripe && top >= $HIGH) c.rgb = vec3(1.0, 0.1, 0.1);
   else if (stripe && top <= $LOW) c.rgb = vec3(0.15, 0.4, 1.0);
   gl_FragColor = c;
+}
+"""
+    }
+}
+
+/**
+ * «Плёнка»: the print look of [FilmMath] (warmth, tone curve, density, split toning, skin) plus halation — a red-orange
+ * glow around bright places, as light scattered back through the film's layers — and grain: fine, moving with each
+ * frame, strongest in the mid-tones, the way it shows on film. Every setting is read on each frame, so sliders apply
+ * live; with everything at 0 the picture passes unchanged.
+ */
+@OptIn(UnstableApi::class)
+class FilmLook(look: ColorLook) : GlEffect {
+    @Volatile private var look = look
+
+    fun set(look: ColorLook) {
+        this.look = look
+    }
+
+    override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = Program(useHdr)
+
+    private inner class Program(useHdr: Boolean) : BaseGlShaderProgram(useHdr, /* texturePoolCapacity= */ 1) {
+        private val glProgram = GlProgram(VERTEX, FILM).apply {
+            setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
+        }
+        private var texel = floatArrayOf(0f, 0f)
+        private var grainScale = floatArrayOf(0f, 0f)
+
+        override fun configure(inputWidth: Int, inputHeight: Int): Size {
+            texel = floatArrayOf(1f / inputWidth, 1f / inputHeight)
+            // Grain cells of one pixel at 1080 lines, whatever the video's size: the same look on the preview and on 4K.
+            grainScale = floatArrayOf(1080f * inputWidth / inputHeight, 1080f)
+            return Size(inputWidth, inputHeight)
+        }
+
+        override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+            val l = look
+            glProgram.use()
+            glProgram.setSamplerTexIdUniform("uTexSampler", inputTexId, /* texUnitIndex= */ 0)
+            glProgram.setFloatsUniform("uTexel", texel)
+            glProgram.setFloatsUniform("uGrainScale", grainScale)
+            glProgram.setFloatUniform("uFilm", l.film)
+            glProgram.setFloatUniform("uWarmth", l.warmth)
+            glProgram.setFloatUniform("uSkin", l.skin)
+            glProgram.setFloatUniform("uGrain", l.grain)
+            glProgram.setFloatUniform("uHalation", l.halation)
+            // A new grain pattern on each frame (about 30 a second), the same one for a paused frame.
+            glProgram.setFloatUniform("uFrame", ((presentationTimeUs / 33_333) % 997).toFloat())
+            glProgram.bindAttributesAndUniforms()
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
+
+        override fun release() {
+            super.release()
+            glProgram.delete()
+        }
+    }
+
+    private companion object {
+        // The same steps and constants as FilmMath.apply; then halation (before the tone curve, in light, so the curve's
+        // shoulder takes it) and grain (last, on the finished picture).
+        val FILM = """#version 100
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+uniform sampler2D uTexSampler;
+uniform vec2 uTexel;
+uniform vec2 uGrainScale;
+uniform float uFilm;
+uniform float uWarmth;
+uniform float uSkin;
+uniform float uGrain;
+uniform float uHalation;
+uniform float uFrame;
+varying vec2 vTexSamplingCoord;
+
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+const float GAMMA = ${FilmMath.GAMMA};
+const vec2 SKIN_LINE = vec2(${FilmMath.SKIN_CB}, ${FilmMath.SKIN_CR});
+
+// Hash without sine (Dave Hoskins): even noise on mobile GPUs too.
+float hash(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+
+// Smooth noise on a grid: grain with soft edges, not single pixels.
+float grainNoise(vec2 p, float frame) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash(vec3(i, frame));
+  float b = hash(vec3(i + vec2(1.0, 0.0), frame));
+  float c = hash(vec3(i + vec2(0.0, 1.0), frame));
+  float d = hash(vec3(i + vec2(1.0, 1.0), frame));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y) - 0.5;
+}
+
+float tone(float lin) {
+  float stops = log2(max(lin, 1e-5) / ${FilmMath.GREY}) * (1.0 + ${FilmMath.CONTRAST} * uFilm);
+  float y = ${FilmMath.GREY} * exp2(stops);
+  if (y > ${FilmMath.KNEE}) y = ${FilmMath.KNEE} + (1.0 - ${FilmMath.KNEE}) * (1.0 - exp(-(y - ${FilmMath.KNEE}) / (1.0 - ${FilmMath.KNEE})));
+  y = ${FilmMath.BLACK} * uFilm + (1.0 - ${FilmMath.BLACK} * uFilm) * y;
+  return mix(lin, y, uFilm);
+}
+
+float skinMask(float luma, vec2 c) {
+  float len = length(c);
+  if (len < 1e-4) return 0.0;
+  float cosine = dot(c, SKIN_LINE) / len;
+  return smoothstep(0.906, 0.985, cosine) * smoothstep(0.015, 0.05, len) * smoothstep(0.08, 0.2, luma) * (1.0 - smoothstep(0.85, 0.97, luma));
+}
+
+// How much a place glows: only near white.
+float bright(vec2 at) {
+  return smoothstep(0.75, 1.0, dot(texture2D(uTexSampler, at).rgb, LUMA));
+}
+
+void main() {
+  vec4 src = texture2D(uTexSampler, vTexSamplingCoord);
+  vec3 c0 = clamp(src.rgb, 0.0, 1.0);
+  float y0 = dot(c0, LUMA);
+  vec2 chroma0 = vec2((c0.b - y0) / 1.8556, (c0.r - y0) / 1.5748);
+  float mask = skinMask(y0, chroma0) * uSkin;
+
+  vec3 lin = pow(c0, vec3(GAMMA));
+
+  // Halation: three rings of 8 taps out to 2.5 % of the frame's height, turned at random per pixel so no star shows.
+  if (uHalation > 0.0) {
+    float radius = 0.025 / uTexel.y;
+    float turn = hash(vec3(gl_FragCoord.xy, 7.0)) * 6.2831853;
+    float glow = 0.0;
+    for (int i = 0; i < 8; i++) {
+      float a = turn + float(i) * 0.7853982;
+      vec2 d = vec2(cos(a), sin(a)) * radius * uTexel;
+      glow += 0.5 * bright(vTexSamplingCoord + 0.33 * d) + 0.33 * bright(vTexSamplingCoord + 0.67 * d) + 0.17 * bright(vTexSamplingCoord + d);
+    }
+    glow /= 8.0;
+    // Mostly around a bright place, less on it (it is white there anyway).
+    float self = bright(vTexSamplingCoord);
+    lin += glow * (1.0 - 0.6 * self) * uHalation * vec3(1.0, 0.28, 0.06);
+  }
+
+  float wr = 1.0 + ${FilmMath.WARMTH} * uWarmth;
+  float wb = 1.0 - ${FilmMath.WARMTH} * uWarmth;
+  lin *= vec3(wr, 1.0, wb) / (LUMA.r * wr + LUMA.g + LUMA.b * wb);
+
+  if (uFilm > 0.0) {
+    lin = vec3(tone(lin.r), tone(lin.g), tone(lin.b));
+    float top = max(lin.r, max(lin.g, lin.b));
+    float sat = top > 1e-5 ? (top - min(lin.r, min(lin.g, lin.b))) / top : 0.0;
+    lin *= 1.0 - ${FilmMath.DENSITY} * uFilm * sat * sat;
+  }
+  vec3 g = pow(clamp(lin, 0.0, 1.0), vec3(1.0 / GAMMA));
+
+  float y = dot(g, LUMA);
+  vec2 chroma = vec2((g.b - y) / 1.8556, (g.r - y) / 1.5748);
+  float shadows = smoothstep(0.0, 0.12, y) * (1.0 - smoothstep(0.12, 0.55, y));
+  float highs = smoothstep(0.45, 0.8, y) * (1.0 - 0.7 * smoothstep(0.85, 1.0, y));
+  vec2 toned = chroma + uFilm * (shadows * vec2(${FilmMath.SHADOW_CB}, ${FilmMath.SHADOW_CR}) + highs * vec2(${FilmMath.HIGH_CB}, ${FilmMath.HIGH_CR}));
+  vec2 pulled = chroma;
+  float len0 = length(chroma0);
+  if (len0 > 1e-5) {
+    float k = ${FilmMath.SKIN_PULL} * uSkin * uFilm;
+    pulled = length(chroma) * normalize((1.0 - k) * chroma0 / len0 + k * SKIN_LINE);
+  }
+  chroma = mix(toned, pulled, mask);
+  float r = y + 1.5748 * chroma.y;
+  float b = y + 1.8556 * chroma.x;
+  vec3 outc = vec3(r, (y - LUMA.r * r - LUMA.b * b) / LUMA.g, b);
+
+  // Grain: two sizes of noise, more in the mid-tones than in black and white.
+  if (uGrain > 0.0) {
+    vec2 p = vTexSamplingCoord * uGrainScale;
+    float n = 0.65 * grainNoise(p, uFrame) + 0.35 * grainNoise(p * 0.5 + 17.0, uFrame);
+    float yl = clamp(y, 0.0, 1.0);
+    outc += n * uGrain * 0.14 * (0.25 + 3.0 * yl * (1.0 - yl));
+  }
+  gl_FragColor = vec4(clamp(outc, 0.0, 1.0), src.a);
 }
 """
     }

@@ -84,7 +84,7 @@ as a fallback) —
 from GetFileInfoList for camera files (`CameraFile.iLog`), from the trailer's 0x0101 record for phone copies
 (`LocalTrailer.Info.colorMode`, logged «цвет …: режим N»). I-Log videos get Insta360's «GO Ultra I-Log to Rec.709»
 (app assets, `luts/`, 33³, from Resolve; `CubeLut`) automatically; other videos no LUT. The «I-Log» / «Цвет» chip →
-`ColorPanel`: LUT on/off + strength (I-Log), brightness, saturation (any video), per file in prefs (`look_<name>`).
+`ColorPanel` (tabs «Свет и цвет» / «Плёнка»): LUT on/off + strength (I-Log), exposure, saturation, sharpness, film (any video).
 media3 `setVideoEffects` (media3-effect): the effect pipeline exists only if set before the player is prepared, so
 every video player gets it. SDR effects see gamma-encoded BT.709 (Builder default WORKING_COLOR_SPACE_DEFAULT — the
 javadoc's «linear» is stale), so the LUT gets I-Log as encoded. Exposure (stops, ×2^(ev/2.2) encoded) and saturation
@@ -92,6 +92,17 @@ javadoc's «linear» is stale), so the LUT gets I-Log as encoded. Exposure (stop
 LUT strength and the clipping stripes (`ClippingStripes`, own GLSL: max channel ≥ 0.98 red / ≤ 0.02 blue, diagonal
 stripes) rebuild the effect list. Settings in prefs `look2_<name>` (the old `look_` held offsets). No frame after 5 s
 of playing with effects → shown without them. Controls only on a tap; the video loops while the colour panel is open.
+Sharpness: `Sharpen` (luma unsharp mask, 2 rings × 8 taps, threshold, capped). «Плёнка» tab: `FilmLook` (one GLSL
+pass after sharpening, all uniforms live) = `FilmMath` (unit-tested; the shader takes its constants by template, so they
+can't drift): warmth as a WB gain in light → per-channel print curve (log2 contrast ×(1+0.25·film) around 0.18, soft
+exponential shoulder from 0.7, print black 0.0008) → density (light × (1 − 0.3·film·sat²)) → split toning in YCbCr
+(teal in the low-mids, warm in the high-mids; black and white stay neutral) → skin: within ±25° of the 123° skin line
+the shot's hue is kept (warmth and toning don't reach it) and pulled up to 30 % towards the line. Halation: 3 rings × 8
+taps to 2.5 % of the height, randomly turned per pixel, red-orange, added in light before the curve. Grain: value noise
+on a 1080-line grid, two sizes, new per frame (`presentationTimeUs`), weighted to the mid-tones. Checked by compiling
+the shaders with glslangValidator and rendering them in headless Chromium WebGL on a test chart. `ColorLook` now holds
+11 values (`decode` still reads the 4- and 6-value forms). While the panel is open the video keeps the top 45 %, the
+sliders scroll, the top bar / ♥ column / chips hide and the pager is locked.
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /

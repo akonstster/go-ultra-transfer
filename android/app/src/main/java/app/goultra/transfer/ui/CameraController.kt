@@ -67,7 +67,9 @@ enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 
 /**
  * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
- * stops (−2…+2), saturation as a factor (0 grey … 1 as shot … 2), sharpness (0…1) and its radius (px) for any video.
+ * stops (−2…+2), saturation as a factor (0 grey … 1 as shot … 2), sharpness (0…1) and its radius (px) for any video;
+ * the «Плёнка» look (FilmLook): how much of it (0…1), warmth (−1 cold … +1 warm), skin protection (0…1), grain and
+ * halation (0…1).
  */
 data class ColorLook(
     val lut: Boolean = true,
@@ -76,18 +78,28 @@ data class ColorLook(
     val saturation: Float = 1f,
     val sharpness: Float = 0f,
     val sharpRadius: Float = 1f,
+    val film: Float = 0f,
+    val warmth: Float = 0f,
+    val skin: Float = 0.5f,
+    val grain: Float = 0f,
+    val halation: Float = 0f,
 ) {
-    fun encode() = "$lut,$strength,$exposure,$saturation,$sharpness,$sharpRadius"
+    fun encode() = "$lut,$strength,$exposure,$saturation,$sharpness,$sharpRadius,$film,$warmth,$skin,$grain,$halation"
 
-    /** Nothing to change for a file in [iLog] or not. */
-    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f && sharpness == 0f
+    /** Nothing to change for a file in [iLog] or not (skin protection alone changes nothing). */
+    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f && sharpness == 0f &&
+        film == 0f && warmth == 0f && grain == 0f && halation == 0f
 
     companion object {
+        /** Also the shorter forms saved by earlier versions (4 and 6 values). */
         fun decode(s: String): ColorLook? {
             val p = s.split(',')
-            if (p.size != 4 && p.size != 6) return null
+            if (p.size != 4 && p.size != 6 && p.size != 11) return null
             fun f(i: Int, default: Float) = p.getOrNull(i)?.toFloatOrNull() ?: default
-            return ColorLook(p[0] == "true", f(1, 1f), f(2, 0f), f(3, 1f), f(4, 0f), f(5, 1f))
+            return ColorLook(
+                p[0] == "true", f(1, 1f), f(2, 0f), f(3, 1f), f(4, 0f), f(5, 1f),
+                f(6, 0f), f(7, 0f), f(8, 0.5f), f(9, 0f), f(10, 0f),
+            )
         }
     }
 }
