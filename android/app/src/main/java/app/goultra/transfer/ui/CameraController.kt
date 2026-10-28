@@ -67,19 +67,27 @@ enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 
 /**
  * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
- * stops (−2…+2) and saturation as a factor (0 grey … 1 as shot … 2) for any video.
+ * stops (−2…+2), saturation as a factor (0 grey … 1 as shot … 2), sharpness (0…1) and its radius (px) for any video.
  */
-data class ColorLook(val lut: Boolean = true, val strength: Float = 1f, val exposure: Float = 0f, val saturation: Float = 1f) {
-    fun encode() = "$lut,$strength,$exposure,$saturation"
+data class ColorLook(
+    val lut: Boolean = true,
+    val strength: Float = 1f,
+    val exposure: Float = 0f,
+    val saturation: Float = 1f,
+    val sharpness: Float = 0f,
+    val sharpRadius: Float = 1f,
+) {
+    fun encode() = "$lut,$strength,$exposure,$saturation,$sharpness,$sharpRadius"
 
     /** Nothing to change for a file in [iLog] or not. */
-    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f
+    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && exposure == 0f && saturation == 1f && sharpness == 0f
 
     companion object {
         fun decode(s: String): ColorLook? {
             val p = s.split(',')
-            if (p.size != 4) return null
-            return ColorLook(p[0] == "true", p[1].toFloatOrNull() ?: 1f, p[2].toFloatOrNull() ?: 0f, p[3].toFloatOrNull() ?: 1f)
+            if (p.size != 4 && p.size != 6) return null
+            fun f(i: Int, default: Float) = p.getOrNull(i)?.toFloatOrNull() ?: default
+            return ColorLook(p[0] == "true", f(1, 1f), f(2, 0f), f(3, 1f), f(4, 0f), f(5, 1f))
         }
     }
 }

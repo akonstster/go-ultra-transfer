@@ -432,6 +432,7 @@ private fun VideoPreview(
     var effectsFailed by remember(file.uri) { mutableStateOf(false) }
     val effects = !effectsFailed
     val matrix = remember(file.uri) { LiveColorMatrix(look.exposure, look.saturation) }
+    val sharpen = remember(file.uri) { Sharpen(look.sharpness, look.sharpRadius) }
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
     fun dropEffects(why: String) {
@@ -441,7 +442,7 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, vm.clipping))
+            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, vm.clipping))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -466,10 +467,11 @@ private fun VideoPreview(
         val now = listOf(look.lut, look.strength, vm.clipping)
         if (effects && now != applied[0]) {
             applied[0] = now
-            player.setVideoEffects(colorEffects(table, ilog, look, matrix, vm.clipping))
+            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, vm.clipping))
         }
     }
     LaunchedEffect(look.exposure, look.saturation) { matrix.set(look.exposure, look.saturation) }
+    LaunchedEffect(look.sharpness, look.sharpRadius) { sharpen.amount = look.sharpness; sharpen.radius = look.sharpRadius }
     // While setting the colour the video goes round, so the change is always in sight.
     LaunchedEffect(player, colorPanel) { player.repeatMode = if (colorPanel) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF }
     // With effects: no frame after 5 s of playing means the picture doesn't come through — back to no effects.
@@ -660,6 +662,7 @@ private fun VideoPreview(
                 ilog, look, saved != null, effectsFailed, vm.clipping,
                 onLook = { saved = it; vm.saveLook(file, it) },
                 onLive = { ev, sat -> matrix.set(ev, sat) },
+                onSharpLive = { amount, radius -> sharpen.amount = amount; sharpen.radius = radius },
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
                 onDone = { colorPanel = false },
@@ -708,14 +711,22 @@ private fun VideoPreview(
 }
 
 /**
- * The player's effects: Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure / saturation
- * [matrix], the clipping stripes when on.
+ * The player's effects, in order: Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure /
+ * saturation [matrix], the live [sharpen] (on the coloured picture, as editors do), the clipping stripes when on.
  */
 @OptIn(UnstableApi::class)
-private fun colorEffects(lut: CubeLut?, iLog: Boolean, look: ColorLook, matrix: LiveColorMatrix, clipping: Boolean): List<androidx.media3.common.Effect> {
+private fun colorEffects(
+    lut: CubeLut?,
+    iLog: Boolean,
+    look: ColorLook,
+    matrix: LiveColorMatrix,
+    sharpen: Sharpen,
+    clipping: Boolean,
+): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
     if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
     out += matrix
+    out += sharpen
     if (clipping) out += ClippingStripes()
     return out
 }
@@ -734,6 +745,7 @@ private fun ColorPanel(
     clipping: Boolean,
     onLook: (ColorLook) -> Unit,
     onLive: (exposure: Float, saturation: Float) -> Unit,
+    onSharpLive: (amount: Float, radius: Float) -> Unit,
     onClipping: () -> Unit,
     onReset: () -> Unit,
     onDone: () -> Unit,
@@ -762,6 +774,18 @@ private fun ColorPanel(
             tr("Насыщенность", "Saturation"), look.saturation, 0f..2f, { "${Math.round(it * 100)} %" },
             live = { onLive(look.exposure, it) },
         ) { onLook(look.copy(saturation = it)) }
+        // Unsharp mask on brightness: how much, and how wide the contours it lifts (small = fine texture, large =
+        // shapes; too large shows halos).
+        LookSlider(
+            tr("Резкость", "Sharpness"), look.sharpness, 0f..1f, { "${Math.round(it * 100)} %" },
+            live = { onSharpLive(it, look.sharpRadius) },
+        ) { onLook(look.copy(sharpness = it)) }
+        if (look.sharpness > 0f) {
+            LookSlider(
+                tr("Радиус", "Radius"), look.sharpRadius, 0.5f..3f, { "%.1f ".format(it) + tr("пкс", "px") },
+                live = { onSharpLive(look.sharpness, it) },
+            ) { onLook(look.copy(sharpRadius = it)) }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(checked = clipping, onCheckedChange = { onClipping() })
             Spacer(Modifier.width(10.dp))
