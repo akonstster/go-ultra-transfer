@@ -123,7 +123,7 @@ down), so dark and light skins alike — wide soft edges, narrow ones showed as 
 pulls skin hues up to 60 % to the line. A preset can lower the guard (`skinGuard`, mixed by strength): Amélie has 0 —
 faces go golden with the rest, as in the film, and guarding against so strong a grade showed its edges. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
 Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
-Saving is one «Сохранить» (top bar for videos, also the save icon in the colour panel) → `SaveDialog`: whole /
+Saving is one «Сохранить» (top bar for videos only) → `SaveDialog`: whole /
 marked pieces × as shot / with my colour × sound on / off (+ for a camera file with colour: download the original first, or straight
 from the camera). `CameraController.save` picks the way: whole as shot = download; pieces as shot = `saveClip`
 (no re-encoding, starts on key frames, `…_HL`); with colour = `exportWithColor` (media3-transformer 1.4.1, `…_COLOR` /

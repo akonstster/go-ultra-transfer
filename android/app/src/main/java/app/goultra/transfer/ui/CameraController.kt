@@ -191,6 +191,15 @@ class CameraController(private val app: Application) {
         prefs.edit().apply { if (look == null) remove("look2_" + file.name) else putString("look2_" + file.name, look.encode()) }.apply()
     }
 
+    /** A video's whole colour, copied to paste onto other videos (kept across restarts); null: nothing copied. */
+    var copiedLook by mutableStateOf(prefs.getString("look_copied", null)?.let(ColorLook::decode))
+        private set
+
+    fun copyLook(look: ColorLook) {
+        copiedLook = look
+        prefs.edit().putString("look_copied", look.encode()).apply()
+    }
+
     /** Clipping stripes over the video in the viewer (blown whites red, crushed blacks blue), for every video. */
     var clipping by mutableStateOf(prefs.getBoolean("clipping", false))
         private set
@@ -2004,6 +2013,12 @@ class CameraController(private val app: Application) {
         return bitmap.asImageBitmap().also { memCache.put(file.name, it) }
     }
 
+    /** A gallery file was written again under [name]: its old thumbnail must not be shown. */
+    private fun forgetThumbnail(name: String) {
+        memCache.remove(name)
+        File(thumbDir, "$name.jpg").delete()
+    }
+
     /** Temp file + rename: a killed process never leaves a truncated thumbnail behind. */
     private fun saveAtomically(target: File, bmp: Bitmap) {
         val tmp = File(target.path + ".tmp")
@@ -2234,6 +2249,7 @@ class CameraController(private val app: Application) {
                         "; ключевые кадры " + keyFrames(file)?.ms.orEmpty()
                             .filter { k -> pieces.any { k >= it.startMs - 5_000 && k <= it.endMs!! } }.joinToString(),
                 )
+                forgetThumbnail(name)
                 loadPhoneFiles()
             } catch (e: CancellationException) {
                 lastResult = tr("Клип не сохранён: остановлено", "Clip not saved: stopped")
@@ -2374,6 +2390,7 @@ class CameraController(private val app: Application) {
                         (if (camera != null) "с камеры, " else "") + "$sec с",
                 )
                 lastResult = tr("Сохранено: $name", "Saved: $name")
+                forgetThumbnail(name)
                 loadPhoneFiles()
             } catch (e: CancellationException) {
                 lastResult = tr("Не сохранено: остановлено", "Not saved: stopped")

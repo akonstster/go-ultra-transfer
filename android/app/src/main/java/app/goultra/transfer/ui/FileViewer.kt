@@ -123,6 +123,8 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material3.Switch
 import app.goultra.transfer.camera.CubeLut
@@ -199,7 +201,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         var colouring by remember(file.uri) { mutableStateOf(false) }
         if (info) FileInfo(vm, file) { info = false }
         when {
-            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }, { choose = true }) { ms ->
+            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
@@ -478,7 +480,6 @@ private fun VideoPreview(
     active: Boolean,
     onLock: (Boolean) -> Unit,
     onColouring: (Boolean) -> Unit,
-    onSave: () -> Unit,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -803,8 +804,8 @@ private fun VideoPreview(
                         .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
-            // Setting the colour: save with colour, before / after (the processing off while lit) and «Готово», over the
-            // video's top.
+            // Setting the colour: copy / paste the whole colour (to colour several videos alike), before / after (the
+            // processing off while lit) and «Готово», over the video's top. A save in progress shows its percent.
             if (colouring) Row(
                 Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -818,10 +819,21 @@ private fun VideoPreview(
                         fontSize = 12.sp,
                         modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
                     )
-                } else {
-                    // The same «Сохранить» as in the top bar (colour preselected when set).
-                    IconButton(onSave, Modifier.background(Color(0x99000000), CircleShape), enabled = !vm.isDownloading) {
-                        Icon(Icons.Filled.SaveAlt, tr("Сохранить", "Save"), tint = Color.White)
+                }
+                val round = Modifier.background(Color(0x99000000), CircleShape)
+                IconButton({
+                    vm.copyLook(look)
+                    android.widget.Toast.makeText(context, tr("Цвет скопирован — вставьте его в другом видео", "Colour copied — paste it in another video"), android.widget.Toast.LENGTH_SHORT).show()
+                }, round) {
+                    Icon(Icons.Filled.ContentCopy, tr("Копировать цвет", "Copy the colour"), tint = Color.White)
+                }
+                vm.copiedLook?.let { copied ->
+                    IconButton({
+                        saved = copied
+                        vm.saveLook(file, copied)
+                        android.widget.Toast.makeText(context, tr("Цвет вставлен", "Colour pasted"), android.widget.Toast.LENGTH_SHORT).show()
+                    }, round, enabled = copied != look) {
+                        Icon(Icons.Filled.ContentPaste, tr("Вставить цвет", "Paste the colour"), tint = if (copied != look) Color.White else Color(0x66FFFFFF))
                     }
                 }
                 IconButton(

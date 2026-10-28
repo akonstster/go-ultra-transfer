@@ -409,7 +409,8 @@ private fun FileTile(
 ) {
     // Keyed by size too: a just-shot RAW gets its size a moment later, by then its paired .jpg (the preview) exists.
     // A just-taken shot may not be readable yet (the camera is still writing it): fresh files retry a few times.
-    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size) {
+    // And by the phone copy: a file saved again under the same name is a new gallery item.
+    val thumb by produceState<ImageBitmap?>(null, file.uri, file.size, file.localUri) {
         val fresh = file.created?.isAfter(java.time.LocalDateTime.now().minusMinutes(10)) == true
         var attempt = 0
         while (true) {
