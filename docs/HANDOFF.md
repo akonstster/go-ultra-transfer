@@ -109,11 +109,11 @@ windows below 80 % of the format's frame rate (or a player error while playing) 
 halation / sharpening (`light` uniform: one ring of taps), logged «превью проще», label «упрощённо · 720p»; the colour
 is dropped only after the last step. Paused: no Presentation, full effects; after any change (slider, rebuild, panel
 open / close) the paused frame is redrawn by seeking to the same position (debounced 150 ms).
-Colour panel layout: the video's box keeps its size and the panel lies over its lower 55 %; the picture is moved up
-and, if needed, scaled into the top 45 % (`colouringFit`, a transform on `videoSurfaceView` like the pinch zoom). A
-resize doesn't work: the SurfaceView keeps a paused picture where it was; a TextureView instead
-(`surface_type="texture_view"`) let the gallery show through the whole dialog — tried, dropped. Gestures starting on
-the panel are left to it. Before / after: the
+Colour panel layout: the video keeps the top 45 % and the panel the rest. A SurfaceView keeps a paused picture where
+it was when its box resizes, so the PlayerView is made anew (`key(colouring)`, the old one lets go of the player in
+`onRelease`) and the paused frame is redrawn into it. Tried and dropped: a TextureView (`surface_type="texture_view"`
+let the gallery show through the whole dialog) and the panel over a full-size box with the picture moved up (small
+picture, broken drawing over the zoomed picture, errors on swiping). Before / after: the
 Compare icon over the video's top (next to «Готово», both there while the panel is open) rebuilds the effects with only the preview size and the clipping stripes (reset when the
 panel closes; the slowdown measure skips while bypassed).
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
