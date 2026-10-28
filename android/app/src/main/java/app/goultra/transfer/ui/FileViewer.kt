@@ -123,6 +123,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Compare
+import androidx.compose.material.icons.filled.PlaylistRemove
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.SaveAlt
@@ -283,6 +284,12 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             // Sharing needs the file on the phone.
             if (file.localUri != null) {
                 IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
+            }
+            // An added file: off the list (it stays on the phone), and the viewer closes.
+            if (file.isAdded) {
+                IconButton({ vm.removeAdded(listOf(file)); onClose() }, round) {
+                    Icon(Icons.Filled.PlaylistRemove, tr("Убрать из списка", "Take off the list"), tint = Color.White)
+                }
             }
         }
         if (choose) SaveDialog(vm, file, pieces, onDismiss = { choose = false }, onStarted = { choose = false; onClose() })
