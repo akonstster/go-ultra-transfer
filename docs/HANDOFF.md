@@ -167,6 +167,12 @@ the app's folder (`localFiles`), a folder badge; everything else (viewer, pieces
 Video kinds by extension (mp4, mov, m4v, 3gp, mkv, webm). A file whose permission is gone drops off; «Убрать из списка»
 on a selection of added files only forgets them. Filters: all / photos / videos, then ♥, added, own colour, saved
 (…_HL / _COLOR / _MUTE) — shown when not empty. Thumbnails of picked files fall back to a frame / a small decode.
+Batch save: a selection's bottom bar has a save icon → `BatchSaveDialog` (whole / each one's pieces, as shot / each
+one's own colour, sound) → `saveBatch` runs `save` per video in turn (joins its job), skips videos with nothing to
+save, takes the next free name (never overwrites); «пачка i из n» on the bars, «Стоп» stops the batch.
+Gallery tiles of videos with a colour of their own show it: `tileImage` colours the thumbnail on the CPU (CubeLut.apply
+trilinear, ColorMath, FilmMath — no sharpening / halation / grain at that size), cached per look; tiles redraw on
+`lookVersion`.
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
 (NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
 the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /

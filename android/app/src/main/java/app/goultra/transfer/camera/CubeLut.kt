@@ -23,6 +23,21 @@ class CubeLut private constructor(val title: String?, val size: Int, private val
         }
     }
 
+    /** [rgb] (0…1) through the table, trilinear, mixed with no change by [strength] — for small pictures on the CPU. */
+    fun apply(rgb: FloatArray, strength: Float): FloatArray {
+        val n = size - 1
+        val f = FloatArray(3) { rgb[it].coerceIn(0f, 1f) * n }
+        val i0 = IntArray(3) { minOf(f[it].toInt(), n - 1) }
+        val t = FloatArray(3) { f[it] - i0[it] }
+        val out = FloatArray(3)
+        for (dr in 0..1) for (dg in 0..1) for (db in 0..1) {
+            val w = (if (dr == 1) t[0] else 1 - t[0]) * (if (dg == 1) t[1] else 1 - t[1]) * (if (db == 1) t[2] else 1 - t[2])
+            val i = 3 * ((i0[0] + dr) + size * ((i0[1] + dg) + size * (i0[2] + db)))
+            for (c in 0..2) out[c] += w * this.rgb[i + c]
+        }
+        return FloatArray(3) { rgb[it] + (out[it] - rgb[it]) * strength }
+    }
+
     /**
      * The table as one RGBA 8-bit image for a 2D texture: [size] slices of [size] × [size] side by side — blue picks the
      * slice, red goes across within it, green down; [size]² wide, [size] high.

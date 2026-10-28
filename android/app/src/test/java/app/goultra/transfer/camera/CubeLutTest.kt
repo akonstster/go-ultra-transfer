@@ -36,4 +36,13 @@ class CubeLutTest {
     fun aShortTableIsRefused() {
         CubeLut.parse("LUT_3D_SIZE 2\n0 0 0\n1 1 1\n")
     }
+
+    @Test
+    fun applyIsTrilinear() {
+        // A 2³ table that inverts: any colour comes out inverted (linear in between), strength mixes back.
+        val lut = CubeLut.parse("LUT_3D_SIZE 2\n" + (0..7).joinToString("\n") { i -> "${1 - i % 2} ${1 - i / 2 % 2} ${1 - i / 4}" })
+        val out = lut.apply(floatArrayOf(0.2f, 0.5f, 0.9f), 1f)
+        org.junit.Assert.assertArrayEquals(floatArrayOf(0.8f, 0.5f, 0.1f), out, 1e-5f)
+        org.junit.Assert.assertArrayEquals(floatArrayOf(0.2f, 0.5f, 0.9f), lut.apply(floatArrayOf(0.2f, 0.5f, 0.9f), 0f), 1e-6f)
+    }
 }

@@ -15,6 +15,10 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import app.goultra.transfer.CameraService
 import app.goultra.transfer.camera.ClipAudio
+import androidx.compose.ui.graphics.asAndroidBitmap
+import app.goultra.transfer.camera.Look
+import app.goultra.transfer.camera.FilmMath
+import app.goultra.transfer.camera.ColorMath
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CameraInfo
@@ -1981,7 +1985,7 @@ class CameraController(private val app: Application) {
     /** The video's highlight marks for the viewer; empty when there are none or they couldn't be read. */
     suspend fun highlights(file: CameraFile): List<Highlight> {
         // A camera file with a phone copy: the camera's record first (marks edited there after the download).
-        val onCard = !file.uri.startsWith(Downloader.PHONE_PREFIX) && conn == ConnState.Connected
+        val onCard = !file.uri.startsWith(Downloader.PHONE_PREFIX) && !file.isAdded && conn == ConnState.Connected
         val fromCamera = if (onCard) runCatching { session.highlights(file) }.getOrNull() else null
         // Otherwise a downloaded copy keeps the camera's trailer: the same record, read from the end of the file.
         val marks = fromCamera ?: file.localUri?.let { local ->
@@ -2270,6 +2274,46 @@ class CameraController(private val app: Application) {
         return bitmap.asImageBitmap().also { memCache.put(file.name, it) }
     }
 
+    private val colouredThumbs = LruCache<String, ImageBitmap>(200)
+
+    /**
+     * A tile's picture: the thumbnail, and for a video with a colour of its own that colour on it — the LUT (I-Log),
+     * exposure / saturation and the «Стиль» grade, worked out on the CPU with the same math as the shaders (FilmMath,
+     * CubeLut.apply; sharpening, halation and grain don't show at this size). Cached per colour.
+     */
+    suspend fun tileImage(file: CameraFile): ImageBitmap? {
+        val base = thumbnail(file) ?: return null
+        if (file.kind != MediaKind.VIDEO) return base
+        val look = look(file) ?: return base
+        val key = file.name + "|" + look.encode()
+        colouredThumbs.get(key)?.let { return it }
+        val table = if (look.lut && look.strength > 0f && isILog(file)) lut() else null
+        return withContext(Dispatchers.Default) {
+            runCatching { colourBitmap(base.asAndroidBitmap(), look, table).asImageBitmap() }
+                .onFailure { log("превью с цветом ${file.name}: ${it.message}") }
+                .getOrNull()
+        }?.also { colouredThumbs.put(key, it) } ?: base
+    }
+
+    private fun colourBitmap(src: Bitmap, look: ColorLook, lut: CubeLut?): Bitmap {
+        val bmp = src.copy(Bitmap.Config.ARGB_8888, true)
+        val px = IntArray(bmp.width * bmp.height)
+        bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+        val matrix = if (look.exposure != 0f || look.saturation != 1f) ColorMath.matrix(look.exposure, look.saturation) else null
+        val grade = if (look.hasStyle) Look.grade(Look.of(look.preset), look.presetStrength, look.film, look.warmth, look.skin) else null
+        for (i in px.indices) {
+            val p = px[i]
+            var c = floatArrayOf(((p shr 16) and 0xFF) / 255f, ((p shr 8) and 0xFF) / 255f, (p and 0xFF) / 255f)
+            if (lut != null) c = lut.apply(c, look.strength)
+            if (matrix != null) c = ColorMath.apply(matrix, c).let { v -> FloatArray(3) { v[it].coerceIn(0f, 1f) } }
+            if (grade != null) c = FilmMath.apply(c, grade)
+            fun b(v: Float) = Math.round(v.coerceIn(0f, 1f) * 255f)
+            px[i] = (p and -0x1000000) or (b(c[0]) shl 16) or (b(c[1]) shl 8) or b(c[2])
+        }
+        bmp.setPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+        return bmp
+    }
+
     /** A thumbnail made here: a video's frame at 1 s, or the photo decoded small. */
     private fun localThumbnail(file: CameraFile): Bitmap? {
         val uri = android.net.Uri.parse(file.localUri ?: return null)
@@ -2365,8 +2409,9 @@ class CameraController(private val app: Application) {
         CameraService.start(app)
     }
 
-    /** «Стоп» on the notification or the bar: a download, a clip or a save with colour. */
+    /** «Стоп» on the notification or the bar: a download, a clip or a save with colour — and a batch of them. */
     fun cancelDownload() {
+        batchJob?.cancel()
         downloadJob?.cancel()
         exporter?.cancel()
         exportJob?.cancel()
@@ -2697,10 +2742,67 @@ class CameraController(private val app: Application) {
         }
     }
 
+    /** A batch save: which video of how many. */
+    data class BatchProgress(val index: Int, val count: Int)
+
+    var batch by mutableStateOf<BatchProgress?>(null)
+        private set
+    private var batchJob: Job? = null
+
+    /**
+     * The same save for every video of [files], one after another: [marked] = each one's own pieces (edited, or the
+     * camera's marks; a video without any is skipped), [colour] = each one's own colour (one without stays as shot),
+     * [sound], [direct] as in [save]. A name already taken gets the next free one (nothing is overwritten); the whole
+     * video as shot that is already on the phone is skipped.
+     */
+    fun saveBatch(files: List<CameraFile>, marked: Boolean, colour: Boolean, sound: Boolean, direct: Boolean) {
+        if (batchJob?.isActive == true || isDownloading || exportJob?.isActive == true) return
+        val videos = files.filter { it.kind == MediaKind.VIDEO }
+        if (videos.isEmpty()) return
+        selected.clear()
+        batchJob = scope.launch {
+            var started = 0
+            var skipped = 0
+            try {
+                for ((i, listed) in videos.withIndex()) {
+                    batch = BatchProgress(i + 1, videos.size)
+                    val file = withPhoneCopy(listed)
+                    val limitMs = file.durationSec?.let { (it + 1) * 1000L }
+                    val pieces = if (marked) Highlights.clip(editedPieces(file) ?: Highlights.pieces(highlights(file), limitMs), limitMs) else null
+                    if (marked && pieces.isNullOrEmpty()) { skipped++; continue }
+                    val iLog = isILog(file)
+                    val look = if (colour) look(file)?.takeIf { !it.isPlain(iLog) } else null
+                    val download = pieces == null && look == null && sound
+                    if (download && file.isOnPhone) { skipped++; continue }
+                    val name = if (download) {
+                        file.name
+                    } else {
+                        var n = 1
+                        while (nameTaken(saveName(file, pieces != null, look != null, !sound, n))) n++
+                        saveName(file, pieces != null, look != null, !sound, n)
+                    }
+                    save(file, pieces, look, iLog, name, direct, sound)
+                    downloadJob?.join()
+                    exportJob?.join()
+                    started++
+                }
+                lastResult = tr("Пачка готова: $started из ${videos.size}", "Batch done: $started of ${videos.size}") +
+                    (if (skipped > 0) tr(", пропущено $skipped (нечего сохранять)", ", $skipped skipped (nothing to save)") else "")
+            } catch (e: CancellationException) {
+                lastResult = tr("Пачка остановлена: сделано $started из ${videos.size}", "Batch stopped: $started of ${videos.size} done")
+                throw e
+            } finally {
+                batch = null
+                message = lastResult
+            }
+        }
+    }
+
     /** The camera's full file (not its light copy) over Wi-Fi. */
     private fun previewUrlOf(file: CameraFile) = "http://${CameraTcp.HOST}${file.uri}"
 
     fun cancelExport() {
+        batchJob?.cancel()
         exporter?.cancel()
         exportJob?.cancel()
         downloadJob?.cancel()
