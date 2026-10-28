@@ -918,6 +918,8 @@ private fun VideoPreview(
                             android.widget.Toast.makeText(context, tr("Здесь нет места для куска", "No room for a piece here"), android.widget.Toast.LENGTH_SHORT).show()
                         } else {
                             commit(pieces + added, added.startMs)
+                            // The editor showed because there were no pieces: stay in it to add more.
+                            editing = true
                         }
                     },
                     onDelete = { i -> commit(pieces.filterIndexed { j, _ -> j != i }, null) },
