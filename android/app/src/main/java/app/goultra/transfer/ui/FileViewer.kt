@@ -417,7 +417,7 @@ private fun VideoPreview(
     // Colour: an I-Log video gets Insta360's LUT on its own; brightness / saturation for any video. The player's effect
     // pipeline exists only if set up before it starts, so it is there for I-Log files and for videos with settings
     // (a first change on a plain video restarts the player at the same spot); then changes apply on the fly.
-    val iLog by produceState(file.iLog, file.uri, file.localUri) { if (value == null) value = vm.isILog(file) }
+    val iLog by produceState<Boolean?>(null, file.uri, file.localUri) { value = vm.isILog(file) }
     val lut by produceState<CubeLut?>(null) { value = vm.lut() }
     var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
     val look = saved ?: ColorLook()
@@ -427,11 +427,26 @@ private fun VideoPreview(
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
         return
     }
-    val effects = ilog || saved != null
+    // The effects didn't show a picture on this phone (or failed): the video is shown as shot.
+    var effectsFailed by remember(file.uri) { mutableStateOf(false) }
+    val effects = (ilog || saved != null) && !effectsFailed
     val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
+    val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
+    fun dropEffects(why: String) {
+        vm.log("цвет ${file.name}: $why — без обработки цвета")
+        effectsFailed = true
+        android.widget.Toast.makeText(context, tr("Цвет на этом телефоне не показывается", "Colour can't be shown on this phone"), android.widget.Toast.LENGTH_LONG).show()
+    }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
             if (effects) setVideoEffects(colorEffects(lut, ilog, look))
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() { firstFrame[0] = true }
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    vm.log("плеер ${file.name}: ${error.errorCodeName} ${error.message ?: ""} ${error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: ""}")
+                    if (effects) dropEffects("ошибка плеера")
+                }
+            })
             if (resumeAt[0] > 0) seekTo(resumeAt[0])
             if (source == null) {
                 setMediaItem(MediaItem.fromUri(file.localUri!!)) // the phone's copy: the default (content://) source
@@ -444,6 +459,16 @@ private fun VideoPreview(
     }
     DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
     LaunchedEffect(player, look) { if (effects) player.setVideoEffects(colorEffects(lut, ilog, look)) }
+    // With effects: no frame after 3 s of playing means the picture doesn't come through — back to no effects.
+    LaunchedEffect(player) {
+        if (!effects) return@LaunchedEffect
+        var playedMs = 0
+        while (!firstFrame[0] && playedMs < 3_000) {
+            delay(250)
+            if (player.isPlaying) playedMs += 250
+        }
+        if (!firstFrame[0]) dropEffects("нет кадров за 3 с")
+    }
     // Swiped away: stop; swiped back: play on.
     LaunchedEffect(active) { if (active) player.play() else player.pause() }
     // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
@@ -608,7 +633,7 @@ private fun VideoPreview(
         }
         if (colorPanel && !editing) {
             ColorPanel(
-                ilog, look, saved != null,
+                ilog, look, saved != null, effectsFailed,
                 onLook = { saved = it; vm.saveLook(file, it) },
                 onReset = { saved = null; vm.saveLook(file, null) },
                 onDone = { colorPanel = false },
@@ -675,6 +700,7 @@ private fun ColorPanel(
     iLog: Boolean,
     look: ColorLook,
     changed: Boolean,
+    failed: Boolean,
     onLook: (ColorLook) -> Unit,
     onReset: () -> Unit,
     onDone: () -> Unit,
@@ -696,6 +722,13 @@ private fun ColorPanel(
         }
         LookSlider(tr("Яркость", "Brightness"), look.brightness, -0.5f..0.5f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(brightness = it)) }
         LookSlider(tr("Насыщенность", "Saturation"), look.saturation, -1f..1f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(saturation = it)) }
+        if (failed) {
+            Text(
+                tr("Обработка цвета на этом телефоне не показала картинку — видео показано как снято.", "Colour processing showed no picture on this phone — the video is shown as shot."),
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 12.sp,
+            )
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
             if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }

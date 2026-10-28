@@ -141,9 +141,12 @@ class CameraController(private val app: Application) {
      * trailer. False when it can't be told.
      */
     suspend fun isILog(file: CameraFile): Boolean {
-        file.iLog?.let { return it }
         iLogCache[file.name]?.let { return it }
-        val local = file.localUri ?: return false
+        file.iLog?.let { return it.also { iLogCache[file.name] = it; log("цвет ${file.name}: режим ${file.colorMode} (список камеры)") } }
+        val local = file.localUri ?: return false.also {
+            iLogCache[file.name] = false
+            log("цвет ${file.name}: режима в списке камеры нет")
+        }
         val mode = withContext(Dispatchers.IO) {
             runCatching { LocalTrailer.read(app, android.net.Uri.parse(local))?.colorMode }.getOrNull()
         }

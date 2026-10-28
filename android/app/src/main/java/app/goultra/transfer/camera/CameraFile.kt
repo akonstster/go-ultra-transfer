@@ -21,12 +21,15 @@ data class CameraFile(
     val fps: Int?,
     val created: LocalDateTime?,
     val firstFrameUs: Long? = null,
-    /** Shot in I-Log (metadata 212.8); null = not known (a file listed from the phone: read from its trailer). */
-    val iLog: Boolean? = null,
+    /** Metadata 212.8 color_mode (1 standard, 2 I-Log); null = not in the list (a file listed from the phone: read from its trailer). */
+    val colorMode: Int? = null,
     /** content:// item of the downloaded copy, for a file listed from the phone. */
     val localUri: String? = null,
 ) {
     val isOnPhone: Boolean get() = localUri != null
+
+    /** Shot in I-Log, as the camera's list says; null = it doesn't say. */
+    val iLog: Boolean? get() = colorMode?.let { it == COLOR_MODE_ILOG }
     val name: String get() = uri.substringAfterLast('/')
     val kind: MediaKind get() = if (name.endsWith(".mp4", ignoreCase = true)) MediaKind.VIDEO else MediaKind.PHOTO
     val isLive: Boolean get() = name.startsWith("LIV_")
@@ -60,7 +63,7 @@ data class CameraFile(
                 created = createdFromName(uri.substringAfterLast('/'))
                     ?: meta.field(7)?.varint?.let { parseStamp(it.toString()) },
                 firstFrameUs = meta.field(24)?.varint,
-                iLog = colorMode(meta)?.let { it == COLOR_MODE_ILOG },
+                colorMode = colorMode(meta),
             )
         }
 
