@@ -115,6 +115,8 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Compare
+import app.goultra.transfer.R
 import androidx.compose.material3.Switch
 import app.goultra.transfer.camera.CubeLut
 import app.goultra.transfer.camera.CameraFile
@@ -445,6 +447,9 @@ private fun VideoPreview(
     // never upscaled); a phone that can't keep up goes a step lower, the last step with lighter halation and
     // sharpening. Paused, the frame is done in full: settings are seen as they will be.
     var level by remember(file.uri) { mutableIntStateOf(0) }
+    // «До / после» in the colour panel: the video as shot (the clipping stripes stay, they measure, not grade).
+    var bypass by remember(file.uri) { mutableStateOf(false) }
+    val bypassNow by rememberUpdatedState(bypass)
     var paused by remember(file.uri) { mutableStateOf(!active) }
     var sourceLines by remember(file.uri) { mutableIntStateOf(0) } // the video's short side, once the player knows it
     val previewLines = PLAY_SIZES[level].takeIf { !paused && sourceLines > it }
@@ -462,7 +467,7 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines))
+            if (effects) setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines, bypass))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
@@ -497,12 +502,12 @@ private fun VideoPreview(
     }
     // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
     // start). After an error the player starts again with them.
-    val applied = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping, previewLines, level)) }
-    LaunchedEffect(player, look.lut, look.strength, vm.clipping, previewLines, level) {
-        val now = listOf(look.lut, look.strength, vm.clipping, previewLines, level)
+    val applied = remember(player) { arrayOf<Any>(listOf(look.lut, look.strength, vm.clipping, previewLines, level, bypass)) }
+    LaunchedEffect(player, look.lut, look.strength, vm.clipping, previewLines, level, bypass) {
+        val now = listOf(look.lut, look.strength, vm.clipping, previewLines, level, bypass)
         if (effects && now != applied[0]) {
             applied[0] = now
-            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines))
+            player.setVideoEffects(colorEffects(table, ilog, look, matrix, sharpen, filmLook, vm.clipping, previewLines, bypass))
             if (player.playerError != null) player.prepare() else redraw++
         }
     }
@@ -525,7 +530,8 @@ private fun VideoPreview(
             val now = filmLook.frames.get()
             val drawn = now - last
             last = now
-            if (!player.isPlaying || player.playbackState != Player.STATE_READY) { settle = 2; continue }
+            // Bypassed, the film look draws nothing: no measure then.
+            if (bypassNow || !player.isPlaying || player.playbackState != Player.STATE_READY) { settle = 2; continue }
             if (settle > 0) { settle--; continue }
             val fps = player.videoFormat?.frameRate?.takeIf { it > 0f } ?: 30f
             val wanted = fps * player.playbackParameters.speed * 2
@@ -570,7 +576,10 @@ private fun VideoPreview(
     val colouring = colorPanel && !editing
     // No swiping to the next file while the timeline or the colour sliders own the gestures.
     LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
-    LaunchedEffect(colouring) { onColouring(colouring) }
+    LaunchedEffect(colouring) {
+        onColouring(colouring)
+        if (!colouring) bypass = false
+    }
     // The video's box changes size with the panel. Paused, the player shows no new frame, so the old picture would stay
     // where it was until playback starts: once the new layout is in, the same frame is shown again.
     val shownColouring = remember(player) { booleanArrayOf(colouring) }
@@ -674,7 +683,7 @@ private fun VideoPreview(
             AndroidView(
                 // Controls only on a tap on the picture, not on their own when the video starts or a slider moves.
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
+                    (android.view.LayoutInflater.from(ctx).inflate(R.layout.player_texture, null) as PlayerView).apply {
                         this.player = player
                         setShowNextButton(false)
                         setShowPreviousButton(false)
@@ -750,6 +759,8 @@ private fun VideoPreview(
                 onFilmLive = { filmLook.set(it); redraw++ },
                 onClipping = vm::toggleClipping,
                 onReset = { saved = null; vm.saveLook(file, null) },
+                bypass = bypass,
+                onBypass = { bypass = !bypass },
                 onDone = { colorPanel = false },
             )
         } else if (film) {
@@ -799,7 +810,7 @@ private fun VideoPreview(
  * The player's effects, in order: the picture made smaller for a lighter preview ([previewLines] lines, while
  * playing), Insta360's LUT for an I-Log file (rebuilt for a new strength), the live exposure /
  * saturation [matrix], the live [sharpen] (on the coloured picture, as editors do), the live [film] look (after the
- * sharpening, so its grain isn't sharpened), the clipping stripes when on.
+ * sharpening, so its grain isn't sharpened), the clipping stripes when on. [bypass]: only the size and the stripes.
  */
 @OptIn(UnstableApi::class)
 private fun colorEffects(
@@ -811,9 +822,14 @@ private fun colorEffects(
     film: FilmLook,
     clipping: Boolean,
     previewLines: Int?,
+    bypass: Boolean,
 ): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
     if (previewLines != null) out += androidx.media3.effect.Presentation.createForHeight(previewLines)
+    if (bypass) {
+        if (clipping) out += ClippingStripes()
+        return out
+    }
     if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
     out += matrix
     out += sharpen
@@ -845,6 +861,8 @@ private fun ColorPanel(
     onFilmLive: (ColorLook) -> Unit,
     onClipping: () -> Unit,
     onReset: () -> Unit,
+    bypass: Boolean,
+    onBypass: () -> Unit,
     onDone: () -> Unit,
 ) {
     var filmTab by remember { mutableStateOf(false) }
@@ -867,7 +885,14 @@ private fun ColorPanel(
                 } else null,
             )
             Spacer(Modifier.weight(1f))
-            Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
+            // Before / after: the processing off while lit.
+            IconButton(
+                onBypass,
+                if (bypass) Modifier.background(MARK_COLOR, CircleShape) else Modifier,
+            ) {
+                Icon(Icons.Filled.Compare, tr("До / после", "Before / after"), tint = if (bypass) Color.Black else Color.White)
+            }
+            Button(onDone, Modifier.padding(start = 4.dp)) { Text(tr("Готово", "Done")) }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (filmTab) {

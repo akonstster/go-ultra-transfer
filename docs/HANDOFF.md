@@ -109,6 +109,10 @@ windows below 80 % of the format's frame rate (or a player error while playing) 
 halation / sharpening (`light` uniform: one ring of taps), logged «превью проще», label «упрощённо · 720p»; the colour
 is dropped only after the last step. Paused: no Presentation, full effects; after any change (slider, rebuild, panel
 open / close) the paused frame is redrawn by seeking to the same position (debounced 150 ms).
+The viewer's PlayerView is inflated from `res/layout/player_texture.xml` (`surface_type="texture_view"`): with a
+SurfaceView a paused picture stayed where it was when the panel resized the video box. Before / after: the Compare
+icon in the panel's header rebuilds the effects with only the preview size and the clipping stripes (reset when the
+panel closes; the slowdown measure skips while bypassed).
 Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
