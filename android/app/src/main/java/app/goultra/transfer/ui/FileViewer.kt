@@ -348,14 +348,17 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
     var marked by remember { mutableStateOf(pieces.isNotEmpty()) }
     var colour by remember(colourSet) { mutableStateOf(colourSet) }
     var direct by remember { mutableStateOf(false) }
+    var sound by remember { mutableStateOf(true) }
     var taken by remember { mutableStateOf<String?>(null) }
     val onCamera = !file.isOnPhone
     val piecesMs = pieces.sumOf { (it.endMs ?: it.startMs) - it.startMs }
-    val name = vm.saveName(file, marked, colour)
-    // Nothing to do: the whole video as shot is already on the phone.
-    val nothing = !marked && !colour && !onCamera
+    val name = vm.saveName(file, marked, colour, !sound)
+    // Nothing to do: the whole video as shot, with its sound, is already on the phone.
+    val nothing = !marked && !colour && sound && !onCamera
+    // The whole video as shot, with sound: a plain download under the camera's name.
+    val download = !marked && !colour && sound
     fun start(as_: String) {
-        vm.save(file, if (marked) pieces else null, if (colour) look else null, ilog, as_, direct)
+        vm.save(file, if (marked) pieces else null, if (colour) look else null, ilog, as_, direct, sound)
         onStarted()
     }
     val takenName = taken
@@ -366,7 +369,7 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
             text = { Text(tr("В галерее уже есть $takenName. Заменить его или сохранить новый отдельно?", "$takenName is already in the gallery. Replace it, or save the new one separately?")) },
             confirmButton = { TextButton({ start(takenName) }) { Text(tr("Заменить", "Replace")) } },
             dismissButton = {
-                TextButton({ scope.launch { start(vm.freeSaveName(file, marked, colour)) } }) { Text(tr("Сохранить отдельно", "Save separately")) }
+                TextButton({ scope.launch { start(vm.freeSaveName(file, marked, colour, !sound)) } }) { Text(tr("Сохранить отдельно", "Save separately")) }
             },
         )
         return
@@ -402,6 +405,19 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
                     label = tr("С моим цветом", "With my colour"),
                     note = if (colourSet) null else tr("цвет не менялся", "the colour wasn't changed"),
                 )
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                // Without sound: less work (no sound to cut, join or encode).
+                Row(Modifier.fillMaxWidth().clickable { sound = !sound }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("Звук", "Sound"))
+                        Text(
+                            if (sound) tr("сохраняется", "kept") else tr("без звука — быстрее", "no sound — faster"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(sound, { sound = it })
+                }
                 if (onCamera && colour) {
                     HorizontalDivider(Modifier.padding(vertical = 6.dp))
                     Choice(
@@ -419,15 +435,17 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
                 Text(
                     when {
                         nothing -> tr("Видео уже на телефоне.", "The video is already on the phone.")
-                        !marked && !colour -> tr("Скачивание оригинала.", "Downloads the original.")
+                        download -> tr("Скачивание оригинала.", "Downloads the original.")
+                        !colour && !marked -> "$name · " + tr("копия без звука, без перекодирования, быстро.", "a copy without sound, no re-encoding, fast.")
                         !colour -> "$name · " + tr(
                             "без перекодирования, быстро, исходное качество; начало куска — с ключевого кадра перед ним.",
                             "no re-encoding, fast, original quality; a piece starts at the key frame before it.",
                         )
-                        else -> "$name · " + tr(
-                            "перекодирование в исходном размере: дольше. " + (if (marked) "Куски точно по отметкам, звук режется вместе с ними." else "Звук копируется как есть."),
-                            "re-encoded at full size: slower. " + (if (marked) "Pieces exactly as marked, the sound cut with them." else "The sound is copied as is."),
-                        )
+                        else -> "$name · " + tr("перекодирование в исходном размере: дольше. ", "re-encoded at full size: slower. ") + when {
+                            !sound -> tr("Без звука.", "No sound.")
+                            marked -> tr("Куски точно по отметкам, звук на стыках сводится кроссфейдом 0,2 с.", "Pieces exactly as marked, the sound crossfaded 0.2 s at the joins.")
+                            else -> tr("Звук копируется как есть.", "The sound is copied as is.")
+                        }
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -436,7 +454,7 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
         confirmButton = {
             TextButton(
                 {
-                    if (!marked && !colour) {
+                    if (download) {
                         start(file.name)
                     } else {
                         scope.launch { if (vm.nameTaken(name)) taken = name else start(name) }

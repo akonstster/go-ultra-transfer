@@ -2176,7 +2176,7 @@ class CameraController(private val app: Application) {
      * One clip of [pieces] into the gallery ([ClipMaker]): from the phone's copy when there is one, otherwise from the
      * camera, reading only the file's index and the pieces. Runs as a download (progress below, «Стоп» stops it).
      */
-    fun saveClip(file: CameraFile, marked: List<Highlight>, name: String = clipName(file)) {
+    fun saveClip(file: CameraFile, marked: List<Highlight>, name: String = clipName(file), withSound: Boolean = true) {
         if (isDownloading || marked.isEmpty()) return
         val local = file.localUri
         if (local == null && conn != ConnState.Connected) {
@@ -2211,7 +2211,7 @@ class CameraController(private val app: Application) {
                         ({ ex -> ex.setDataSource(app, uri, null) })
                     }
                     Downloader.saveClip(app, name, file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()) { fd ->
-                        cut = ClipMaker.join(open, pieces, fd) { us ->
+                        cut = ClipMaker.join(open, pieces, fd, withSound) { us ->
                             if (job?.isActive == false) throw CancellationException("остановлено")
                             val now = System.currentTimeMillis()
                             if (now - reportedAt >= 250) {
@@ -2261,17 +2261,21 @@ class CameraController(private val app: Application) {
     private var exportJob: Job? = null
     private var exporter: androidx.media3.transformer.Transformer? = null
 
-    /** The gallery name of a save: …_HL (marked pieces), …_COLOR (with colour), …_HL_COLOR; [n] > 1 adds a number. */
-    fun saveName(file: CameraFile, pieces: Boolean, color: Boolean, n: Int = 1): String =
-        file.stem + (if (pieces) "_HL" else "") + (if (color) "_COLOR" else "") + (if (n > 1) "$n" else "") + ".mp4"
+    /**
+     * The gallery name of a save: …_HL (marked pieces), …_COLOR (with colour), …_MUTE (no sound), e.g. …_HL_COLOR_MUTE;
+     * [n] > 1 adds a number.
+     */
+    fun saveName(file: CameraFile, pieces: Boolean, color: Boolean, mute: Boolean = false, n: Int = 1): String =
+        file.stem + (if (pieces) "_HL" else "") + (if (color) "_COLOR" else "") + (if (mute) "_MUTE" else "") +
+            (if (n > 1) "$n" else "") + ".mp4"
 
     suspend fun nameTaken(name: String): Boolean = withContext(Dispatchers.IO) { Downloader.galleryUri(app, name) != null }
 
     /** The first free name for this kind of save: …2, …3 … */
-    suspend fun freeSaveName(file: CameraFile, pieces: Boolean, color: Boolean): String {
+    suspend fun freeSaveName(file: CameraFile, pieces: Boolean, color: Boolean, mute: Boolean): String {
         var n = 2
-        while (nameTaken(saveName(file, pieces, color, n))) n++
-        return saveName(file, pieces, color, n)
+        while (nameTaken(saveName(file, pieces, color, mute, n))) n++
+        return saveName(file, pieces, color, mute, n)
     }
 
     /**
@@ -2279,13 +2283,16 @@ class CameraController(private val app: Application) {
      * [look] null = as shot, else with this colour ([iLog] for the LUT). As shot: the whole is a download, pieces a
      * clip cut without re-encoding ([saveClip]). With colour it is re-encoded ([exportWithColor]); a file still on the
      * camera is downloaded first, or with [direct] read straight from the camera (only what is needed — no room on the
-     * phone for the original).
+     * phone for the original). Without [sound] the sound is left out — less work: no sound to cut, join or encode; the
+     * whole video as shot then becomes a copy without it (no re-encoding either).
      */
-    fun save(file: CameraFile, pieces: List<Highlight>?, look: ColorLook?, iLog: Boolean, name: String, direct: Boolean) {
+    fun save(file: CameraFile, pieces: List<Highlight>?, look: ColorLook?, iLog: Boolean, name: String, direct: Boolean, sound: Boolean) {
+        // The whole video as one piece, to its end (a little past the listed seconds: the copy stops at the end).
+        val whole = listOf(Highlight(0, ((file.durationSec ?: 86_400) + 1) * 1000L))
         when {
-            look == null && pieces == null -> downloadOne(file)
-            look == null -> saveClip(file, pieces!!, name)
-            else -> exportWithColor(file, look, iLog, pieces, name, direct)
+            look == null && pieces == null && sound -> downloadOne(file)
+            look == null -> saveClip(file, pieces ?: whole, name, sound)
+            else -> exportWithColor(file, look, iLog, pieces, name, direct, sound)
         }
     }
 
@@ -2299,7 +2306,7 @@ class CameraController(private val app: Application) {
      * the gallery. The Insta360 data at the file's end (marks) isn't carried over. One at a time; «Стоп» cancels.
      */
     @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
-    fun exportWithColor(file: CameraFile, look: ColorLook, iLog: Boolean, pieces: List<Highlight>?, name: String, direct: Boolean) {
+    fun exportWithColor(file: CameraFile, look: ColorLook, iLog: Boolean, pieces: List<Highlight>?, name: String, direct: Boolean, sound: Boolean = true) {
         if (exportJob?.isActive == true || isDownloading) return
         if (file.localUri == null && conn != ConnState.Connected) {
             message = tr("Чтобы сохранить файл с камеры, подключитесь", "Connect to save a file from the camera")
@@ -2328,11 +2335,11 @@ class CameraController(private val app: Application) {
                 val effects = exportEffects(table, look, source.lines)
                 val parts = pieces?.let { Highlights.joinTouching(it) }
                 tmp.delete()
-                // Pieces: the picture first (90 %), then the sound with crossfades and the two together.
-                transform(uri, camera != null, parts, tmp, effects, source) { export = ExportProgress(name, if (parts != null) it * 9 / 10 else it) }
+                // Pieces with sound: the picture first (90 %), then the sound with crossfades and the two together.
+                transform(uri, camera != null, parts, tmp, effects, source, sound) { export = ExportProgress(name, if (parts != null && sound) it * 9 / 10 else it) }
                 val takenAt = file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()
                 withContext(Dispatchers.IO) {
-                    if (parts == null) {
+                    if (parts == null || !sound) {
                         Downloader.saveClip(app, name, takenAt) { fd ->
                             java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
                         }
@@ -2409,7 +2416,8 @@ class CameraController(private val app: Application) {
     /**
      * Runs the transformer on the main thread until it is done; [onPercent] twice a second. [uri]: the phone's copy, or
      * with [fromCamera] the camera's file over Wi-Fi (our data source, reading only what is needed). [parts] null: the
-     * whole video, its sound copied; else those pieces in a row, each cut exactly, without sound (see [exportWithColor]).
+     * whole video, its sound copied (left out without [sound]); else those pieces in a row, each cut exactly, without
+     * sound (joined afterwards, see [exportWithColor]).
      */
     @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
     private suspend fun transform(
@@ -2419,6 +2427,7 @@ class CameraController(private val app: Application) {
         out: java.io.File,
         effects: List<androidx.media3.common.Effect>,
         source: ExportSource,
+        sound: Boolean,
         onPercent: (Int) -> Unit,
     ) = kotlinx.coroutines.coroutineScope {
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
@@ -2471,7 +2480,7 @@ class CameraController(private val app: Application) {
                 }
             }.build()
             return androidx.media3.transformer.EditedMediaItem.Builder(media)
-                .setRemoveAudio(piece != null)
+                .setRemoveAudio(piece != null || !sound)
                 .setEffects(androidx.media3.transformer.Effects(emptyList(), effects))
                 .build()
         }

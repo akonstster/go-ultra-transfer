@@ -124,7 +124,7 @@ pulls skin hues up to 60 % to the line. A preset can lower the guard (`skinGuard
 faces go golden with the rest, as in the film, and guarding against so strong a grade showed its edges. `ColorLook` has 13 values (11-value saves drop the old skin protection value).
 Shaders checked with glslangValidator and rendered in headless Chromium WebGL with the uniforms from `Looks.grade`.
 Saving is one «Сохранить» (top bar for videos, also the save icon in the colour panel) → `SaveDialog`: whole /
-marked pieces × as shot / with my colour (+ for a camera file with colour: download the original first, or straight
+marked pieces × as shot / with my colour × sound on / off (+ for a camera file with colour: download the original first, or straight
 from the camera). `CameraController.save` picks the way: whole as shot = download; pieces as shot = `saveClip`
 (no re-encoding, starts on key frames, `…_HL`); with colour = `exportWithColor` (media3-transformer 1.4.1, `…_COLOR` /
 `…_HL_COLOR`). Names via `saveName`; a taken name → replace / save separately. Export: `exportEffects` (the viewer's
@@ -136,7 +136,9 @@ editor's crossfade: at each join the first piece's sound runs 0.1 s past its end
 starts 0.1 s before its start fading in (constant power, window centred on the cut, narrowed to half a short piece;
 `AudioJoin`, unit-tested: as long as the picture, exact inside pieces), 10 ms fades at the clip's ends; decoded with
 MediaCodec from the original (phone copy or `session.clipSource`), encoded AAC-LC 256 kbit/s in memory, muxed with
-the picture (`MediaMuxer`, interleaved by time, rotation kept) straight into the gallery item.
+the picture (`MediaMuxer`, interleaved by time, rotation kept) straight into the gallery item. Without sound (`_MUTE`): clips
+leave the track out (`ClipMaker.join(withSound = false)`; the whole video as shot becomes such a copy instead of a
+download), the transformer removes it, pieces skip `ClipAudio`.
 with `ProgressiveMediaSource` over `CameraHttpDataSource` on the full file's URL (Range reads, only what is needed);
 the codec info from `session.indexSource`. Via `cacheDir/export.mp4`, then `Downloader.saveClip`. Progress in percent
 (own bar at the gallery's bottom and over the video); «Стоп» cancels (the download stage too). 8-bit
