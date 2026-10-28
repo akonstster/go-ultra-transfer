@@ -845,6 +845,16 @@ private fun VideoPreview(
             }
             still?.let { frame ->
                 StillFrame(frame, stillSteps, stillAt[0] * 1000, zoom, shift, Modifier.fillMaxSize())
+                // The still's surface covers the player's own controls: a tap anywhere on it plays, and a ▶ shows where.
+                Box(
+                    Modifier.fillMaxSize().pointerInput(player) { detectTapGestures { player.play() } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier.size(64.dp).background(Color(0x99000000), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.Filled.PlayArrow, tr("Воспроизвести", "Play"), Modifier.size(40.dp), tint = Color.White) }
+                }
             }
             // The phone couldn't keep up: playing shows a lighter preview (a paused frame is in full).
             if (effects && level > 0 && !paused) {
