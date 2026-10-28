@@ -65,13 +65,22 @@ sealed interface ConnState {
 
 enum class Filter { ALL, PHOTO, VIDEO, FAVORITE }
 
-/** Colour over an I-Log video: how much of the LUT (0…1), brightness and saturation (−1…1, 0 = unchanged). */
-data class ColorLook(val strength: Float = 1f, val brightness: Float = 0f, val saturation: Float = 0f) {
-    fun encode() = "$strength,$brightness,$saturation"
+/**
+ * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; brightness
+ * and saturation (−1…1, 0 = unchanged) for any video.
+ */
+data class ColorLook(val lut: Boolean = true, val strength: Float = 1f, val brightness: Float = 0f, val saturation: Float = 0f) {
+    fun encode() = "$lut,$strength,$brightness,$saturation"
+
+    /** Nothing to change for a file in [iLog] or not. */
+    fun isPlain(iLog: Boolean) = (!iLog || !lut || strength == 0f) && brightness == 0f && saturation == 0f
 
     companion object {
-        fun decode(s: String): ColorLook? = s.split(',').mapNotNull { it.toFloatOrNull() }.takeIf { it.size == 3 }
-            ?.let { (a, b, c) -> ColorLook(a, b, c) }
+        fun decode(s: String): ColorLook? {
+            val p = s.split(',')
+            if (p.size != 4) return null
+            return ColorLook(p[0] == "true", p[1].toFloatOrNull() ?: 1f, p[2].toFloatOrNull() ?: 0f, p[3].toFloatOrNull() ?: 0f)
+        }
     }
 }
 
@@ -113,25 +122,33 @@ class CameraController(private val app: Application) {
     var favorites by mutableStateOf(prefs.getStringSet("favorites", emptySet())!!.toSet())
         private set
 
-    // ---------- colour: a LUT for I-Log videos, shown in the viewer (the file stays as shot) ----------
+    // ---------- colour: I-Log videos get Insta360's LUT (shown in the viewer; the file stays as shot) ----------
 
-    private val lutFile = File(app.filesDir, "lut.cube")
+    private var ilogLut: CubeLut? = null
 
-    /** The colour table loaded from the phone (e.g. Insta360's I-Log → Rec.709), or null. Not shipped: the user's file. */
-    var lut by mutableStateOf(runCatching { lutFile.takeIf { it.exists() }?.readText()?.let(CubeLut::parse) }.getOrNull())
-        private set
+    /** Insta360's «GO Ultra I-Log to Rec.709» table (app assets), read once. */
+    suspend fun lut(): CubeLut? = ilogLut ?: withContext(Dispatchers.IO) {
+        runCatching { app.assets.open("luts/GO_Ultra_I-Log_To_Rec.709_V1.0.cube").use { it.readBytes().decodeToString() } }
+            .mapCatching(CubeLut::parse)
+            .onFailure { log("LUT: ${it.message}") }
+            .getOrNull()
+    }?.also { ilogLut = it }
 
-    /** Reads a .cube file chosen on the phone; on success it replaces the current table. Returns an error, or null. */
-    suspend fun importLut(uri: android.net.Uri): String? = withContext(Dispatchers.IO) {
-        runCatching {
-            val text = app.contentResolver.openInputStream(uri)!!.use { it.readBytes().decodeToString() }
-            val parsed = CubeLut.parse(text)
-            lutFile.writeText(text)
-            parsed
-        }.fold(
-            onSuccess = { lut = it; log("LUT загружен: ${it.title} ${it.size}³"); null },
-            onFailure = { log("LUT не загружен: ${it.message}"); tr("Это не таблица LUT (.cube)", "Not a LUT (.cube) file") },
-        )
+    private val iLogCache = mutableMapOf<String, Boolean>()
+
+    /**
+     * Shot in I-Log? The camera's file list says so (metadata 212.8); a file listed from the phone has it in its own
+     * trailer. False when it can't be told.
+     */
+    suspend fun isILog(file: CameraFile): Boolean {
+        file.iLog?.let { return it }
+        iLogCache[file.name]?.let { return it }
+        val local = file.localUri ?: return false
+        val mode = withContext(Dispatchers.IO) {
+            runCatching { LocalTrailer.read(app, android.net.Uri.parse(local))?.colorMode }.getOrNull()
+        }
+        log("цвет ${file.name}: режим ${mode ?: "не указан"}" + if (mode == CameraFile.COLOR_MODE_ILOG) " (I-Log)" else "")
+        return (mode == CameraFile.COLOR_MODE_ILOG).also { iLogCache[file.name] = it }
     }
 
     /** A video's colour settings: null = shown as shot. Kept on the phone per file name. */

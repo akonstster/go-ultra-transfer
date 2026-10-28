@@ -72,4 +72,12 @@ class LocalTrailerTest {
         assertNull(parse(ByteArray(5000) { 1 }))
         assertNull(parse(ByteArray(10)))
     }
+
+    @Test
+    fun colorModeFromTheMetadata() {
+        // ExtraMetadata 212 shooting_param_info {8 color_mode: 2 = I-Log}.
+        val ilog = PbWriter().varint(24, 293565223).bytes(212, PbWriter().varint(1, 50).varint(8, 2).toByteArray()).toByteArray()
+        assertEquals(2, parse(file(listOf(0x0101 to ilog), table = true))!!.colorMode)
+        assertNull(parse(file(listOf(0x0101 to metadata), table = true))!!.colorMode)
+    }
 }

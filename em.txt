@@ -1,0 +1,964 @@
+message ExtraMetadata {
+    message AIGCInfo {
+        bool isAIGC = 1;
+        string aigcToken = 2;
+    }
+    enum AISwitchState {
+        AI_SWITCH_UNKNOW = 0;
+        AI_SWITCH_OFF = 1;
+        AI_SWITCH_ON = 2;
+    }
+    enum AeFlickerType {
+        AEFLICKER_TYPE_UNCOMPLETE = 0;
+        AEFLICKER_TYPE_NONE = 1;
+        AEFLICKER_TYPE_UNKNOW = 2;
+        AEFLICKER_TYPE_50HZ = 3;
+        AEFLICKER_TYPE_60HZ = 4;
+    }
+    enum AeState {
+        AE_EXTERNAL_OFF = 0;
+        AE_EXTERNAL_ON_V1 = 1;
+        AE_EXTERNAL_ON_V2 = 2;
+        AE_EXTERNAL_ON_V3 = 3;
+        AE_EXTERNAL_ON_V4 = 4;
+    }
+    enum AiAlgorithm {
+        AIALGORITHM_UNSPECIFIED = 0;
+        PANO = 1;
+    }
+    message AiLibVersion {
+        uint32 major = 1;
+        uint32 minor = 2;
+        uint32 patch = 3;
+    }
+    enum AiPlatform {
+        CV5 = 0;
+        CV22 = 1;
+        H22 = 2;
+    }
+    enum AudioChannelMode {
+        AUDIO_CHANNEL_MODE_UNKNOWN = 0;
+        AUDIO_CHANNEL_MODE_MONO = 1;
+        AUDIO_CHANNEL_MODE_DUAL = 2;
+        AUDIO_CHANNEL_MODE_STEREO = 3;
+    }
+    enum AudioFocusMode {
+        AUDIO_FOCUS_MODE_UNKNOWN = 0;
+        AUDIO_FOCUS_MODE_OMNIDIRECTIONAL = 1;
+        AUDIO_FOCUS_MODE_FORWARD = 2;
+        AUDIO_FOCUS_MODE_BACKWARD = 3;
+        AUDIO_FOCUS_MODE_FORWARD_BACKWARD = 4;
+    }
+    enum AudioModeType {
+        AUDIO_MODE_UNKNOWN = 0;
+        AUDIO_MODE_FOCUS = 1;
+        AUDIO_MODE_WINDREDUCTION = 2;
+        AUDIO_MODE_360 = 3;
+        AUDIO_MODE_STEREO = 4;
+        AUDIO_MODE_EXTMICDEV = 5;
+        AUDIO_MODE_AIRPODDEV = 6;
+        AUDIO_MODE_INSALGO_FOCUS = 7;
+        AUDIO_MODE_ADAPTIVE_DENOISE = 8;
+        AUDIO_MODE_AI_WINDREDUCTION = 9;
+        AUDIO_MODE_AMBISONIC = 10;
+        AUDIO_MODE_SPEECH_ENHANCE = 11;
+        AUDIO_MODE_AIRPODDEV_FOCUS = 12;
+        AUDIO_MODE_AIRPODDEV_WINDREDUCTION = 13;
+        AUDIO_MODE_AIRPODDEV_STEREO = 14;
+        AUDIO_MODE_AIRPODDEV_EXTMICDEV = 15;
+        AUDIO_MODE_AIRPODDEV_AI_WINDREDUCTION = 16;
+        AUDIO_MODE_AIRPODDEV_TRADITION_WINDREDUCTION = 17;
+        AUDIO_MODE_AIRPODDEV_SPEECH_ENHANCE = 18;
+        AUDIO_MODE_AIRPODDEV_SPEECH_AMBISONIC = 19;
+        AUDIO_MODE_AI_WINDREDUCTION_INNER = 20;
+        AUDIO_MODE_SPEECH_ENHANCE_INNER = 21;
+        AUDIO_MODE_AIRPODDEV_AI_WINDREDUCTION_INNER = 22;
+        AUDIO_MODE_AIRPODDEV_SPEECH_ENHANCE_INNER = 23;
+        AUDIO_MODE_HIFI = 24;
+        AUDIO_MODE_ENGINE_SOUND_ENHANCE = 25;
+        AUDIO_MODE_MULTIMODAL = 26;
+    }
+    message AudioTrackInfo {
+        int32 volume = 1;
+        int32 delay_time = 2;
+        .insta360.messages.ExtraMetadata.AudioChannelMode channel_mode = 3;
+        .insta360.messages.ExtraMetadata.AudioFocusMode focus_mode = 4;
+    }
+    enum AutoClipDataStorage {
+        STORAGE_TYPE_NORMAL = 0;
+        STORAGE_TYPE_LOOP = 1;
+    }
+    message AutoClipParam {
+        .insta360.messages.ExtraMetadata.AutoClipVersion version = 1;
+        float sample_rate = 2;
+        uint32 img_w = 3;
+        uint32 img_h = 4;
+        uint32 img_pitch = 5;
+        .insta360.messages.ExtraMetadata.AutoClipDataStorage autoclip_data_storage = 6;
+        uint32 fps = 7;
+        uint32 seq_diff = 8;
+        uint32 pts_diff = 9;
+        uint32 total_frame = 10;
+        uint32 resumeNum = 11;
+        repeated int32 last_frame_id = 12;
+        uint32 direction_seq_diff = 13;
+        int64 first_cap_pts = 14;
+        uint32 apei_fps = 15;
+    }
+    message AutoClipVersion {
+        .insta360.messages.ExtraMetadata.AiPlatform platform = 1;
+        .insta360.messages.ExtraMetadata.AiAlgorithm algorithm = 2;
+        .insta360.messages.ExtraMetadata.AiLibVersion model_ver = 3;
+        .insta360.messages.ExtraMetadata.AiLibVersion svc_ver = 4;
+    }
+    enum Battery_type {
+        THICK = 0;
+        THIN = 1;
+        VERTICAL = 2;
+    }
+    message BigboomTracks {
+        repeated double sfov = 1;
+        repeated double attrs = 2;
+        repeated int32 attrs_index = 3;
+        double score = 4;
+        double view_score = 5;
+        bool is_asteroid = 6;
+        bool best_view = 7;
+        int32 aspect = 8;
+    }
+    message CameraCalibAdditionalInfo {
+        float sensor0_temper = 1;
+        float sensor1_temper = 2;
+        float env_temper = 3;
+    }
+    message CameraOffsetCalib {
+        string offset_v3_dual = 1;
+        string offset_v3_cam0 = 2;
+        string offset_v3_cam1 = 3;
+        string offset_v3_cam0_refined = 4;
+        string offset_v3_cam1_refined = 5;
+        string offset_v7_cam0_refined = 6;
+        string offset_v7_cam1_refined = 7;
+        string offset_v3_dual_refined = 8;
+        string offset_v7_dual_refined = 9;
+    }
+    enum Camera_Posture {
+        CAMERA_ROTATE_0 = 0;
+        CAMERA_ROTATE_90 = 1;
+        CAMERA_ROTATE_180 = 2;
+        CAMERA_ROTATE_270 = 3;
+    }
+    enum Camera_Screen_Orientation {
+        CAM_SCREEN_UNKNOWN = 0;
+        CAM_SCREEN_VERTI = 1;
+        CAM_SCREEN_HORIZ = 2;
+    }
+    enum CaptureFilpType {
+        CAPTURE_FILP_TYPE_NULL = 0;
+        CAPTURE_FILP_TYPE_0_HORZ_FLIP = 1;
+        CAPTURE_FILP_TYPE_180_HORZ_FLIP = 2;
+        CAPTURE_FILP_TYPE_PHOTO_HORZ_FLIP = 3;
+    }
+    message CaptureImageQualityInfo {
+        int32 image_luminance_value_index = 1;
+        uint32 image_correlated_color_temperature = 2;
+    }
+    enum CaptureRecommendStitchType {
+        CAPTURE_RECOMMEND_STITCH_TYPE_UNKNOWN = 0;
+        CAPTURE_RECOMMEND_STITCH_TYPE_AI_2 = 1;
+    }
+    enum CloudVideoType {
+        CLOUD_VIDEO_TYPE_ORIGINAL = 0;
+        CLOUD_VIDEO_TYPE_AGENT = 1;
+        CLOUD_VIDEO_TYPE_STITCHED_PANO = 2;
+        CLOUD_VIDEO_TYPE_EACUBEMAP = 3;
+        CLOUD_VIDEO_TYPE_SINGLE_FISHEYE = 4;
+    }
+    enum CodecType {
+        VIDEO_CODEC_TYPE_UNKNOW = 0;
+        VIDEO_CODEC_TYPE_H264 = 1;
+        VIDEO_CODEC_TYPE_H265 = 2;
+        VIDEO_CODEC_TYPE_MJPEG = 3;
+        VIDEO_CODEC_TYPE_H264_INTRA = 4;
+        VIDEO_CODEC_TYPE_H265_INTRA = 5;
+    }
+    enum ColorCorrectionType {
+        COLOR_CORRECTION_TYPE_UNKNOW = 0;
+        COLOR_CORRECTION_TYPE_NONE = 1;
+        COLOR_CORRECTION_TYPE_STATIC_MAP = 2;
+        COLOR_CORRECTION_TYPE_DYNAMIC_MAP = 3;
+    }
+    message ContinueRecordInfo {
+        int64 first_frame_timestamp = 1;
+        int64 end_frame_timestamp = 2;
+        int64 first_gps_timestamp = 3;
+        int64 end_gps_timestamp = 4;
+        int64 total_frames = 5;
+        .insta360.messages.ExtraMetadata.TimeScale time_scale = 6;
+        int32 submediatype = 7;
+    }
+    enum CoolingShellAlgoDetectedState {
+        ALGO_NONE = 0;
+        ALGO_ON = 1;
+        ALGO_OFF = 2;
+    }
+    enum CoolingShellSelectedState {
+        SELECTED_UNKNOW = 0;
+        SELECTED_AUTO = 1;
+        SELECTED_ON = 2;
+        SELECTED_OFF = 3;
+    }
+    enum DeWarpType {
+        DEWARP_TYPE_UNKNOWN = 0;
+        DEWARP_TYPE_OFF = 1;
+        DEWARP_TYPE_ON = 2;
+    }
+    enum DirectionLockType {
+        DIRECTION_LOCK_TYPE_UNKNOW = 0;
+        DIRECTION_LOCK_TYPE_OFF = 1;
+        DIRECTION_LOCK_TYPE_PANOFPVON = 2;
+    }
+    enum EvMapLevel {
+        EVMAP_LEVEL_OFF = 0;
+        EVMAP_LEVEL_LOW = 1;
+        EVMAP_LEVEL_HIGH = 2;
+    }
+    enum EvoStatusMode {
+        UNKNOWN_STATUS_MODE = 0;
+        DEGREE180 = 1;
+        DEGREE360 = 2;
+    }
+    enum ExpectOutputType {
+        DEFAULT = 0;
+        INSTA_PANO = 1;
+        MULTI_CAMERA = 2;
+        ONE_TAKE = 3;
+    }
+    message ExtraUserOptions {
+        enum LogoType {
+            UNKNOWN_LOGO_TYPE = 0;
+            NO_LOGO = 1;
+            INSTA_LOGO = 2;
+        }
+        enum OffsetConvertState {
+            WaterProof = 0;
+            DivingWater = 1;
+            DivingAir = 2;
+            StitchOptimization = 3;
+            Protect = 4;
+            SphereProtect = 5;
+            FpvProtect = 6;
+        }
+        string filter = 1;
+        string befilter = 2;
+        bytes euler = 3;
+        bool rm_purple = 4;
+        uint32 gyro_calibrate_mode = 5;
+        bool euler_enable = 6;
+        .insta360.messages.ExtraMetadata.ExtraUserOptions.LogoType logo_type = 7;
+        string adjustFilters = 8;
+        string lut_filter = 9;
+        repeated .insta360.messages.ExtraMetadata.ExtraUserOptions.OffsetConvertState offset_convert_states = 10;
+        double play_trim_recommend_timestamp = 11;
+    }
+    enum ExtremeLowPowerModeType {
+        EXTREME_LOWPOAER_MODE_UNKNOW = 0;
+        EXTREME_LOWPOAER_MODE_OFF = 1;
+        EXTREME_LOWPOAER_MODE_ON = 2;
+    }
+    enum FileCategory {
+        FILE_CATEGORY_UNKNOW = 0;
+        FILE_CATEGORY_PLANE = 1;
+        FILE_CATEGORY_DOUBLE_FISH_EYE_PANO = 2;
+        FILE_CATEGORY_FISH_EYE = 3;
+        FILE_CATEGORY_WIDE_ANGLE = 4;
+        FILE_CATEGORY_DOUBLE_HALF_FISH_EYE_PANO = 5;
+        FILE_CATEGORY_EQUIRECTANGULAR_PANO = 6;
+    }
+    message FileGroupInfo {
+        .insta360.messages.ExtraMetadata.SubMediaType type = 1;
+        uint32 index = 2;
+        string identify = 3;
+        uint32 total = 4;
+    }
+    enum FileRotate {
+        FILE_ROTATE_UNKNOW = 0;
+        FILE_ROTATE_0 = 1;
+        FILE_ROTATE_90 = 2;
+        FILE_ROTATE_180 = 3;
+        File_ROTATE_270 = 4;
+    }
+    message FileSceneInfo {
+        uint32 type = 1;
+        string identity = 2;
+        uint64 caputre_timestamp = 3;
+        .insta360.messages.ExtraMetadata.LiveSDKVersion live_sdk_version = 4;
+        .insta360.messages.ExtraMetadata.LiveModeType live_mode_type = 5;
+        .insta360.messages.ExtraMetadata.LiveSceneType live_scene_type = 6;
+        uint32 select_frame_num = 7;
+    }
+    enum FileSplitType {
+        FILE_SPLIT_TYPE_UNKNOW = 0;
+        FILE_SPLIT_TYPE_NOT_SPLIT = 1;
+        FILE_SPLIT_TYPE_SPLITTED = 2;
+    }
+    message FolderInfo {
+        .insta360.messages.ExtraMetadata.FolderType type = 1;
+        uint32 index = 2;
+        string identify = 3;
+        uint32 max_num = 4;
+    }
+    enum FolderType {
+        FOLDERTYPE_UNKNOWN = 0;
+        FOLDERTYPE_INTERVAL_VIDEO = 1;
+    }
+    message FrameRateAVRational {
+        uint32 num = 1;
+        uint32 den = 2;
+    }
+    enum GpsSource {
+        GSV = 0;
+        DASHBOARD = 1;
+        REMOTE = 2;
+    }
+    enum GuardDetectedType {
+        UNKNOW = 0;
+        OFF = 3;
+        A_S = 4;
+        ND16 = 5;
+        ND32 = 6;
+        ND64 = 7;
+        ND128 = 8;
+    }
+    message GyroConfigInfo {
+        uint32 acc_range = 1;
+        uint32 gyro_range = 2;
+    }
+    message GyroIndex {
+        int32 index = 1;
+        int64 timestamp = 2;
+    }
+    enum GyroType {
+        INSDEV_IMU_TYPE_20948 = 0;
+        INSDEV_IMU_TYPE_40609 = 1;
+    }
+    enum Gyro_FilterType {
+        GYRO_FILTER_TYPE_UNKNOWN = 0;
+        GYRO_FILTER_TYPE_BRUTE = 1;
+        GYRO_FILTER_TYPE_AKF = 2;
+    }
+    enum HDR_STATE {
+        NOT_HDR = 0;
+        WAITING_PROCESS = 1;
+        PROCESSED = 2;
+    }
+    enum HdrModeType {
+        HDR_MODE_UNKNOW = 0;
+        HDR_MODE_OFF = 1;
+        HDR_MODE_ON = 2;
+    }
+    enum HdrProcessType {
+        HDR_PROCESS_EXTERNAL = 0;
+        HDR_PROCESS_INNER = 1;
+        NO_HDR = 2;
+        HDR_PROCESS_EXTERNAL_VERSION2 = 3;
+    }
+    enum HighLightSource {
+        HIGHLIGHTSOURCE_NONE = 0;
+        HIGHLIGHTSOURCE_SELFIE = 1;
+        HIGHLIGHTSOURCE_TM1 = 2;
+    }
+    enum ImageStitchType {
+        IMAGE_STITCH_TYPE_UNKNOWN = 0;
+        IMAGE_STITCH_TYPE_ORIGINAL = 1;
+        IMAGE_STITCH_TYPE_STITCHED = 2;
+    }
+    enum Image_FovType {
+        FOV_TYPE_UNKNOWN = 0;
+        FOV_TYPE_WIDE = 1;
+        FOV_TYPE_LINEAR = 2;
+        FOV_TYPE_ULTRAWIDE = 3;
+        FOV_TYPE_NARROW = 4;
+        FOV_TYPE_POV = 5;
+        FOV_TYPE_LINEARPLUS = 6;
+        FOV_TYPE_LINEARHORIZON = 7;
+        FOV_TYPE_FPV = 8;
+        FOV_TYPE_SUPER = 9;
+        FOV_TYPE_TINYPLANET = 10;
+        FOV_TYPE_INFINITYWIDE = 11;
+        FOV_TYPE_360LINEARHORIZON = 12;
+        FOV_TYPE_MAX_VIEW = 13;
+        FOV_TYPE_DEWARP = 14;
+        FOV_TYPE_MEGA = 15;
+        FOV_TYPE_BULLTETIME = 16;
+        FOV_TYPE_MOSQUITO = 17;
+        FOV_TYPE_SUPER_MICRO = 18;
+        FOV_TYPE_NUM = 19;
+    }
+    message IntervaRecTakeoverInfo {
+        uint64 start_timestamp = 1;
+        uint64 end_timestamp = 2;
+    }
+    enum Lens283MType {
+        LENS_UNKNOW = 0;
+        LENS_LOW_TRANSPARENCY = 1;
+        LENS_HIGH_TRANSPARENCY = 2;
+    }
+    enum LensAccessoryType {
+        LENS_ACCESSORIES_TYPE_UNKOWN = 0;
+        LENS_ACCESSORIES_TYPE_STANDARD = 1;
+        LENS_ACCESSORIES_TYPE_BLACK_MIST_FILTER = 2;
+        LENS_ACCESSORIES_TYPE_WIDE_ANGLE_LENS = 3;
+        LENS_ACCESSORIES_TYPE_ADJUSTABLE_MACRO_LENS = 4;
+        LENS_ACCESSORIES_TYPE_ANAMORPHIC_LENS = 5;
+        LENS_ACCESSORIES_TYPE_STAR_FILTER = 6;
+        LENS_ACCESSORIES_TYPE_ND_FILTER = 7;
+        LENS_ACCESSORIES_TYPE_MICEO_LENS = 8;
+        LENS_ACCESSORIES_TYPE_MICEO_LENS_5 = 9;
+        LENS_ACCESSORIES_TYPE_MICEO_LENS_11P6 = 10;
+        LENS_ACCESSORIES_TYPE_MICEO_LENS_21P5 = 11;
+        LENS_ACCESSORIES_TYPE_MICEO_LENS_38 = 12;
+        LENS_ACCESSORIES_TYPE_TELE_PHOTO_LENS_50MM = 13;
+        LENS_ACCESSORIES_TYPE_WIDE_ANGLE_LENS_180 = 14;
+        LENS_ACCESSORIES_TYPE_TELE_PHOTO_LENS_85MM = 15;
+        LENS_ACCESSORIES_TYPE_ND_FILTER_ND16 = 16;
+        LENS_ACCESSORIES_TYPE_ND_FILTER_ND32 = 17;
+        LENS_ACCESSORIES_TYPE_ND_FILTER_ND64 = 18;
+    }
+    enum LensModuleType {
+        LENS_MODULE_UNKOWN = 0;
+        LENS_MODULE_SHUNYU = 1;
+        LENS_MODULE_HONGJING = 2;
+    }
+    enum LiveModeType {
+        LIVE_MODE_TYPE_INVALID = 0;
+        LIVE_MODE_TYPE_PHOTO = 1;
+        LIVE_MODE_TYPE_VIDEO = 2;
+    }
+    enum LiveSDKVersion {
+        LIVE_SDK_VERSION_INVALID = 0;
+        LIVE_SDK_VERSION_NORMAL = 1;
+        LIVE_SDK_VERSION_Z03_V1 = 2;
+    }
+    enum LiveSceneType {
+        LIVE_SCENE_TYPE_INVALID = 0;
+        LIVE_SCENE_TYPE_FIRST_CAPTURE = 1;
+        LIVE_SCENE_TYPE_RAISE_LOWER_HAND = 2;
+        LIVE_SCENE_TYPE_DYNAMIC_FPS = 3;
+    }
+    enum LowLightStabilizationModeType {
+        LOWLIGHT_STABILIZATION_MODE_UNKNOW = 0;
+        LOWLIGHT_STABILIZATION_MODE_JITTER_BLUR_REDUTION = 1;
+        LOWLIGHT_STABILIZATION_MODE_ANTI_FLICKER = 2;
+    }
+    enum MCTFProcessType {
+        MCTF_PROCESS_TYPE_UNKNOW = 0;
+        MCTF_PROCESS_TYPE_OFF = 1;
+        MCTF_PROCESS_TYPE_AMBA = 2;
+        MCTF_PROCESS_TYPE_INSTA = 3;
+        MCTF_PROCESS_TYPE_PUREVIDEO = 4;
+        MCTF_PROCESS_TYPE_AMBA_INSTA = 5;
+    }
+    message MagCalib {
+        repeated float bias = 1;
+        repeated float scale = 2;
+        repeated float cross = 3;
+    }
+    message MagQI {
+        repeated float q_i_mag = 1;
+    }
+    message Material3AInfo {
+        float ev = 1;
+        uint32 wb = 2;
+        uint32 iso = 3;
+        float shutter = 4;
+    }
+    message MetaTrackParam {
+        uint64 ImuDataSize = 1;
+        uint64 AAADataSize = 2;
+        uint32 Compress = 3;
+    }
+    enum OffsetVersion {
+        OFFSET_UNKNOWN = 0;
+        OFFSET_V1 = 1;
+        OFFSET_V2 = 2;
+        OFFSET_V3 = 3;
+        OFFSET_V6 = 4;
+        OFFSET_V8 = 5;
+    }
+    enum OnlineFlowstateLevel {
+        ONLINE_FLOWSTATE_LEVEL_UNKNOW = 0;
+        ONLINE_FLOWSTATE_LEVEL_STANDARD = 1;
+        ONLINE_FLOWSTATE_LEVEL_HIGH = 2;
+        ONLINE_FLOWSTATE_LEVEL_LOW = 3;
+        ONLINE_FLOWSTATE_LEVEL_OFF = 4;
+    }
+    enum PanoRecordMultiTrackOrder {
+        PANO_RECORD_TRACK_ORDER_UNKNOW = 0;
+        PANO_RECORD_TRACK_ORDER_TRACK0_STREAM10 = 1;
+        PANO_RECORD_TRACK_ORDER_TRACK0_STREAM00 = 2;
+    }
+    enum PanoRecordType {
+        PANO_RECORD_TYPE_UNKNOW = 0;
+        PANO_RECORD_TYPE_SPLIT_FILE = 1;
+        PANO_RECORD_TYPE_MULTI_TRACK = 2;
+    }
+    enum PropellerGuardStatusType {
+        PROPELLER_GUARD_STATUS_NONE = 0;
+        PROPELLER_GUARD_STATUS_WEAR = 1;
+        PROPELLER_GUARD_STATUS_WEAR_LARGE = 2;
+        PROPELLER_GUARD_STATUS_WEAR_DONGLE = 3;
+    }
+    enum PrsestType {
+        PRESET_TYPE_BASE = 0;
+        PRESET_TYPE_VLOG = 1;
+        PRESET_TYPE_CYCLING = 2;
+        PRESET_TYPE_RUNNING = 3;
+        PRESET_TYPE_PARENT_CHILD = 4;
+        PRESET_TYPE_OUTDOOR = 5;
+        PRESET_TYPE_SKIING = 6;
+        PRESET_TYPE_SURFING = 7;
+        PRESET_TYPE_STARFIELD = 8;
+        PRESET_TYPE_DIY = 9;
+    }
+    enum PureShotProcessType {
+        PURESHOT_PROCESS_EXTERNAL = 0;
+        PURESHOT_PROCESS_INNER = 1;
+    }
+    enum RawCaptureType {
+        RAW_CAPTURE_TYPE_OFF = 0;
+        RAW_CAPTURE_TYPE_DNG = 1;
+        RAW_CAPTURE_TYPE_RAW = 2;
+        RAW_CAPTURE_TYPE_PURESHOT = 3;
+        RAW_CAPTURE_TYPE_PURESHOT_RAW = 4;
+    }
+    enum RemovePurpleFringing {
+        REMOVR_PURPLE_FRINGING_NOT_SUPPORT = 0;
+        REMOVR_PURPLE_FRINGING_INNER = 1;
+        REMOVR_PURPLE_FRINGING_EXTERNAL = 2;
+    }
+    enum RepairedType {
+        UNKNOWN = 0;
+        FILE_REPAIRED_ASSIST = 1;
+    }
+    enum ReprocessingType {
+        REPROCESSING_TYPE_UNKNOWN = 0;
+        REPROCESSING_TYPE_INSIDE = 1;
+    }
+    enum ResolutiuonType {
+        INS_RES_UNKNOW = 0;
+        INS_RES_PLUS = 1;
+    }
+    enum SceneType {
+        SCENE_TYPE_UNKNOW = 0;
+        SCENE_TYPE_UNDER_WATER = 1;
+    }
+    enum SensorDevice {
+        SENSOR_DEVICE_UNKNOWN = 0;
+        SENSOR_DEVICE_FRONT = 1;
+        SENSOR_DEVICE_REAR = 2;
+        SENSOR_DEVICE_ALL = 3;
+    }
+    enum SharpenState {
+        SHARPEN_EXTERNAL_OFF = 0;
+        SHARPEN_EXTERNAL_ON = 1;
+    }
+    enum ShootingAccessoriesType {
+        ACCESSORIES_NONE = 0;
+        ACCESSORIES_STREET = 1;
+    }
+    message ShootingParamInfo {
+        enum ColorMode {
+            COLOR_MODE_UNKNOWN = 0;
+            COLOR_MODE_STANDARD = 1;
+            COLOR_MODE_ILOG = 2;
+            COLOR_MODE_DOLBY = 3;
+        }
+        enum FocusMode {
+            FOCUS_MODE_UNKNOWN = 0;
+            FOCUS_MODE_MANUAL = 1;
+            FOCUS_MODE_SINGLE_AUTO = 2;
+            FOCUS_MODE_MACRO = 3;
+            FOCUS_MODE_CAF_VIDEO = 4;
+            FOCUS_MODE_CAF_PICTURE = 5;
+            FOCUS_MODE_EDOF = 6;
+            FOCUS_MODE_SHOW = 7;
+        }
+        enum FovcFlag {
+            FOVC_FLAG_UNKNOWN = 0;
+            FOVC_FLAG_DISABLE = 1;
+            FOVC_FLAG_ENABLE = 2;
+        }
+        enum MeteringMode {
+            METERING_MODE_UNKNOWN = 0;
+            METERING_MODE_AVERAGE = 1;
+            METERING_MODE_FACE = 2;
+        }
+        enum SharpnessLevel {
+            SHARPNESS_LEVEL_UNKNOWN = 0;
+            SHARPNESS_LEVEL_LOW = 1;
+            SHARPNESS_LEVEL_MEDIUM = 2;
+            SHARPNESS_LEVEL_HIGH = 3;
+        }
+        uint32 contrast_level = 1;
+        uint32 saturation_level = 2;
+        .insta360.messages.ExtraMetadata.ShootingParamInfo.SharpnessLevel sharpness_level = 3;
+        .insta360.messages.ExtraMetadata.ShootingParamInfo.MeteringMode metering_mode = 4;
+        .insta360.messages.ExtraMetadata.ShootingParamInfo.FocusMode focus_mode = 5;
+        .insta360.messages.ExtraMetadata.ShootingParamInfo.FovcFlag fovc_flag = 6;
+        string lut_type = 7;
+        .insta360.messages.ExtraMetadata.ShootingParamInfo.ColorMode color_mode = 8;
+    }
+    enum StreamType {
+        STREAM_TYPE_UNKNOW = 0;
+        STREAM_TYPE_SINGLE_STREAM_FILE = 1;
+        STREAM_TYPE_DUAL_STREAM_FILE = 2;
+        STREAM_TYPE_DUAL_STREAM_TRACK = 3;
+        STREAM_TYPE_DUAL_STREAM_TRACK_REVERSE = 4;
+    }
+    enum StreetPhotoHorizCorrection {
+        HORIZ_CORRECTION_UNKNOWN = 0;
+        HORIZ_CORRECTION_OFF = 1;
+        HORIZ_CORRECTION_ON = 2;
+    }
+    enum SubMediaType {
+        VIDEO_NORMAL = 0;
+        VIDEO_BULLETTIME = 1;
+        VIDEO_TIMELAPSE = 2;
+        PHOTO_NORMAL = 3;
+        PHOTO_HDR = 4;
+        PHOTO_INTERVALSHOOTING = 5;
+        VIDEO_HDR = 6;
+        PHOTO_BURST = 7;
+        VIDEO_STATIC_TIMELAPSE = 8;
+        VIDEO_TIMESHIFT = 9;
+        PHOTO_AEB_NIGHT_MODE = 10;
+        VIDEO_SUPER_NORMAL = 11;
+        VIDEO_LOOPRECORDING = 12;
+        PHOTO_STARLAPSE = 13;
+        PHOTO_PANO_MODE = 14;
+        VIDEO_FPV = 15;
+        VIDEO_MOVIE = 16;
+        VIDEO_SLOWMOTION = 17;
+        VIDEO_SELFIE = 18;
+        PHOTO_PURESHOTPLUS = 19;
+        VIDEO_PURE = 20;
+        VIDEO_STARLAPSE = 21;
+        PHOTO_STARTRAIL = 22;
+        VIDEO_DASH_CAM = 23;
+        VIDEO_VIR_PTZ = 24;
+        VIDEO_ORDINARY = 25;
+        PHOTO_ORDINARY = 26;
+        VIDEO_IEV = 27;
+        PHOTO_AEB = 28;
+        LONG_EXP = 29;
+        PHOTO_360_PANO = 30;
+        PHOTO_SUPER_PANO = 31;
+        PHOTO_GIMBAL_PANO_MODE = 32;
+    }
+    message ThumbnailHeroRotQuatData {
+        .insta360.messages.ExtraMetadata.ThumbnailRotQuat still_rot_quat = 1;
+        .insta360.messages.ExtraMetadata.ThumbnailRotQuat hero_offset_rot_quat = 2;
+    }
+    message ThumbnailRotQuat {
+        float w = 1;
+        float x = 2;
+        float y = 3;
+        float z = 4;
+    }
+    enum ThumbnailStitchType {
+        THUMBNAIL_STITCH_TYPE_UNKNOWN = 0;
+        THUMBNAIL_STITCH_TYPE_ORIGINAL = 1;
+        THUMBNAIL_STITCH_TYPE_STITCHED = 2;
+    }
+    enum ThumbnailType {
+        THUMBNAIL_TYPE_UNKNOWN = 0;
+        THUMBNAIL_TYPE_YUV = 1;
+        THUMBNAIL_TYPE_JPEG = 2;
+        THUMBNAIL_TYPE_H264 = 3;
+    }
+    enum TimeScale {
+        TIMESCALE_1X = 0;
+        TIMESCALE_4X = 1;
+        TIMESCALE_8X = 2;
+        TIMESCALE_1_4X = 3;
+        TIMESCALE_1_8X = 4;
+    }
+    enum TimelapsStorageType {
+        TIMELAPS_STORAGE_TYPE_UNKNOW = 0;
+        TIMELAPS_STORAGE_TYPE_GYRO = 1;
+        TIMELAPS_STORAGE_TYPE_QUATERNION = 2;
+    }
+    enum TriggerSource {
+        Unknown = 0;
+        CameraButton = 1;
+        RemoteControl = 2;
+        USB = 3;
+        BtRemote = 4;
+    }
+    enum UavCameraMode {
+        UAV_CAM_MODE_RECORD = 0;
+        UAV_CAM_MODE_PHOTO = 1;
+        UAV_CAM_MODE_TIMELAPSE = 2;
+        UAV_CAM_MODE_HDR_RECORD = 3;
+        UAV_CAM_MODE_SLOWMOTION = 4;
+        UAV_CAM_MODE_PHOTO_HDR = 5;
+        UAV_CAM_MODE_PHOTO_BURST = 6;
+        UAV_CAM_MODE_PHOTO_AEB = 7;
+        UAV_CAM_MODE_PHOTO_INTERVAL = 8;
+        UAV_CAM_MODE_PHOTO_STACK = 9;
+        UAV_CAM_MODE_PLAYBACK = 10;
+    }
+    enum UnderWaterModeType {
+        UNDER_WATER_MODE_UNKNOW = 0;
+        UNDER_WATER_MODE_OFF = 1;
+        UNDER_WATER_MODE_ON = 2;
+    }
+    message Vector2 {
+        int32 x = 1;
+        int32 y = 2;
+    }
+    enum VideoBitDepth {
+        VIDEO_BITDEPTH_UNKNOWN = 0;
+        VIDEO_BITDEPTH_8 = 1;
+        VIDEO_BITDEPTH_10 = 2;
+        VIDEO_BITDEPTH_12 = 3;
+        VIDEO_BITDEPTH_16 = 4;
+    }
+    enum VideoColorSpace {
+        VIDEO_NamedColorSpace_UNKNOWN = 0;
+        VIDEO_NamedColorSpace_BT709 = 1;
+        VIDEO_NamedColorSpace_DisplayP3 = 2;
+        VIDEO_NamedColorSpace_BT2020HLG = 3;
+        VIDEO_NamedColorSpace_DOLBY_VISION_8_4 = 4;
+    }
+    enum VideoMediaDataRotateAngle {
+        MEDIA_DATA_ROTATE_UNKNOWN = 0;
+        MEDIA_DATA_ROTATE_ANGLE_0 = 1;
+        MEDIA_DATA_ROTATE_ANGLE_180 = 3;
+        MEDIA_DATA_ROTATE_ANGLE_90 = 6;
+        MEDIA_DATA_ROTATE_ANGLE_270 = 8;
+    }
+    enum VideoPtsType {
+        VIDEO_PTS_UNKNOWN = 0;
+        VIDEO_PTS_MP4 = 1;
+        VIDEO_PTS_EXPOSURE_FILE = 2;
+    }
+    enum WaterMarkStyle {
+        WATERMARK_STYLE_UNKNOWN = 0;
+        STREET_PHOTO_WATERMARK_SIMPLE = 1;
+        STREET_PHOTO_WATERMARK_TEXTURE = 2;
+        STREET_PHOTO_WATERMARK_VINYL = 3;
+    }
+    enum WaterMarkType {
+        WATER_MARK_TYPE_UNKNOW = 0;
+        WATER_MARK_TYPE_OFF = 1;
+        WATER_MARK_TYPE_ON = 2;
+        WATER_MARK_TYPE_PANO_ON = 3;
+        WATER_MARK_TYPE_EIS_ON = 4;
+    }
+    string serial_number = 1;
+    string camera_type = 2;
+    string fw_version = 3;
+    string file_type = 4;
+    string offset = 5;
+    string ip = 6;
+    uint64 creation_time = 7;
+    uint64 export_time = 8;
+    uint64 file_size = 9;
+    uint32 total_time = 10;
+    bytes gps = 11;
+    bytes orientation = 12;
+    .insta360.messages.ExtraMetadata.ExtraUserOptions user_options = 13;
+    bytes gyro = 14;
+    .insta360.messages.ExtraMetadata.HDR_STATE hdr_state = 15;
+    string hdr_identifier = 16;
+    string original_offset = 17;
+    .insta360.messages.ExtraMetadata.TriggerSource trigger_source = 18;
+    .insta360.messages.ExtraMetadata.Vector2 dimension = 19;
+    int32 frame_rate = 20;
+    .insta360.messages.ExtraMetadata.Vector2 image_translate = 21;
+    string gamma_mode = 22;
+    .insta360.messages.ExtraMetadata.GyroIndex thumbnail_gyro_index = 23;
+    int64 first_frame_timestamp = 24;
+    double rolling_shutter_time = 25;
+    .insta360.messages.ExtraMetadata.FileGroupInfo file_group_info = 26;
+    .insta360.messages.WindowCropInfo window_crop_info = 27;
+    double gyro_timestamp = 28;
+    bool is_has_gyro_timestamp = 29;
+    uint32 timelapse_interval = 30;
+    bytes gyro_calib = 31;
+    .insta360.messages.ExtraMetadata.EvoStatusMode evo_status_mode = 32;
+    string evo_status_id = 33;
+    string original_offset_3d = 34;
+    repeated .insta360.messages.ExtraMetadata.GpsSource gps_sources = 35;
+    int64 first_gps_timestamp = 36;
+    bytes orientation_calib = 37;
+    bool is_collected = 38;
+    uint64 recycle_time = 39;
+    uint32 total_frames = 40;
+    bool is_selfie = 41;
+    bool is_flowstate_online = 42;
+    bool is_dewarp = 43;
+    .insta360.messages.ExtraMetadata.Vector2 resolution_size = 44;
+    .insta360.messages.ExtraMetadata.Battery_type battery_type = 45;
+    .insta360.messages.ExtraMetadata.Camera_Posture cam_posture = 46;
+    .insta360.messages.ExtraMetadata.Image_FovType fov_type = 47;
+    double distance = 48;
+    double fov = 49;
+    .insta360.messages.ExtraMetadata.Gyro_FilterType gyro_filter_type = 50;
+    .insta360.messages.ExtraMetadata.GyroType gyro_type = 51;
+    .insta360.messages.ExtraMetadata.VideoMediaDataRotateAngle media_data_rotate_angel = 52;
+    string offset_v2 = 53;
+    string offset_v3 = 54;
+    string original_offset_v2 = 55;
+    string original_offset_v3 = 56;
+    .insta360.messages.ExtraMetadata.SensorDevice focusSensor = 57;
+    .insta360.messages.ExtraMetadata.ExpectOutputType expectOutputType = 58;
+    bool timelapse_interval_in_millisecond = 59;
+    repeated float photo_rot = 60;
+    .insta360.messages.ExtraMetadata.AudioModeType audio_mode = 61;
+    bool is_raw_gyro = 62;
+    .insta360.messages.ExtraMetadata.RawCaptureType raw_capture_type = 63;
+    .insta360.messages.ExtraMetadata.VideoPtsType pts_type = 64;
+    .insta360.messages.ExtraMetadata.GyroConfigInfo gyro_cfg_info = 65;
+    .insta360.messages.ExtraMetadata.Lens283MType lens_283M_type1 = 66;
+    .insta360.messages.ExtraMetadata.Lens283MType lens_283M_type2 = 67;
+    .insta360.messages.OffsetState offset_states = 68;
+    repeated float q_i_uav = 69;
+    repeated float r_uav_i = 70;
+    .insta360.messages.ExtraMetadata.AutoClipParam auto_clip_para = 71;
+    .insta360.messages.ExtraMetadata.MetaTrackParam meta_track_para = 72;
+    .insta360.messages.ExtraMetadata.TimeScale time_scale = 73;
+    .insta360.messages.ExtraMetadata.HdrProcessType hdr_process_type = 74;
+    .insta360.messages.ExtraMetadata.ThumbnailType thumbnail_type = 75;
+    .insta360.messages.ExtraMetadata.PureShotProcessType pureshot_process_type = 76;
+    bool pre_rec_time_flag = 77;
+    .insta360.messages.ExtraMetadata.FrameRateAVRational frame_rate_av_rational = 78;
+    .insta360.messages.ExtraMetadata.PanoRecordType pano_record_type = 79;
+    .insta360.messages.ExtraMetadata.PanoRecordMultiTrackOrder pano_record_multi_track_order = 80;
+    .insta360.messages.ExtraMetadata.ThumbnailStitchType thumbnail_stitch_type = 81;
+    .insta360.messages.ExtraMetadata.ImageStitchType image_stitch_type = 82;
+    .insta360.messages.ExtraMetadata.SceneType scene_type = 83;
+    bool Is_Cutting_Thumbnail = 84;
+    .insta360.messages.ExtraMetadata.ReprocessingType reprocessing_type = 85;
+    .insta360.messages.ExtraMetadata.OnlineFlowstateLevel online_flowstate_level = 86;
+    bool bHighLightEidted = 87;
+    .insta360.messages.ExtraMetadata.FileSplitType file_split_type = 88;
+    bool bFavorite = 89;
+    uint32 edit_version = 90;
+    repeated double q_i_wnew = 91;
+    bool bInsideEditorExport = 92;
+    uint32 total_time_ms = 93;
+    bool bContinueRecord = 94;
+    bool bPausedRecord = 95;
+    bool bTorchmode = 96;
+    .insta360.messages.ExtraMetadata.HdrModeType hdr_mode_type = 97;
+    repeated .insta360.messages.ExtraMetadata.ContinueRecordInfo continue_record_info = 98;
+    bool bDropFrameOccur = 99;
+    uint32 photoGroupNum = 100;
+    bool recovery = 101;
+    bool has_pb_resolution = 102;
+    .insta360.messages.ExtraMetadata.Vector2 pb_resolution_size = 103;
+    .insta360.messages.ExtraMetadata.GuardDetectedType guard_detected_type = 104;
+    .insta360.messages.ExtraMetadata.CoolingShellSelectedState cooling_shell_selected_state = 105;
+    .insta360.messages.ExtraMetadata.CoolingShellAlgoDetectedState cooling_shell_algo_state = 106;
+    .insta360.messages.ExtraMetadata.AISwitchState ai_switch_state = 107;
+    string pureshot_image_debug = 108;
+    .insta360.messages.ExtraMetadata.Material3AInfo material_3a_info = 109;
+    .insta360.messages.ExtraMetadata.ResolutiuonType resolution_type = 110;
+    string offset_v6 = 111;
+    string original_offset_v6 = 112;
+    uint32 interval_photo_interval_time = 113;
+    uint32 flowstate_level = 114;
+    .insta360.messages.ExtraMetadata.FolderInfo folder_info = 115;
+    bool horizon_enable = 116;
+    int32 time_zone_seconds_from_GMT = 117;
+    .insta360.messages.ExtraMetadata.UnderWaterModeType underwater_mode_type = 118;
+    .insta360.messages.ExtraMetadata.WaterMarkType water_mark_type = 119;
+    uint32 audio_track_num = 120;
+    repeated .insta360.messages.ExtraMetadata.AudioTrackInfo audio_track_info = 121;
+    .insta360.messages.ExtraMetadata.CloudVideoType cloud_video_type = 122;
+    .insta360.messages.ExtraMetadata.ExtremeLowPowerModeType extreme_lowpower_mode_type = 123;
+    .insta360.messages.ExtraMetadata.LowLightStabilizationModeType lowlight_stabilization_mode_type = 124;
+    bytes cloud_video_info = 125;
+    .insta360.messages.ExtraMetadata.LensModuleType lens_module_type = 126;
+    int32 file_duration_tailor_time = 127;
+    int32 blend_Angle = 128;
+    .insta360.messages.ExtraMetadata.FileCategory file_category = 129;
+    .insta360.messages.ExtraMetadata.FileRotate file_rotate = 130;
+    .insta360.messages.ExtraMetadata.StreamType stream_type = 131;
+    .insta360.messages.ExtraMetadata.CodecType codec_type = 132;
+    uint64 timelapse_interval_ms = 133;
+    bool is_pre_record = 134;
+    uint64 file_expect_bitrate = 135;
+    .insta360.messages.ExtraMetadata.OffsetVersion capture_offset_version = 136;
+    .insta360.messages.ExtraMetadata.Vector2 expected_pano_ratio = 148;
+    .insta360.messages.ExtraMetadata.MCTFProcessType mctf_process_type = 149;
+    .insta360.messages.ExtraMetadata.TimelapsStorageType timelaps_storage_type = 150;
+    .insta360.messages.ExtraMetadata.DirectionLockType direction_lock_type = 151;
+    .insta360.messages.ExtraMetadata.DeWarpType dewarp_type = 152;
+    .insta360.messages.ExtraMetadata.UavCameraMode uav_camera_mode = 153;
+    uint32 trim_start = 154;
+    uint32 trim_end = 155;
+    .insta360.messages.ExtraMetadata.RemovePurpleFringing remove_purple_fringing = 156;
+    .insta360.messages.ExtraMetadata.CaptureRecommendStitchType capture_recommend_stitch_type = 157;
+    .insta360.messages.ExtraMetadata.IntervaRecTakeoverInfo takeover_info = 158;
+    .insta360.messages.ExtraMetadata.PrsestType preset_type = 159;
+    .insta360.messages.ExtraMetadata.FileSceneInfo file_scene_info = 160;
+    .insta360.messages.ExtraMetadata.EvMapLevel evmap_level = 161;
+    uint32 ae_state = 162;
+    .insta360.messages.ExtraMetadata.SharpenState sharpen_state = 163;
+    .insta360.messages.ExtraMetadata.AeFlickerType aeflicker_type = 164;
+    uint32 uav_pos_data_version = 165;
+    .insta360.messages.ExtraMetadata.MagCalib mag_calib_dongle = 166;
+    .insta360.messages.ExtraMetadata.MagCalib mag_calib_tm = 167;
+    .insta360.messages.ExtraMetadata.MagQI q_i_mag_dongle = 168;
+    .insta360.messages.ExtraMetadata.MagQI q_i_mag_tm = 169;
+    .insta360.messages.ExtraMetadata.MagQI q_b_tm = 170;
+    uint32 uav_datatype_version = 171;
+    uint32 pre_rec_frano_sec = 172;
+    bool bPlaybackCache = 173;
+    bool is_horizontal_state = 174;
+    .insta360.messages.ExtraMetadata.PropellerGuardStatusType propeller_guard_status = 175;
+    bool is_af_lens = 176;
+    .insta360.messages.AFLensInfo af_lens_info = 177;
+    .insta360.messages.ExtraMetadata.CameraCalibAdditionalInfo camera_calib_additional_info = 178;
+    .insta360.messages.ExtraMetadata.HighLightSource high_light_source = 179;
+    bool is_capture_beauty_mode_on = 180;
+    .insta360.messages.CaptureBeautyParams beauty_info = 181;
+    .insta360.messages.ExtraMetadata.ColorCorrectionType color_correction = 182;
+    .insta360.messages.ExtraMetadata.CaptureImageQualityInfo capture_image_quality_info = 183;
+    bool is_capture_beauty_support = 184;
+    int64 record_start_timestamp_ms = 185;
+    .insta360.messages.ExtraMetadata.LensAccessoryType lens_accessory_type = 186;
+    string lens_accessory_offset = 187;
+    .insta360.messages.ExtraMetadata.Camera_Screen_Orientation screen_orientation = 188;
+    .insta360.messages.ExtraMetadata.CaptureFilpType filp_type = 189;
+    .insta360.messages.ExtraMetadata.ShootingAccessoriesType shooting_accessories = 190;
+    .insta360.messages.ExtraMetadata.StreetPhotoHorizCorrection street_photo_horizon_correction = 191;
+    .insta360.messages.ExtraMetadata.CameraOffsetCalib offset_calib = 192;
+    bool P3_fake_on = 193;
+    .insta360.messages.ExtraMetadata.WaterMarkStyle watermark_style = 194;
+    .insta360.messages.ExtraMetadata.FrameRateAVRational origin_framerate = 195;
+    .insta360.messages.ExtraMetadata.FrameRateAVRational final_framerate = 196;
+    string offset_v8 = 197;
+    uint64 first_tracking_frame_number = 198;
+    .insta360.messages.ExtraMetadata.RepairedType repaired_type = 199;
+    string aperture_value = 200;
+    string extern_filter = 201;
+    bool is_3a_description_supported = 202;
+    .insta360.messages.ExtraMetadata.VideoBitDepth main_video_bitdepth = 203;
+    .insta360.messages.ExtraMetadata.VideoBitDepth optional_video_bitdepth = 204;
+    .insta360.messages.ExtraMetadata.VideoColorSpace video_color_space = 205;
+    repeated .insta360.messages.OffsetInfo offset_info = 206;
+    float sensor_module_temper = 207;
+    bool is_ultra_hdr_on = 208;
+    repeated .insta360.messages.ExtraMetadata.BigboomTracks views = 209;
+    repeated float photo_still_rot = 210;
+    .insta360.messages.ExtraMetadata.AIGCInfo aigc_info = 211;
+    .insta360.messages.ExtraMetadata.ShootingParamInfo shooting_param_info = 212;
+    .insta360.messages.ExtraMetadata.ThumbnailHeroRotQuatData thumbnail_hero_rot_quat = 213;
+    float fac_calib_temper = 214;
+    bool is_vfr_record = 215;
+}

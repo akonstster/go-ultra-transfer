@@ -21,8 +21,11 @@ object LocalTrailer {
     private const val RECORD_HIGHLIGHT = 0x000a
     private const val MAX_RECORD = 4_000_000L
 
-    /** [highlight]: the raw 0x000a record (for [Highlights.parse]); [firstFrameUs]: metadata field 24. */
-    class Info(val highlight: ByteArray?, val firstFrameUs: Long?)
+    /**
+     * [highlight]: the raw 0x000a record (for [Highlights.parse]); [firstFrameUs]: metadata field 24; [colorMode]:
+     * metadata 212.8 (2 = I-Log, see [CameraFile.colorMode]).
+     */
+    class Info(val highlight: ByteArray?, val firstFrameUs: Long?, val colorMode: Int? = null)
 
     fun read(context: Context, uri: Uri): Info? = context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
         FileInputStream(pfd.fileDescriptor).channel.use { ch ->
@@ -77,6 +80,7 @@ object LocalTrailer {
         val firstFrame = records[RECORD_METADATA]?.let { meta ->
             runCatching { meta.pbFields().field(24)?.varint }.getOrNull()
         }
-        return Info(records[RECORD_HIGHLIGHT], firstFrame)
+        val colorMode = records[RECORD_METADATA]?.let { meta -> runCatching { CameraFile.colorMode(meta.pbFields()) }.getOrNull() }
+        return Info(records[RECORD_HIGHLIGHT], firstFrame, colorMode)
     }
 }

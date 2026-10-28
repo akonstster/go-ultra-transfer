@@ -78,12 +78,15 @@ in the proto) even with marks set from the app; the marks appear only in the fin
 request's reply didn't show the recording at all — the status stays on BLE. Each mark from the app is logged
 («отметка на N с: поставлена»). JPG + DNG stay separate tiles (user's choice).
 
-**Colour for I-Log (viewing only, 28.10, not yet tested on a phone):** «Цвет» chip in the viewer → `ColorPanel`: a
-.cube LUT loaded from the phone (`CubeLut`, copied to filesDir/lut.cube — Insta360's file is not shipped: its licence
-is unclear), on/off, strength (mixed with identity), brightness, saturation; per file in prefs (`look_<name>`). media3
-`setVideoEffects` (lib media3-effect): the effect pipeline only exists if effects are set before the player is
-prepared, so with a LUT loaded every video player gets them (empty list when off) and changes apply live. Exporting
-with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
+**Colour for I-Log (viewing only, 28.10, not yet tested on a phone):** I-Log is told by the file itself:
+ExtraMetadata 212 shooting_param_info → 8 color_mode (1 standard, 2 I-Log, 3 Dolby; proto iliakonnov/insta360-nas) —
+from GetFileInfoList for camera files (`CameraFile.iLog`), from the trailer's 0x0101 record for phone copies
+(`LocalTrailer.Info.colorMode`, logged «цвет …: режим N»). I-Log videos get Insta360's «GO Ultra I-Log to Rec.709»
+(app assets, `luts/`, 33³, from Resolve; `CubeLut`) automatically; other videos no LUT. The «I-Log» / «Цвет» chip →
+`ColorPanel`: LUT on/off + strength (I-Log), brightness, saturation (any video), per file in prefs (`look_<name>`).
+media3 `setVideoEffects` (media3-effect): the effect pipeline exists only if set before the player is prepared — on
+for I-Log files and files with settings; a first change on a plain video restarts the player at the same spot.
+Exporting with colour would need re-encoding (Transformer) — not done; 10-bit precision would be lost there.
 
 **Next ideas** (not started): marks in downloaded files (parse the local trailer); export /
 download only the highlights; check `keyTimePointDetail` in the capture status for live marks.

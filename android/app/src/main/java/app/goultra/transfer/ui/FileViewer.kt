@@ -112,8 +112,6 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material3.Switch
 import app.goultra.transfer.camera.CubeLut
@@ -416,14 +414,25 @@ private fun VideoPreview(
         Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White, modifier = Modifier.padding(24.dp))
         return
     }
-    // Colour (a LUT over I-Log): the player's effect pipeline must be set up before it starts — with a table loaded,
-    // every video goes through it (an empty list while the colour is off), so changes apply on the fly.
-    val lut = vm.lut
-    var look by remember(file.name) { mutableStateOf(vm.look(file)) }
+    // Colour: an I-Log video gets Insta360's LUT on its own; brightness / saturation for any video. The player's effect
+    // pipeline exists only if set up before it starts, so it is there for I-Log files and for videos with settings
+    // (a first change on a plain video restarts the player at the same spot); then changes apply on the fly.
+    val iLog by produceState(file.iLog, file.uri, file.localUri) { if (value == null) value = vm.isILog(file) }
+    val lut by produceState<CubeLut?>(null) { value = vm.lut() }
+    var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
+    val look = saved ?: ColorLook()
     var colorPanel by remember(file.uri) { mutableStateOf(false) }
-    val player = remember(file.uri, lut) {
+    val ilog = iLog == true
+    if (iLog == null || (ilog && lut == null)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Color.White) }
+        return
+    }
+    val effects = ilog || saved != null
+    val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
+    val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (lut != null) setVideoEffects(colorEffects(lut, look))
+            if (effects) setVideoEffects(colorEffects(lut, ilog, look))
+            if (resumeAt[0] > 0) seekTo(resumeAt[0])
             if (source == null) {
                 setMediaItem(MediaItem.fromUri(file.localUri!!)) // the phone's copy: the default (content://) source
             } else {
@@ -434,7 +443,7 @@ private fun VideoPreview(
         }
     }
     DisposableEffect(player) { onDispose { player.release(); vm.closeTimeline() } }
-    LaunchedEffect(player, look) { if (lut != null) player.setVideoEffects(colorEffects(lut, look)) }
+    LaunchedEffect(player, look) { if (effects) player.setVideoEffects(colorEffects(lut, ilog, look)) }
     // Swiped away: stop; swiped back: play on.
     LaunchedEffect(active) { if (active) player.play() else player.pause() }
     // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
@@ -450,6 +459,7 @@ private fun VideoPreview(
                 onDuration(durationMs)
                 reported = true
             }
+            resumeAt[0] = player.currentPosition
             delay(500)
         }
     }
@@ -577,10 +587,10 @@ private fun VideoPreview(
                 // Colour: a LUT (I-Log → Rec.709) with its strength, brightness, saturation — for viewing.
                 if (!editing) {
                     FilterChip(
-                        selected = look != null,
+                        selected = !look.isPlain(ilog),
                         onClick = { colorPanel = !colorPanel },
-                        label = { Text(tr("Цвет", "Colour")) },
-                        leadingIcon = { Icon(Icons.Filled.Palette, null, tint = if (look != null) MARK_COLOR else Color.White) },
+                        label = { Text(if (ilog) "I-Log" else tr("Цвет", "Colour")) },
+                        leadingIcon = { Icon(Icons.Filled.Palette, null, tint = if (!look.isPlain(ilog)) MARK_COLOR else Color.White) },
                         colors = chipColors,
                     )
                 }
@@ -597,7 +607,12 @@ private fun VideoPreview(
             }
         }
         if (colorPanel && !editing) {
-            ColorPanel(vm, lut, look, onLook = { look = it; vm.saveLook(file, it) }, onDone = { colorPanel = false })
+            ColorPanel(
+                ilog, look, saved != null,
+                onLook = { saved = it; vm.saveLook(file, it) },
+                onReset = { saved = null; vm.saveLook(file, null) },
+                onDone = { colorPanel = false },
+            )
         } else if (film) {
             if (pieces.isNotEmpty() && !editing) {
                 FilmStrip(pieces, frames, current) { i ->
@@ -641,66 +656,49 @@ private fun VideoPreview(
     }
 }
 
-/** The player's effects for [look] over [lut]: none while the colour is off (the pipeline stays, ready). */
+/** The player's effects for [look]: the LUT for an I-Log file, brightness, saturation; none = shown as shot. */
 @OptIn(UnstableApi::class)
-private fun colorEffects(lut: CubeLut, look: ColorLook?): List<androidx.media3.common.Effect> {
-    if (look == null) return emptyList()
-    val out = mutableListOf<androidx.media3.common.Effect>(androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength)))
+private fun colorEffects(lut: CubeLut?, iLog: Boolean, look: ColorLook): List<androidx.media3.common.Effect> {
+    val out = mutableListOf<androidx.media3.common.Effect>()
+    if (iLog && lut != null && look.lut && look.strength > 0f) out += androidx.media3.effect.SingleColorLut.createFromCube(lut.cube(look.strength))
     if (look.brightness != 0f) out += androidx.media3.effect.Brightness(look.brightness)
     if (look.saturation != 0f) out += androidx.media3.effect.HslAdjustment.Builder().adjustSaturation(look.saturation * 100f).build()
     return out
 }
 
 /**
- * Colour for viewing (the file stays as shot): the LUT on / off, its strength, brightness, saturation; loading a
- * table from the phone (Insta360 publishes «GO Ultra I-Log to Rec.709» as a .cube — not shipped with the app).
+ * Colour while viewing (the file stays as shot). I-Log: Insta360's «I-Log → Rec.709» on / off and its strength; any
+ * video: brightness, saturation. Settings are kept per video; «Сбросить» goes back to the default (I-Log: LUT on).
  */
 @Composable
-private fun ColorPanel(vm: CameraController, lut: CubeLut?, look: ColorLook?, onLook: (ColorLook?) -> Unit, onDone: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            scope.launch {
-                val error = vm.importLut(uri)
-                if (error != null) android.widget.Toast.makeText(context, error, android.widget.Toast.LENGTH_SHORT).show()
-                else onLook(look ?: ColorLook())
-            }
-        }
-    }
+private fun ColorPanel(
+    iLog: Boolean,
+    look: ColorLook,
+    changed: Boolean,
+    onLook: (ColorLook) -> Unit,
+    onReset: () -> Unit,
+    onDone: () -> Unit,
+) {
     Column(Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        if (lut == null) {
-            Text(
-                tr(
-                    "Загрузите таблицу цвета LUT (.cube) — например, «GO Ultra I-Log to Rec.709» с сайта Insta360. Она натянет цвет на серое видео I-Log.",
-                    "Load a colour table (.cube) — e.g. Insta360's «GO Ultra I-Log to Rec.709». It brings colour to grey I-Log video.",
-                ),
-                color = Color(0xCCFFFFFF),
-                fontSize = 13.sp,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Button({ pick.launch(arrayOf("*/*")) }) { Text(tr("Загрузить LUT…", "Load a LUT…")) }
-                Spacer(Modifier.weight(1f))
-                TextButton(onDone) { Text(tr("Закрыть", "Close"), color = Color.White) }
-            }
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Switch(checked = look != null, onCheckedChange = { onLook(if (it) (look ?: ColorLook()) else null) })
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (iLog) {
+                Switch(checked = look.lut, onCheckedChange = { onLook(look.copy(lut = it)) })
                 Spacer(Modifier.width(10.dp))
-                Text(lut.title ?: "LUT", color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
+                Text("I-Log → Rec.709", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            } else {
+                Text(tr("Обычное видео (не I-Log)", "A standard video (not I-Log)"), color = Color(0xCCFFFFFF), fontSize = 13.sp, modifier = Modifier.weight(1f))
             }
-            if (look != null) {
-                // Applied when a slider is let go (each change rebuilds the colour table).
-                LookSlider(tr("Сила", "Strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }) { onLook(look.copy(strength = it)) }
-                LookSlider(tr("Яркость", "Brightness"), look.brightness, -0.5f..0.5f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(brightness = it)) }
-                LookSlider(tr("Насыщенность", "Saturation"), look.saturation, -1f..1f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(saturation = it)) }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
-                if (look != null && look != ColorLook()) TextButton({ onLook(ColorLook()) }) { Text(tr("Сбросить", "Reset"), color = Color.White) }
-                TextButton({ pick.launch(arrayOf("*/*")) }) { Text(tr("Другой LUT…", "Other LUT…"), color = Color.White) }
-            }
+            Button(onDone, Modifier.padding(start = 8.dp)) { Text(tr("Готово", "Done")) }
+        }
+        // Applied when a slider is let go (the LUT strength rebuilds the colour table).
+        if (iLog && look.lut) {
+            LookSlider(tr("Сила LUT", "LUT strength"), look.strength, 0f..1f, { "${Math.round(it * 100)} %" }) { onLook(look.copy(strength = it)) }
+        }
+        LookSlider(tr("Яркость", "Brightness"), look.brightness, -0.5f..0.5f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(brightness = it)) }
+        LookSlider(tr("Насыщенность", "Saturation"), look.saturation, -1f..1f, { "%+d".format(Math.round(it * 100)) }) { onLook(look.copy(saturation = it)) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
+            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
         }
     }
 }

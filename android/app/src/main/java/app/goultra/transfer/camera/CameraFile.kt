@@ -9,7 +9,8 @@ enum class MediaKind { PHOTO, VIDEO }
  * A file on the camera card — or, with [localUri], its copy already in the phone's gallery (the Files tab without the
  * camera). Metadata comes from GetFileInfoList (ExtraMetadata):
  * 7 creation_time (yyyyMMddHHmmss, wrong for LIV), 9 file_size (approximate), 10 total_time (s),
- * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks).
+ * 19 {1 width, 2 height}, 20 fps, 24 first_frame_timestamp (µs, camera clock — the base of highlight marks),
+ * 212 shooting_param_info {8 color_mode: 1 standard, 2 I-Log, 3 Dolby}.
  */
 data class CameraFile(
     val uri: String,
@@ -20,6 +21,8 @@ data class CameraFile(
     val fps: Int?,
     val created: LocalDateTime?,
     val firstFrameUs: Long? = null,
+    /** Shot in I-Log (metadata 212.8); null = not known (a file listed from the phone: read from its trailer). */
+    val iLog: Boolean? = null,
     /** content:// item of the downloaded copy, for a file listed from the phone. */
     val localUri: String? = null,
 ) {
@@ -57,7 +60,14 @@ data class CameraFile(
                 created = createdFromName(uri.substringAfterLast('/'))
                     ?: meta.field(7)?.varint?.let { parseStamp(it.toString()) },
                 firstFrameUs = meta.field(24)?.varint,
+                iLog = colorMode(meta)?.let { it == COLOR_MODE_ILOG },
             )
         }
+
+        const val COLOR_MODE_ILOG = 2
+
+        /** ExtraMetadata 212 shooting_param_info → 8 color_mode (1 standard, 2 I-Log, 3 Dolby), or null. */
+        fun colorMode(meta: List<PbField>): Int? =
+            runCatching { meta.field(212)?.data?.pbFields()?.field(8)?.varint?.toInt() }.getOrNull()
     }
 }
