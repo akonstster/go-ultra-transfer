@@ -237,6 +237,28 @@ class CameraController(private val app: Application) {
     }
 
     /** Clipping stripes over the video in the viewer (blown whites red, crushed blacks blue), for every video. */
+    /**
+     * The «камера не подключена» bar and the Bluetooth / Wi-Fi / VPN hints, put away with × for working without the
+     * camera: until the app starts again, or until a connection is asked for ([showLinkHints]) — then they matter.
+     */
+    var connectBarHidden by mutableStateOf(false)
+        private set
+    var radioHintsHidden by mutableStateOf(false)
+        private set
+
+    fun hideConnectBar() {
+        connectBarHidden = true
+    }
+
+    fun hideRadioHints() {
+        radioHintsHidden = true
+    }
+
+    fun showLinkHints() {
+        connectBarHidden = false
+        radioHintsHidden = false
+    }
+
     /** A check while setting the colour, not a setting: off at start, and off again when the colour panel closes. */
     var clipping by mutableStateOf(false)
         private set

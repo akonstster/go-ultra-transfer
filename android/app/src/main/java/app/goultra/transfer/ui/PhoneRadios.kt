@@ -24,6 +24,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -102,12 +104,15 @@ fun PhoneRadiosBanner(vm: CameraController) {
     // Some VPNs let local traffic through, so this is a hint, not a blocker: only while not connected.
     val vpn = radios.vpn && (vm.conn == ConnState.Idle || vm.conn is ConnState.Failed)
     if (!waiting && !vpn) return
+    // Put away with × (working without the camera): back with the next «Подключиться».
+    if (vm.radioHintsHidden) return
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (waiting && !radios.bluetooth) {
             RadioCard(
                 icon = Icons.Filled.BluetoothDisabled,
                 text = tr("Bluetooth выключен — без него камеру не найти и не разбудить.", "Bluetooth is off — without it the camera can't be found or woken up."),
                 action = tr("Включить", "Turn on"),
+                onHide = vm::hideRadioHints,
             ) { open(PhoneRadios.bluetoothIntent()) }
         }
         if (waiting && !radios.wifi) {
@@ -118,6 +123,7 @@ fun PhoneRadiosBanner(vm: CameraController) {
                     "Wi-Fi is off — it's needed for files and the live view (your internet keeps working).",
                 ),
                 action = tr("Включить", "Turn on"),
+                onHide = vm::hideRadioHints,
             ) { open(PhoneRadios.wifiIntent(), PhoneRadios.wifiSettingsIntent()) }
         }
         if (vpn) {
@@ -130,13 +136,14 @@ fun PhoneRadiosBanner(vm: CameraController) {
                         "or exclude this app in the VPN settings.",
                 ),
                 action = "VPN",
+                onHide = vm::hideRadioHints,
             ) { open(PhoneRadios.vpnIntent(), Intent(Settings.ACTION_WIRELESS_SETTINGS)) }
         }
     }
 }
 
 @Composable
-private fun RadioCard(icon: ImageVector, text: String, action: String, onClick: () -> Unit) {
+private fun RadioCard(icon: ImageVector, text: String, action: String, onHide: () -> Unit, onClick: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(12.dp)) {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, tint = MaterialTheme.colorScheme.onErrorContainer)
@@ -148,6 +155,7 @@ private fun RadioCard(icon: ImageVector, text: String, action: String, onClick: 
                 modifier = Modifier.weight(1f),
             )
             TextButton(onClick) { Text(action) }
+            IconButton(onHide) { Icon(Icons.Filled.Close, tr("Скрыть", "Hide"), tint = MaterialTheme.colorScheme.onErrorContainer) }
         }
     }
 }

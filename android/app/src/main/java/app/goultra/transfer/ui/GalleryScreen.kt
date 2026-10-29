@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.LibraryAdd
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Switch
 import androidx.compose.material3.HorizontalDivider
@@ -115,6 +116,8 @@ fun GalleryScreen(
     onRecord: () -> Unit,
 ) {
     val vm = controller
+    // Asking for the camera brings back the link hints put away with ×.
+    val connect = { vm.showLinkHints(); onConnect() }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(vm.message) {
         vm.message?.let {
@@ -174,6 +177,10 @@ fun GalleryScreen(
                             )
                         }
                     }
+                    // The «камера не подключена» bar put away: connecting from up here.
+                    if (vm.connectBarHidden && vm.tab == Tab.FILES && selectionCount == 0 && vm.conn != ConnState.Connected && vm.conn !is ConnState.Working) {
+                        IconButton(connect) { Icon(Icons.Filled.Videocam, tr("Подключить камеру", "Connect the camera")) }
+                    }
                     // Videos and photos from elsewhere on the phone, to view, cut and colour (with or without the camera).
                     if (vm.tab == Tab.FILES && selectionCount == 0) {
                         val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addFiles(uris) }
@@ -221,14 +228,14 @@ fun GalleryScreen(
             PhoneRadiosBanner(vm)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
-                    vm.tab == Tab.CAMERA -> CameraTab(vm, onConnect, onRecord)
+                    vm.tab == Tab.CAMERA -> CameraTab(vm, connect, onRecord)
                     vm.conn == ConnState.Connected -> FileGrid(vm)
                     // No camera: what is already on the phone, with the way to connect above it.
                     vm.listedFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
-                        ConnectBar(vm.conn, onConnect)
+                        if (!vm.connectBarHidden) ConnectBar(vm.conn, connect, vm::hideConnectBar)
                         FileGrid(vm)
                     }
-                    else -> ConnectPanel(vm.conn, onConnect, onRecord)
+                    else -> ConnectPanel(vm.conn, connect, onRecord)
                 }
             }
         }
@@ -304,7 +311,7 @@ private fun ConnectPanel(state: ConnState, onConnect: () -> Unit, onRecord: () -
 
 /** Above the phone's files while the camera isn't connected: the link state and «Подключиться». */
 @Composable
-private fun ConnectBar(state: ConnState, onConnect: () -> Unit) {
+private fun ConnectBar(state: ConnState, onConnect: () -> Unit, onHide: () -> Unit) {
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         Row(
             Modifier.padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
@@ -329,6 +336,8 @@ private fun ConnectBar(state: ConnState, onConnect: () -> Unit) {
                 CircularProgressIndicator(Modifier.padding(end = 8.dp).size(22.dp), strokeWidth = 2.dp)
             } else {
                 TextButton(onConnect) { Text(if (state == ConnState.Remote) tr("Подключиться по Wi-Fi", "Connect over Wi-Fi") else tr("Подключиться", "Connect")) }
+                // Working without the camera: away until the next start or «Подключиться» (the camera icon on top).
+                IconButton(onHide) { Icon(Icons.Filled.Close, tr("Скрыть", "Hide")) }
             }
         }
     }
