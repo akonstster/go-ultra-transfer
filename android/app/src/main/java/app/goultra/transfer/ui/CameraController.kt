@@ -2129,8 +2129,10 @@ class CameraController(private val app: Application) {
             // Wi-Fi (its index only).
             val streams = runCatching {
                 when {
-                    local != null -> streamInfo(countFrames = true) { it.setDataSource(app, local, null) }
-                    conn == ConnState.Connected -> session.indexSource(file).let { src -> streamInfo(countFrames = false) { it.setDataSource(src) } }
+                    local != null -> streamInfo(readLocal(local) { size, read -> Mp4Index.frameRate(size, read) }) { it.setDataSource(app, local, null) }
+                    conn == ConnState.Connected -> session.indexSource(file).let { src ->
+                        streamInfo(Mp4Index.frameRate(src.getSize()) { at, n -> src.bytes(at, n) }) { it.setDataSource(src) }
+                    }
                     else -> null
                 }
             }.onFailure { log("сведения ${file.name}: ${it.message}") }.getOrNull()
@@ -2196,15 +2198,26 @@ class CameraController(private val app: Application) {
         out
     }
 
+    /** [block] on a phone file's bytes: its size and a reader (position, length) → bytes; null if it can't be opened. */
+    private fun <T> readLocal(uri: android.net.Uri, block: (Long, (Long, Int) -> ByteArray) -> T): T? =
+        app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            java.io.FileInputStream(pfd.fileDescriptor).channel.use { ch ->
+                block(ch.size()) { at, n ->
+                    val buf = java.nio.ByteBuffer.allocate(n)
+                    while (buf.hasRemaining() && ch.read(buf, at + buf.position()) > 0) Unit
+                    buf.array()
+                }
+            }
+        }
+
     /** A video's streams as text: the video codec and bit depth and rate, the frame rate, the sound (null: none). */
     private class Streams(val video: String?, val fps: String?, val audio: String?)
 
     /**
-     * The tracks of a video ([open] sets the extractor's source). With [countFrames] (a local file) the frame rate is
-     * counted from the frames' times over the first second (the container's own figure is often missing); bit depth
-     * from the codec profile.
+     * The tracks of a video ([open] sets the extractor's source); the frame rate from the file's index ([indexFps],
+     * [Mp4Index.frameRate]) or, without one, the container's figure; bit depth from the codec profile.
      */
-    private fun streamInfo(countFrames: Boolean, open: (android.media.MediaExtractor) -> Unit): Streams {
+    private fun streamInfo(indexFps: Double?, open: (android.media.MediaExtractor) -> Unit): Streams {
         val ex = android.media.MediaExtractor()
         try {
             open(ex)
@@ -2230,25 +2243,9 @@ class CameraController(private val app: Application) {
                         if (tenBit) tr("10 бит", "10-bit") else tr("8 бит", "8-bit"),
                         kbps?.let { "${it / 1_000_000} " + tr("Мбит/с", "Mbit/s") },
                     ).joinToString(" · ")
-                    // Frames over the first second, by their times — the extractor reads each frame's data on the way, so
-                    // only from a file on the phone (from the camera that would be megabytes over Wi-Fi).
-                    if (!countFrames) {
-                        fps = int(android.media.MediaFormat.KEY_FRAME_RATE)?.let { "%.2f".format(it.toDouble()) }
-                        continue
-                    }
-                    ex.selectTrack(i)
-                    ex.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                    val first = ex.sampleTime
-                    var count = 0
-                    var last = first
-                    while (ex.sampleTime >= 0 && ex.sampleTime - first < 1_000_000) {
-                        last = ex.sampleTime
-                        count++
-                        if (!ex.advance()) break
-                    }
-                    ex.unselectTrack(i)
-                    val counted = if (count > 1 && last > first) (count - 1) * 1_000_000.0 / (last - first) else null
-                    fps = (counted ?: int(android.media.MediaFormat.KEY_FRAME_RATE)?.toDouble())?.let { "%.2f".format(it) }
+                    // From the index (frames over their duration): counting frames over a second in stored order went
+                    // wrong for files with B-frames (re-encoded ones showed 24.9 for 30).
+                    fps = (indexFps ?: int(android.media.MediaFormat.KEY_FRAME_RATE)?.toDouble())?.let { "%.2f".format(it) }
                 } else if (mime.startsWith("audio/") && audio == null) {
                     val channels = int(android.media.MediaFormat.KEY_CHANNEL_COUNT)
                     audio = listOfNotNull(
@@ -2851,6 +2848,21 @@ class CameraController(private val app: Application) {
                 }.getOrNull()
                 val wantedMs = parts?.sumOf { (it.endMs ?: it.startMs) - it.startMs }
                 log("с цветом $name: картинка ${gotMs ?: "?"} мс" + (wantedMs?.let { ", куски $it мс" } ?: ""))
+                // The copy against the original: the frame rate must stay, the bitrate is what the encoder gave.
+                val original = local
+                val (inFps, outFps) = withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (camera != null) Mp4Index.frameRate(camera.getSize()) { at, n -> camera.bytes(at, n) }
+                        else readLocal(android.net.Uri.parse(original!!)) { size, read -> Mp4Index.frameRate(size, read) }
+                    }.getOrNull() to runCatching {
+                        java.io.RandomAccessFile(tmp, "r").use { f ->
+                            Mp4Index.frameRate(f.length()) { at, n -> ByteArray(n).also { b -> f.seek(at); f.readFully(b) } }
+                        }
+                    }.getOrNull()
+                }
+                val outRate = gotMs?.takeIf { it > 0 }?.let { tmp.length() * 8 / it / 1000 }
+                log("с цветом $name: кадров/с ${inFps?.let { "%.2f".format(it) } ?: "?"} → ${outFps?.let { "%.2f".format(it) } ?: "?"}, " +
+                    "битрейт: просили ${source.bitrate / 1_000_000} Мбит/с, вышло ${outRate?.let { it / 1000 } ?: "?"} Мбит/с")
                 log(
                     "с цветом $name: ${source.mime}, ${source.bitrate / 1_000_000} Мбит/с, ${source.lines} строк, " +
                         "${effects.size} эффектов, " + (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
@@ -2968,10 +2980,12 @@ class CameraController(private val app: Application) {
                 // Without it in the track: the whole file's rate (size over length), a little over the video's.
                 val durationUs = if (f.containsKey(android.media.MediaFormat.KEY_DURATION)) f.getLong(android.media.MediaFormat.KEY_DURATION) else 0L
                 val rate = trackRate.takeIf { it > 0 } ?: fileBytes?.takeIf { durationUs > 0 }?.let { (it * 8_000_000L / durationUs).toInt() } ?: 0
-                // The original's own codec when it is one of the two every phone encodes; at its bitrate (no less than
-                // 20 Mbit/s for good quality, no more than 200).
+                // The original's own codec when it is one of the two every phone encodes; at its bitrate and a third
+                // more (no less than 20 Mbit/s, no more than 200).
                 val out = if (mime == androidx.media3.common.MimeTypes.VIDEO_H265) mime else androidx.media3.common.MimeTypes.VIDEO_H264
-                return ExportSource(out, (if (rate > 0) rate else 60_000_000).coerceIn(20_000_000, 200_000_000), minOf(w, h), durationUs / 1000)
+                // A second compression of an already compressed picture loses more at the same rate: 30 % above it.
+                val target = (if (rate > 0) rate.toLong() * 13 / 10 else 60_000_000L).coerceIn(20_000_000L, 200_000_000L).toInt()
+                return ExportSource(out, target, minOf(w, h), durationUs / 1000)
             }
             error(tr("в файле нет видео", "no video in the file"))
         } finally {

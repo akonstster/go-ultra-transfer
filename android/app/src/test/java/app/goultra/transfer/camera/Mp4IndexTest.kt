@@ -89,4 +89,14 @@ class Mp4IndexTest {
         // «+ Кусок» right after a piece stays right after it.
         assertEquals(Highlight(6500, 8500), keys.snapStart(Highlight(6500, 8500), listOf(Highlight(4000, 6500))))
     }
+
+    @Test
+    fun frameRateFromTheIndex() {
+        // 300 frames of 1001 ticks at 30000/s: 29.97, B-frames or not (the stored order doesn't matter).
+        for (ctts in listOf(false, true)) {
+            val f = file(ctts = ctts)
+            val fps = Mp4Index.frameRate(f.size.toLong()) { at, n -> f.copyOfRange(at.toInt(), at.toInt() + n) }
+            org.junit.Assert.assertEquals(29.97, fps!!, 0.01)
+        }
+    }
 }
