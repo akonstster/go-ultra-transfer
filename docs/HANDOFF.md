@@ -183,6 +183,12 @@ the player's. The still is no longer turned twice (the retriever turns frames by
 Added files: name, size, length fixed once when added (prefs file `added`), so the list comes up without reading the
 files; a file drops off only if it is gone or its permission was taken away; changes run one at a time. A batch
 counts only saves that got into the gallery.
+Frame rate: «i» and the export log take it from the mp4 index (`Mp4Index.frameRate`: frames over their stts
+duration, as ffprobe) — counting a second of frames in stored order gave 24.9 for a 30 fps re-encode with B-frames.
+The transformer keeps every frame's time (no rate change). Export bitrate: the original's +30 % (a second
+compression), 20…200 Mbit/s; the log prints fps in → out and the bitrate asked → got.
+Release builds: `assembleRelease` (R8, signed with the debug key as before) → `app/build/outputs/apk/release/`,
+published as `GoUltraTransfer-<version>.apk`.
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
 (NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
 the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /
