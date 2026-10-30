@@ -1,50 +1,66 @@
 package app.goultra.transfer.camera
 
-import android.content.ContentValues
 import android.content.Context
 import android.provider.MediaStore
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 
 /**
  * Changing the cover of a live photo already in the gallery (a [LivePhoto] file written by this app): a frame of
  * its clip replaces the photo part; the clip and the trailer stay. The original EXIF (date, camera) is kept.
  */
 object LiveCover {
-    /** Where the clip is inside a gallery live photo: [start] and [length] in bytes. */
-    class Video(val item: Uri, val start: Long, val length: Long, val size: Long)
+    /**
+     * Finds the video of a live photo at [uri] whatever it is called: our Motion Photo XMP, or a native live photo
+     * (e.g. Huawei's own, added from the phone) whose file ends with the 80-byte gallery trailer. Returns the same
+     * [video] result so a photo added by hand can play and get a new cover; such files carry no saved original photo.
+     */
+    fun video(context: Context, item: Uri, name: String): Video? {
+        val resolver = context.contentResolver
+        return resolver.openFileDescriptor(item, "r")?.use { pfd ->
+            val size = pfd.statSize
+            if (size < 0) throw IOException("неизвестен размер живого фото $name")
+            FileInputStream(pfd.fileDescriptor).use { input ->
+                val head = readFullyAt(input, 0, minOf(size, 256 * 1024L).toInt())
+                val text = String(head, Charsets.ISO_8859_1)
+                val last20 = if (size >= 20) String(readFullyAt(input, size - 20, 20), Charsets.ISO_8859_1) else ""
+                val hasV3Marker = size >= 60 && readFullyAt(input, size - 60, 4).contentEquals("v3_f".toByteArray())
+                val range = LivePhoto.videoRangeWithTrailer(text, size, last20, hasV3Marker) ?: return@use null
+                val hasTrailer = hasV3Marker && LivePhoto.huaweiTrailerVideoLength(last20) != null &&
+                    !text.contains("MicroVideoOffset")
+                val originalSize = LivePhoto.originalPhotoLength(text)
+                val originalVideoSize = LivePhoto.originalVideoLength(text)
+                if (originalVideoSize > range.first || originalSize > range.first - originalVideoSize)
+                    throw IOException("неверный размер исходного фото или видео")
+                Video(item, range.first, range.second, size, originalSize, originalVideoSize,
+                    LivePhoto.hasOriginalPhotoLength(text), hasHuaweiTrailer = hasTrailer,
+                    ownXmp = text.contains("x:xmptk=\"GO Ultra Transfer\""))
+            }
+        }
+    }
+
+    /** The Motion Photo MP4 and, when available, the unmodified original MP4 stored immediately before it. */
+    class Video(
+        val item: Uri, val start: Long, val length: Long, val size: Long, val originalSize: Long,
+        val originalVideoSize: Long = 0,
+        val originalPhotoTracked: Boolean = false,
+        val hasHuaweiTrailer: Boolean = false,
+        /** Written by this app (its XMP): the cover can be replaced in place. Native/added live photos can't. */
+        val ownXmp: Boolean = true,
+    ) {
+        val fullVideoStart: Long get() = if (originalVideoSize > 0) start - originalVideoSize else start
+        val fullVideoLength: Long get() = if (originalVideoSize > 0) originalVideoSize else length
+    }
 
     /** Null if [name] is not in the gallery or is not a live photo written by this app. */
     fun video(context: Context, name: String): Video? {
         val item = Downloader.galleryUri(context, name) ?: return null
-        val resolver = context.contentResolver
-        return resolver.openFileDescriptor(item, "r")?.use { pfd ->
-            val size = pfd.statSize
-            val head = readAt(pfd, 0, minOf(size, 256 * 1024L).toInt())
-            // Files of earlier builds end with a 60-byte «…LIVE_<n>» trailer after the video.
-            val legacy = size > 20 && String(readAt(pfd, size - 20, 20), Charsets.ISO_8859_1).startsWith("LIVE_")
-            val (start, length) = LivePhoto.videoRange(String(head, Charsets.ISO_8859_1), size, legacy) ?: return@use null
-            Video(item, start, length, size)
-        }
-    }
-
-    private fun readAt(pfd: android.os.ParcelFileDescriptor, at: Long, count: Int): ByteArray {
-        val buf = ByteArray(count)
-        FileInputStream(pfd.fileDescriptor).use { input ->
-            input.channel.position(at)
-            var n = 0
-            while (n < count) {
-                val r = input.read(buf, n, count - n)
-                if (r < 0) break
-                n += r
-            }
-        }
-        return buf
+        return video(context, item, name)
     }
 
     /** The clip's frame at [us] (exact frame, full resolution), or null. */
@@ -52,19 +68,19 @@ object LiveCover {
         context.contentResolver.openFileDescriptor(v.item, "r")?.use { pfd ->
             val retriever = MediaMetadataRetriever()
             try {
-                retriever.setDataSource(pfd.fileDescriptor, v.start, v.length)
+                retriever.setDataSource(pfd.fileDescriptor, v.fullVideoStart, v.fullVideoLength)
                 retriever.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST)
             } finally {
                 retriever.release()
             }
         }
 
-    /** Width of the clip in the gallery file (1280 for the light copy, 3840 for the original). */
+    /** Width of the original clip in the gallery file. */
     fun width(context: Context, v: Video): Int =
         context.contentResolver.openFileDescriptor(v.item, "r")?.use { pfd ->
             val retriever = MediaMetadataRetriever()
             try {
-                retriever.setDataSource(pfd.fileDescriptor, v.start, v.length)
+                retriever.setDataSource(pfd.fileDescriptor, v.fullVideoStart, v.fullVideoLength)
                 retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
             } finally {
                 retriever.release()
@@ -83,54 +99,93 @@ object LiveCover {
     /** The photo part of a gallery live photo (its JPEG with the XMP), for the EXIF. */
     fun photoPart(context: Context, v: Video): ByteArray? =
         context.contentResolver.openInputStream(v.item)?.use { input ->
-            val buf = ByteArray(v.start.toInt())
+            val length = v.fullVideoStart - v.originalSize
+            if (length > Int.MAX_VALUE) throw IOException("слишком большое фото")
+            val buf = ByteArray(length.toInt())
             var n = 0
             while (n < buf.size) {
                 val r = input.read(buf, n, buf.size - n)
                 if (r < 0) break
                 n += r
             }
-            buf.copyOf(n)
+            if (n != buf.size) throw IOException("неполное исходное фото: $n из ${buf.size}")
+            buf
         }
 
+    /** The clip's cover frame, decoded small (any codec, Media3-less): for thumbnails. */
+    fun coverFrame(context: Context, v: Video, us: Long = LivePhoto.DEFAULT_COVER_US): Bitmap? =
+        context.contentResolver.openFileDescriptor(v.item, "r")?.use { pfd ->
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(pfd.fileDescriptor, v.start, v.length)
+                retriever.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally {
+                retriever.release()
+            }
+        }
+
+    fun originalPhoto(context: Context, v: Video): ByteArray? {
+        if (v.originalSize == 0L) return null
+        if (v.originalSize > Int.MAX_VALUE) throw IOException("слишком большое исходное фото")
+        val pfd = context.contentResolver.openFileDescriptor(v.item, "r") ?: throw IOException("не открыть живое фото")
+        return pfd.use { FileInputStream(it.fileDescriptor).use { input ->
+            readFullyAt(input, v.fullVideoStart - v.originalSize, v.originalSize.toInt())
+        } }
+    }
+
     /**
-     * Writes [photo] (a plain JPEG) as the new photo part: [photo] + XMP, then the same clip (a file of an earlier
-     * build loses its old trailer: the result is a plain Motion Photo). The clip goes through a temp file in
-     * [cacheDir] (the photo part changes size, everything after it moves).
+     * Writes [photo] and the same clip to a new gallery item before replacing the old one.
+     * A file of an earlier build loses its old trailer: the result is a plain Motion Photo.
      */
-    fun replacePhoto(context: Context, v: Video, photo: ByteArray, cacheDir: File) {
+    fun replacePhoto(
+        context: Context,
+        v: Video,
+        photo: ByteArray,
+        original: ByteArray? = null,
+        restore: Boolean = false,
+        coverUs: Long = LivePhoto.DEFAULT_COVER_US,
+    ) {
         val resolver = context.contentResolver
-        val tmp = File(cacheDir, "live-clip.tmp")
-        try {
+        val details = resolver.query(
+            v.item,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATE_TAKEN),
+            null, null, null,
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) throw IOException("живое фото не найдено: ${v.item}")
+            (cursor.getString(0) ?: throw IOException("нет имени живого фото")) to
+                if (cursor.isNull(1)) null else cursor.getLong(1)
+        } ?: throw IOException("не прочитать сведения о живом фото: ${v.item}")
+        if (v.start < 0 || v.length < 0 || v.start > v.size || v.length > v.size - v.start)
+            throw IOException("неверные границы видео в живом фото")
+        val originalToCheck = if (restore) photo else original
+        if (originalToCheck != null && !LivePhoto.canRestoreOriginal(originalToCheck, v.length, v.originalVideoSize)) {
+            throw IOException("исходное живое фото не удастся восстановить; оригинал не изменён")
+        }
+        val head = LivePhoto.head(photo, v.length, presentationUs = if (restore) LivePhoto.DEFAULT_COVER_US else coverUs,
+            originalSize = if (restore) 0 else original?.size?.toLong() ?: 0,
+            originalVideoSize = v.originalVideoSize)
+        Downloader.saveReplacement(
+            resolver,
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            LivePhoto.galleryName(details.first),
+            "image/jpeg",
+            details.second,
+            v.item,
+            oldName = details.first,
+        ) { fd ->
             resolver.openFileDescriptor(v.item, "r")!!.use { pfd ->
                 FileInputStream(pfd.fileDescriptor).use { input ->
-                    input.channel.position(v.start)
-                    FileOutputStream(tmp).use { out ->
-                        val buf = ByteArray(256 * 1024)
-                        var left = v.length
-                        while (left > 0) {
-                            val r = input.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
-                            if (r < 0) break
-                            out.write(buf, 0, r)
-                            left -= r
+                    input.channel.position(v.fullVideoStart)
+                    FileOutputStream(fd).use { out ->
+                        out.write(head)
+                        if (!restore && original != null) out.write(original)
+                        copyExactly(input, out, v.originalVideoSize + v.length)
+                        if (v.hasHuaweiTrailer) {
+                            out.write(LivePhoto.huaweiTrailer(v.length, if (restore) LivePhoto.DEFAULT_COVER_US / 1000 else coverUs / 1000))
                         }
                     }
                 }
             }
-            val head = LivePhoto.head(photo, v.length)
-            // Pending while rewritten (no half-written file in the gallery); clearing it makes the system rescan it.
-            resolver.update(v.item, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) }, null, null)
-            resolver.openFileDescriptor(v.item, "rw")!!.use { pfd ->
-                FileOutputStream(pfd.fileDescriptor).use { out ->
-                    out.channel.truncate(0)
-                    out.channel.position(0)
-                    out.write(head)
-                    FileInputStream(tmp).use { it.copyTo(out, 256 * 1024) }
-                }
-            }
-            resolver.update(v.item, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-        } finally {
-            tmp.delete()
         }
     }
 

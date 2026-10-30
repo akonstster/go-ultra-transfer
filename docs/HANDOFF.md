@@ -1,5 +1,10 @@
 # Handoff — highlight marks (27.10.2026)
 
+> Historical handoff, not a current task list. The highlights viewer and local trailer parsing described below have
+> since been implemented, as have clip export and colour tools. See [README.md](../README.md) for current features and
+> [PROTOCOL.md](PROTOCOL.md) for the current protocol notes. Older suggestions and status statements below are
+> retained as research history; where they conflict with the later findings above them, the later findings win.
+
 For the next agent picking up this work. Branch `highlights`, on top of v0.8 (`818caba`).
 Local, untracked notes with device serials, adb ids and every past finding: `CLAUDE.md` in the repo root (gitignored)
 — read it first. Public protocol notes: [PROTOCOL.md](PROTOCOL.md) (section "Highlight marks in a file").
@@ -231,11 +236,9 @@ and let the user jump to them. Until today we didn't know where they were stored
 - Converting to "seconds from the start of the video": `(value − first_frame_timestamp) / 1e6`, where
   `first_frame_timestamp` = **metadata field 24** (int64, µs). We already read the metadata for every file via
   GetFileInfoList (38) — `ExtraMetadata`, field 24 is there (field 10 = `total_time`, s).
-  - A value **smaller than `first_frame_timestamp`** is already relative µs. Seen 3 times, always exactly `1320000`
-    (1.32 s), always the first mark in videos marked from our app. The camera's own timeline confirms it is a real
-    mark at ~1.3 s. Why our first mark lands there exactly is **not known** — see "Open questions".
-  - The camera groups nearby marks into one piece on its timeline (e.g. 1.32 + 2.52 shown as one, 4.36 + 5.88 as
-    another).
+  - A value **smaller than `first_frame_timestamp`** was initially treated as relative µs. Later comparison with the
+    camera showed that it counts as **0**; see the verified status at the top and [PROTOCOL.md](PROTOCOL.md).
+  - The camera groups nearby marks into one piece on its timeline.
 - Sample results (seconds from start): 102 (54 s long) → 3.64, 10.92, 15.48, 20.28, 37.84, 44.04; 066 (12 s) → 1.80,
   4.52; 119 (9 s) → 1.32, 2.52, 4.36, 5.88; 120 (4 s) → type 2: 1.76–3.76.
 - Dead ends (don't repeat): GET_EDITINFO_LIST 201 = favourites / AI-analysis state per file, not marks;
@@ -287,7 +290,7 @@ Suggested design (agree with the user first — they review UI decisions; see th
   arrives**; the value we send (`{1: whole seconds since start × 1000}`) is not stored. Taps at ~0:05 and ~0:10 on our
   timer → 4.36 s and 10.12 s in the file (our timer starts ~0.6 s before the first frame). No `1320000` this time —
   that value appeared only in three earlier recordings (098/099/119), origin unknown (possibly marks sent over BLE in
-  an older build); just treat values < first_frame as relative.
+  an older build); values < first_frame count as zero.
 - **Answered (27.10, test video 122, 10 s):** type 2 is (start, end). Two marks added in the camera's playback at
   ~3 s and ~7 s → `02 02 00 00 00` + 4 × u64 → 2.68–4.68 s and 6.93–8.93 s: each playback mark is a **2-second
   segment** starting slightly before the chosen point. Metadata got 87 = 1, 90 = 1 again.

@@ -194,8 +194,10 @@ fun GalleryScreen(
                     var menu by remember { mutableStateOf(false) }
                     var showSettings by remember { mutableStateOf(false) }
                     var showCamera by remember { mutableStateOf(false) }
+                    var showAbout by remember { mutableStateOf(false) }
                     if (showSettings) AppSettingsDialog { showSettings = false }
                     if (showCamera) CameraInfoDialog(vm) { showCamera = false }
+                    if (showAbout) AboutDialog { showAbout = false }
                     IconButton({ menu = true }) { Icon(Icons.Filled.MoreVert, tr("Меню", "Menu")) }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem({ Text(tr("Камера", "Camera")) }, { menu = false; showCamera = true })
@@ -203,6 +205,7 @@ fun GalleryScreen(
                             DropdownMenuItem({ Text(tr("Отключиться", "Disconnect")) }, { menu = false; vm.disconnect() })
                         }
                         DropdownMenuItem({ Text(tr("Настройки", "Settings")) }, { menu = false; showSettings = true })
+                        DropdownMenuItem({ Text(tr("О приложении", "About")) }, { menu = false; showAbout = true })
                         DropdownMenuItem({ Text(tr("Настроить камеру заново", "Set up the camera again")) }, { menu = false; vm.restartOnboarding() })
                         DropdownMenuItem({ Text(tr("Отправить журнал", "Send log")) }, { menu = false; onShareLog() })
                         // Developer tools only in debug builds (and in Russian only).
@@ -229,11 +232,11 @@ fun GalleryScreen(
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     vm.tab == Tab.CAMERA -> CameraTab(vm, connect, onRecord)
-                    vm.conn == ConnState.Connected -> FileGrid(vm)
+                    vm.conn == ConnState.Connected -> FileGrid(vm, snackbar)
                     // No camera: what is already on the phone, with the way to connect above it.
                     vm.listedFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
                         if (!vm.connectBarHidden) ConnectBar(vm.conn, connect, vm::hideConnectBar)
-                        FileGrid(vm)
+                        FileGrid(vm, snackbar)
                     }
                     else -> ConnectPanel(vm.conn, connect, onRecord)
                 }
@@ -248,12 +251,14 @@ fun GalleryScreen(
     }
     // Messages away from the controls (they are at the bottom): under the tabs, or mid-screen turned with the
     // picture when the phone is sideways.
-    SnackbarHost(
-        snackbar,
-        Modifier.align(if (sideways != 0) Alignment.Center else Alignment.TopCenter)
-            .padding(top = if (sideways != 0) 0.dp else 150.dp)
-            .graphicsLayer { rotationZ = sideways.toFloat() },
-    )
+    if (vm.viewing == null) {
+        SnackbarHost(
+            snackbar,
+            Modifier.align(if (sideways != 0) Alignment.Center else Alignment.TopCenter)
+                .padding(top = if (sideways != 0) 0.dp else 150.dp)
+                .graphicsLayer { rotationZ = sideways.toFloat() },
+        )
+    }
     }
 }
 
@@ -344,7 +349,7 @@ private fun ConnectBar(state: ConnState, onConnect: () -> Unit, onHide: () -> Un
 }
 
 @Composable
-private fun FileGrid(vm: CameraController) {
+private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
     val scope = rememberCoroutineScope()
     /** Everything opens in the in-app viewer: the phone's copy when there is one, otherwise from the camera. */
     fun open(file: CameraFile) {
@@ -367,7 +372,7 @@ private fun FileGrid(vm: CameraController) {
             tr("Выбраны файлы камеры — файлы телефона к ним не добавить. Снимите выбор, чтобы выбрать файлы телефона.", "Camera files are selected — phone files can't join them. Clear the selection to pick phone files.")
         }
     }
-    vm.viewing?.let { FileViewer(vm, it) { vm.viewing = null } }
+    vm.viewing?.let { FileViewer(vm, it, snackbar) { vm.viewing = null } }
     val files = vm.visibleFiles
     val byDay = remember(files) { files.groupBy { it.created?.toLocalDate() } }
     val gridState = rememberLazyGridState()
@@ -382,8 +387,11 @@ private fun FileGrid(vm: CameraController) {
         ) {
             // Counted once per change of the list (vm.filterCounts), not on every tap.
             val counts = vm.filterCounts
-            val pick = { f: Filter -> vm.filter = f; vm.touch() }
+            val pick = vm::chooseFilter
             FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${counts.all}", "All ${counts.all}")) })
+            if (!vm.showsPhone) {
+                FilterChip(vm.filter == Filter.CAMERA, { pick(Filter.CAMERA) }, { Text(tr("Камера ${counts.camera}", "Camera ${counts.camera}")) })
+            }
             FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото ${counts.photos}", "Photos ${counts.photos}")) })
             FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео ${counts.videos}", "Videos ${counts.videos}")) })
             // The rest only when there is something in them (or picked).
@@ -404,6 +412,16 @@ private fun FileGrid(vm: CameraController) {
             verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
+            if (vm.filter == Filter.CAMERA && files.isEmpty()) {
+                item(key = "empty-camera", span = { GridItemSpan(maxLineSpan) }) {
+                    Text(
+                        tr("На камере нет файлов", "No files on the camera"),
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             byDay.forEach { (day, dayFiles) ->
                 item(key = "day-$day", span = { GridItemSpan(maxLineSpan) }) {
                     DayHeader(day, dayFiles.size)
@@ -420,7 +438,7 @@ private fun FileGrid(vm: CameraController) {
                         added = file.isAdded,
                         // With the video's own colour on it; drawn again when a colour changes.
                         loadThumbnail = vm::tileImage,
-                        colourKey = if (file.kind == MediaKind.VIDEO) vm.lookKeys[file.name] else null,
+                        colourKey = if (file.kind == MediaKind.VIDEO || vm.canColourPhoto(file)) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
                         // delete), so files only on the phone just open.

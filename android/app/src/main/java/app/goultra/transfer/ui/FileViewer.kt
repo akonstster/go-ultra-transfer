@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,8 +54,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import androidx.compose.foundation.layout.Arrangement
@@ -65,6 +68,8 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.text.style.TextAlign
@@ -137,7 +142,10 @@ import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.KeyFrames
 import app.goultra.transfer.camera.LivePhoto
+import app.goultra.transfer.camera.LiveCover
+import app.goultra.transfer.camera.LiveVideoDataSource
 import app.goultra.transfer.camera.MediaKind
+import androidx.media3.datasource.DataSource
 
 /**
  * The in-app viewer. A file still on the camera: video plays its low-res LRV copy (or the file itself if there is
@@ -146,7 +154,7 @@ import app.goultra.transfer.camera.MediaKind
  * ♥ favorite, «i» info, share (files on the phone).
  */
 @Composable
-fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
+fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostState, onClose: () -> Unit) {
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
@@ -156,17 +164,20 @@ fun FileViewer(vm: CameraController, file: CameraFile, onClose: () -> Unit) {
         val list = remember { vm.visibleFiles.takeIf { l -> l.any { it.name == file.name } } ?: listOf(file) }
         val pager = rememberPagerState(initialPage = list.indexOfFirst { it.name == file.name }.coerceAtLeast(0)) { list.size }
         var locked by remember { mutableStateOf(false) } // editing pieces: the timeline owns the gestures
-        VerticalPager(
-            pager,
-            Modifier.fillMaxSize().background(Color.Black),
-            userScrollEnabled = !locked,
-            key = { list[it].name },
-        ) { page ->
-            val listed = list[page]
-            val shown by produceState(if (listed.name == file.name) file else null, listed.name) {
-                if (value == null) value = vm.withPhoneCopy(listed)
+        Box(Modifier.fillMaxSize()) {
+            VerticalPager(
+                pager,
+                Modifier.fillMaxSize().background(Color.Black),
+                userScrollEnabled = !locked,
+                key = { list[it].name },
+            ) { page ->
+                val listed = list[page]
+                val shown by produceState(if (listed.name == file.name) file else null, listed.name) {
+                    if (value == null) value = vm.withPhoneCopy(listed)
+                }
+                shown?.let { FilePage(vm, it, active = pager.settledPage == page, onClose = onClose, onLock = { l -> locked = l }) }
             }
-            shown?.let { FilePage(vm, it, active = pager.settledPage == page, onClose = onClose, onLock = { l -> locked = l }) }
+            SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(top = 64.dp))
         }
     }
 }
@@ -177,7 +188,34 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
     val context = LocalContext.current
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         val clip = vm.liveClipOf(file)
-        var playing by remember(file.uri) { mutableStateOf(false) }
+        val localState by key(file.name, vm.coverVersion) {
+            produceState<Pair<Boolean, LiveCover.Video?>>(false to null) {
+                // A live photo: our download (by name) or any added/phone file that carries a video (by content).
+                val video = if (file.kind == MediaKind.PHOTO) withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (!file.isAdded) LiveCover.video(context, file.name)
+                        else file.localUri?.let { LiveCover.video(context, android.net.Uri.parse(it), file.name) }
+                    }.onFailure { vm.log("живое фото ${file.name}: ${it.message}") }.getOrNull()
+                } else null
+                value = true to video
+            }
+        }
+        val localLive = localState.second
+        val photo = currentLivePhoto(file, localLive?.item?.toString(), localLive?.size)
+        val photoReady = !file.isLivePhoto || localState.first
+        var editingLive by remember(file.uri) { mutableStateOf(false) }
+        var playingLive by remember(file.uri) { mutableStateOf(false) }
+        var livePlaybackError by remember(file.uri) { mutableStateOf<String?>(null) }
+        val autoplay = remember(file.uri) { LiveAutoplay() }
+        val hasLive = clip != null || localLive != null
+        // Colour on photos: panel and the decoded photo with the look (viewing only; the file stays as shot).
+        var photoColouring by remember(file.uri) { mutableStateOf(false) }
+        LaunchedEffect(active, vm.inBackground, localState.first, hasLive, editingLive, photoColouring, vm.coverBusy) {
+            if (autoplay.update(active, !vm.inBackground, localState.first && hasLive && vm.coverBusy == null, editingLive || photoColouring)) {
+                playingLive = true
+            }
+            if (!active || vm.inBackground || editingLive || photoColouring || vm.coverBusy != null) playingLive = false
+        }
         // Video: the pieces to play, show in the film strip and download — the camera's marks as its film strip
         // shows them (2 s pieces, nearby ones merged), or the pieces as edited on the phone.
         val isVideo = file.kind == MediaKind.VIDEO
@@ -197,28 +235,57 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             return tidy ?: cameraPieces
         }
         var choose by remember(file.uri) { mutableStateOf(false) }
+        var choosePhoto by remember(file.uri) { mutableStateOf(false) }
         var info by remember(file.uri) { mutableStateOf(false) }
         // Setting the colour: only the video and the panel — the top bar and the ♥ / «i» / share column hide.
         var colouring by remember(file.uri) { mutableStateOf(false) }
-        if (info) FileInfo(vm, file) { info = false }
+        if (info && photoReady) FileInfo(vm, if (file.isLivePhoto || localLive != null) photo else file) { info = false }
         when {
             isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
             }
-            clip != null && playing -> FramePicker(vm, file, clip) { playing = false }
-            else -> PhotoPreview(vm, file)
+            hasLive && editingLive -> FramePicker(vm, photo, clip, localLive, active && !vm.inBackground) { editingLive = false }
+            photoColouring && photoReady -> PhotoColourEditor(vm, photo, onLock) { photoColouring = false }
+            else -> {
+                val livePlays = hasLive && playingLive && active && !vm.inBackground
+                if (photoReady) PhotoPreview(vm, photo, coloured = !livePlays)
+                if (livePlays) {
+                    LivePhotoPlayback(
+                        vm, photo, clip, localLive,
+                        onFinish = { playingLive = false },
+                        onError = { livePlaybackError = it; playingLive = false },
+                    )
+                }
+            }
         }
         // Live photo: its clip, where a frame can become the cover; and the way back to the camera's photo.
-        if (clip != null && !playing && vm.coverBusy == null) {
+        if (hasLive && !editingLive && !photoColouring && vm.coverBusy == null) {
             Column(
                 Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Button({ playing = true }) { Text(tr("▶ Живое фото · выбрать обложку", "▶ Live photo · pick the cover")) }
-                if (vm.coverReplaced(file)) {
+                livePlaybackError?.let { error ->
+                    Text(
+                        error,
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.background(Color(0xCC000000), RoundedCornerShape(8.dp)).padding(8.dp),
+                    )
+                }
+                Button({ autoplay.suppress(); livePlaybackError = null; playingLive = true }, enabled = localState.first && !playingLive) {
+                    Text(tr("▶ Повторить", "▶ Replay"))
+                }
+                if (localLive == null || localLive.ownXmp) {
+                    OutlinedButton({ autoplay.suppress(); playingLive = false; editingLive = true }, enabled = localState.first) {
+                        Text(tr("Выбрать обложку", "Pick cover"), color = Color.White)
+                    }
+                }
+                if (canRestoreLiveCover(localLive != null, localLive?.originalSize ?: 0L,
+                        localLive?.originalPhotoTracked == true, vm.coverReplaced(file)) &&
+                    (localLive == null || localLive.ownXmp)) {
                     OutlinedButton({ vm.restoreLiveCover(file) }) { Text(tr("Вернуть исходное фото", "Back to the original photo"), color = Color.White) }
                 }
             }
@@ -233,7 +300,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
             }
         }
-        if (!colouring) Row(
+        if (!colouring && !photoColouring) Row(
             Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
                 .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -242,7 +309,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             Column(Modifier.weight(1f)) {
                 Text(file.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    if (file.isOnPhone) {
+                    if (file.isOnPhone || (file.isLivePhoto && photo.isOnPhone) || (localLive != null && photo.isOnPhone)) {
                         tr("на телефоне", "on the phone")
                     } else if (file.kind == MediaKind.VIDEO && vm.previewUrl(file).endsWith(".lrv")) {
                         tr("с камеры · низкое качество", "from the camera · low quality")
@@ -262,12 +329,38 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                     Spacer(Modifier.width(6.dp))
                     Text(tr("Сохранить", "Save"))
                 }
+            } else if (!isVideo && photoReady && vm.photoLook(file) != null) {
+                // A photo with its colour: as shot (a download) or a copy with the colour, as with videos.
+                Button({ choosePhoto = true }, enabled = !busy) {
+                    Icon(Icons.Filled.SaveAlt, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(tr("Сохранить", "Save"))
+                }
             } else if (!isVideo && !file.isOnPhone && file.name !in vm.downloaded) {
                 Button({ vm.downloadOne(file); onClose() }, enabled = !busy) { Text(tr("Скачать", "Download")) }
             }
         }
         // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
-        if (!colouring) Column(
+        if (!colouring && !photoColouring) Row(
+            Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val chipColors = FilterChipDefaults.filterChipColors(
+                containerColor = Color(0x99000000), labelColor = Color.White,
+                selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
+            )
+            if (!isVideo && photoReady && vm.canColourPhoto(file)) {
+                val own = vm.photoLook(file) != null
+                FilterChip(
+                    selected = own,
+                    onClick = { autoplay.suppress(); playingLive = false; photoColouring = true },
+                    label = { Text(tr("Цвет", "Colour")) },
+                    leadingIcon = { Icon(Icons.Filled.Palette, null, tint = if (own) MARK_COLOR else Color.White) },
+                    colors = chipColors,
+                )
+            }
+        }
+        if (!colouring && !photoColouring) Column(
             Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -282,8 +375,8 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             }
             IconButton({ info = true }, round) { Icon(Icons.Outlined.Info, tr("Сведения", "Info"), tint = Color.White) }
             // Sharing needs the file on the phone.
-            if (file.localUri != null) {
-                IconButton({ share(context, listOf(file)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
+            if (photoReady && photo.localUri != null) {
+                IconButton({ share(context, listOf(photo)) }, round) { Icon(Icons.Filled.Share, tr("Поделиться", "Share"), tint = Color.White) }
             }
             // An added file: off the list (it stays on the phone), and the viewer closes.
             if (file.isAdded) {
@@ -293,6 +386,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             }
         }
         if (choose) SaveDialog(vm, file, pieces, onDismiss = { choose = false }, onStarted = { choose = false; onClose() })
+        if (choosePhoto) PhotoSaveDialog(vm, file, photo, onDismiss = { choosePhoto = false }, onStarted = { choosePhoto = false; onClose() })
     }
 }
 
@@ -339,6 +433,51 @@ fun share(context: android.content.Context, files: List<CameraFile>) {
             .putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, ArrayList(uris))
     }.setType(type).addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
     runCatching { context.startActivity(android.content.Intent.createChooser(intent, tr("Поделиться", "Share"))) }
+}
+
+/**
+ * «Сохранить» for a photo with its colour: as shot (the camera's file downloaded) or a copy with the colour,
+ * `…_COLOR.jpg` (EXIF kept, at most [PHOTO_SAVE_SIDE] px on the long side). [photo]: the file as on the phone, if it is.
+ */
+@Composable
+private fun PhotoSaveDialog(vm: CameraController, file: CameraFile, photo: CameraFile, onDismiss: () -> Unit, onStarted: () -> Unit) {
+    val look = vm.photoLook(file)
+    val onCamera = !photo.isOnPhone && file.name !in vm.downloaded
+    var colour by remember { mutableStateOf(true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("Сохранить фото", "Save the photo")) },
+        text = {
+            Column {
+                Row(Modifier.fillMaxWidth().clickable(enabled = onCamera) { colour = false }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(!colour, { colour = false }, enabled = onCamera)
+                    Column {
+                        Text(tr("Как снято", "As shot"), color = if (onCamera) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!onCamera) Text(tr("уже на телефоне", "already on the phone"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Row(Modifier.fillMaxWidth().clickable { colour = true }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(colour, { colour = true })
+                    Text(tr("С моим цветом", "With my colour"))
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (colour) tr("Копия …_COLOR.jpg, сведения о съёмке сохраняются; большие фото — до $PHOTO_SAVE_SIDE пикселей по длинной стороне.",
+                        "A copy …_COLOR.jpg with the shooting details; big photos at most $PHOTO_SAVE_SIDE px on the long side.")
+                    else tr("Скачивание оригинала.", "Downloads the original."),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton({
+                if (colour) look?.let { vm.savePhotoColour(photo, it) } else vm.downloadOne(file)
+                onStarted()
+            }, enabled = colour || onCamera) { Text(tr("Сохранить", "Save")) }
+        },
+        dismissButton = { TextButton(onDismiss) { Text(tr("Отмена", "Cancel")) } },
+    )
 }
 
 /**
@@ -881,44 +1020,13 @@ private fun VideoPreview(
             }
             // Setting the colour: copy / paste the whole colour (to colour several videos alike), before / after (the
             // processing off while lit) and «Готово», over the video's top. A save in progress shows its percent.
-            if (colouring) Row(
-                Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                val saving = vm.export
-                if (saving != null) {
-                    Text(
-                        tr("Сохранение ${saving.percent} %", "Saving ${saving.percent} %"),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
-                    )
-                }
-                val round = Modifier.background(Color(0x99000000), CircleShape)
-                IconButton({
-                    vm.copyLook(look)
-                    android.widget.Toast.makeText(context, tr("Цвет скопирован — вставьте его в другом видео", "Colour copied — paste it in another video"), android.widget.Toast.LENGTH_SHORT).show()
-                }, round) {
-                    Icon(Icons.Filled.ContentCopy, tr("Копировать цвет", "Copy the colour"), tint = Color.White)
-                }
-                vm.copiedLook?.let { copied ->
-                    IconButton({
-                        saved = copied
-                        vm.saveLook(file, copied)
-                        android.widget.Toast.makeText(context, tr("Цвет вставлен", "Colour pasted"), android.widget.Toast.LENGTH_SHORT).show()
-                    }, round, enabled = copied != look) {
-                        Icon(Icons.Filled.ContentPaste, tr("Вставить цвет", "Paste the colour"), tint = if (copied != look) Color.White else Color(0x66FFFFFF))
-                    }
-                }
-                IconButton(
-                    { bypass = !bypass },
-                    Modifier.background(if (bypass) MARK_COLOR else Color(0x99000000), CircleShape),
-                ) {
-                    Icon(Icons.Filled.Compare, tr("До / после", "Before / after"), tint = if (bypass) Color.Black else Color.White)
-                }
-                Button({ colorPanel = false }) { Text(tr("Готово", "Done")) }
-            }
+            if (colouring) ColourActions(
+                vm, look, bypass,
+                onPaste = { saved = it; vm.saveLook(file, it) },
+                onBypass = { bypass = !bypass },
+                onDone = { colorPanel = false },
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
+            )
             if (!colouring) Row(
                 Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1125,6 +1233,110 @@ private fun ColorPanel(
             }
             Text(tr("Только для просмотра — файл не меняется", "For viewing — the file stays as shot"), color = Color(0x99FFFFFF), fontSize = 12.sp)
         }
+    }
+}
+
+/**
+ * Over the picture while setting the colour, the same for videos and photos: a save in progress (percent), copy / paste
+ * the whole colour (to colour several files alike), before / after (the processing off while lit) and «Готово».
+ */
+@Composable
+private fun ColourActions(
+    vm: CameraController,
+    look: ColorLook,
+    bypass: Boolean,
+    onPaste: (ColorLook) -> Unit,
+    onBypass: () -> Unit,
+    onDone: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val saving = vm.export
+        if (saving != null) {
+            Text(
+                tr("Сохранение ${saving.percent} %", "Saving ${saving.percent} %"),
+                color = Color.White,
+                fontSize = 12.sp,
+                modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
+        val round = Modifier.background(Color(0x99000000), CircleShape)
+        IconButton({
+            vm.copyLook(look)
+            android.widget.Toast.makeText(context, tr("Цвет скопирован — вставьте его в другом файле", "Colour copied — paste it in another file"), android.widget.Toast.LENGTH_SHORT).show()
+        }, round) {
+            Icon(Icons.Filled.ContentCopy, tr("Копировать цвет", "Copy the colour"), tint = Color.White)
+        }
+        vm.copiedLook?.let { copied ->
+            IconButton({
+                onPaste(copied)
+                android.widget.Toast.makeText(context, tr("Цвет вставлен", "Colour pasted"), android.widget.Toast.LENGTH_SHORT).show()
+            }, round, enabled = copied != look) {
+                Icon(Icons.Filled.ContentPaste, tr("Вставить цвет", "Paste the colour"), tint = if (copied != look) Color.White else Color(0x66FFFFFF))
+            }
+        }
+        IconButton(onBypass, Modifier.background(if (bypass) MARK_COLOR else Color(0x99000000), CircleShape)) {
+            Icon(Icons.Filled.Compare, tr("До / после", "Before / after"), tint = if (bypass) Color.Black else Color.White)
+        }
+        Button(onDone) { Text(tr("Готово", "Done")) }
+    }
+}
+
+/**
+ * Setting a photo's colour (a live photo's too — its photo), laid out as a video's: the picture in the upper part with
+ * [ColourActions] over it, [ColorPanel] below. The picture is drawn by the GPU through the video's own steps
+ * ([PhotoSteps]), so the sliders show at once; the look is kept per file name, as with videos.
+ */
+@Composable
+private fun PhotoColourEditor(vm: CameraController, file: CameraFile, onLock: (Boolean) -> Unit, onDone: () -> Unit) {
+    var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
+    val look = saved ?: ColorLook()
+    var bypass by remember(file.uri) { mutableStateOf(false) }
+    var failed by remember(file.uri) { mutableStateOf(false) }
+    val still by produceState<android.graphics.Bitmap?>(null, file.uri, file.localUri, vm.coverVersion) {
+        value = vm.photoStill(file)
+        failed = value == null
+    }
+    val steps = remember(still) { still?.let { PhotoSteps(look, vm.clipping, PhotoSteps.scaleFor(it)) } }
+    LaunchedEffect(steps, look) { steps?.set(look) }
+    LaunchedEffect(steps, bypass) { steps?.bypass(bypass) }
+    LaunchedEffect(steps, vm.clipping) { steps?.stripes?.on = vm.clipping }
+    // The pager stays put while the panel is open (a swipe on a slider isn't the next file).
+    DisposableEffect(Unit) {
+        onLock(true)
+        onDispose { onLock(false); vm.clippingOff() }
+    }
+    BackHandler(onBack = onDone)
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxHeight(0.45f).statusBarsPadding().fillMaxWidth()) {
+            val frame = still
+            when {
+                frame != null && steps != null -> key(frame) {
+                    StillFrame(frame, steps.steps, 0, 1f, Offset.Zero, Modifier.fillMaxSize())
+                }
+                failed -> Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White, modifier = Modifier.align(Alignment.Center))
+                else -> CircularProgressIndicator(color = Color.White, modifier = Modifier.align(Alignment.Center))
+            }
+            ColourActions(
+                vm, look, bypass,
+                onPaste = { saved = it; vm.saveLook(file, it) },
+                onBypass = { bypass = !bypass },
+                onDone = onDone,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
+            )
+        }
+        ColorPanel(
+            Modifier.weight(1f),
+            false, look, saved != null, false, vm.clipping,
+            onLook = { saved = it; vm.saveLook(file, it) },
+            onLive = { ev, sat -> steps?.matrix?.set(ev, sat) },
+            onSharpLive = { amount, radius -> steps?.sharpLive(amount, radius) },
+            onLutLive = {},
+            onFilmLive = { steps?.film?.set(it) },
+            onClipping = vm::toggleClipping,
+            onReset = { saved = null; vm.saveLook(file, null) },
+        )
     }
 }
 
@@ -1550,6 +1762,93 @@ internal val MARK_COLOR = Color(0xB2FFFF00)
 
 private fun clock(ms: Long): String = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
 
+@OptIn(UnstableApi::class)
+private fun livePhotoSource(
+    vm: CameraController,
+    context: android.content.Context,
+    clip: CameraFile?,
+    local: LiveCover.Video?,
+): DataSource.Factory? = when {
+    local != null -> LiveVideoDataSource.Factory(context.contentResolver, local)
+    clip != null -> vm.previewSource()
+    else -> null
+}
+
+private fun cameraLivePreviewAvailable(vm: CameraController, clip: CameraFile?): Boolean =
+    clip != null && vm.previewSource() != null && vm.previewUrl(clip).endsWith(".lrv", ignoreCase = true)
+
+private fun livePlaybackMessage(error: PlaybackException): String = when (error.errorCode) {
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+    PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED ->
+        tr("Телефон не смог декодировать видео живого фото.", "This phone couldn't decode the live photo video.")
+    else -> tr("Не удалось прочитать видео живого фото. Проверьте файл или связь с камерой.",
+        "Couldn't read the live photo video. Check the file or the camera connection.")
+}
+
+@OptIn(UnstableApi::class)
+private fun livePlayer(context: android.content.Context): ExoPlayer =
+    ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true)).build().apply {
+        trackSelectionParameters = trackSelectionParameters.buildUpon()
+            .setMaxVideoSize(1920, 1920)
+            .build()
+    }
+
+@OptIn(UnstableApi::class)
+@Composable
+private fun LivePhotoPlayback(
+    vm: CameraController,
+    photo: CameraFile,
+    clip: CameraFile?,
+    local: LiveCover.Video?,
+    onFinish: () -> Unit,
+    onError: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val finish by rememberUpdatedState(onFinish)
+    val fail by rememberUpdatedState(onError)
+    var cameraFallback by remember(local?.item, clip?.uri) { mutableStateOf(false) }
+    val playbackLocal = if (cameraFallback) null else local
+    val source = remember(playbackLocal?.item, clip?.uri, cameraFallback) { livePhotoSource(vm, context, clip, playbackLocal) }
+    if (source == null || (playbackLocal == null && clip == null)) {
+        LaunchedEffect(Unit) {
+            vm.log("живое фото ${photo.name}: нет связи с камерой по Wi-Fi")
+            fail(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"))
+        }
+        return
+    }
+    var rendered by remember(playbackLocal?.item, clip?.uri, cameraFallback) { mutableStateOf(false) }
+    val player = remember(playbackLocal?.item, clip?.uri, cameraFallback) {
+        livePlayer(context).apply {
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() { rendered = true }
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_ENDED) finish()
+                }
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    vm.log("живое фото ${photo.name}: ${error.errorCodeName} ${error.message}")
+                    if (!cameraFallback && playbackLocal != null && cameraLivePreviewAvailable(vm, clip)) {
+                        cameraFallback = true
+                    } else fail(livePlaybackMessage(error))
+                }
+            })
+            val uri = playbackLocal?.item?.toString() ?: vm.previewUrl(clip!!)
+            setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(uri)))
+            repeatMode = Player.REPEAT_MODE_OFF
+            playWhenReady = true
+            prepare()
+        }
+    }
+    DisposableEffect(player) { onDispose { player.release() } }
+    AndroidView(
+        factory = { ctx -> PlayerView(ctx).apply { this.player = player; useController = false } },
+        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (rendered) 1f else 0f },
+    )
+}
+
 /**
  * A live photo's clip (its low-res copy, straight from the camera) as a frame picker: our own slider over the whole
  * clip, the frame large, a play button to watch it. «Сделать обложкой» replaces the photo in the gallery file with
@@ -1557,16 +1856,33 @@ private fun clock(ms: Long): String = "%d:%02d".format(ms / 60_000, ms / 1000 % 
  */
 @OptIn(UnstableApi::class)
 @Composable
-private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFile, onBack: () -> Unit) {
+private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFile?, local: LiveCover.Video?, active: Boolean, onBack: () -> Unit) {
     val context = LocalContext.current
-    val source = remember { vm.previewSource() }
-    if (source == null) {
-        Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White, modifier = Modifier.padding(24.dp))
+    var cameraFallback by remember(local?.item, clip?.uri) { mutableStateOf(false) }
+    val playbackLocal = if (cameraFallback) null else local
+    val source = remember(playbackLocal?.item, clip?.uri, cameraFallback) {
+        livePhotoSource(vm, context, clip, playbackLocal)
+    }
+    if (source == null || (playbackLocal == null && clip == null)) {
+        Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
+            Text(tr("Нет связи с камерой по Wi-Fi", "No Wi-Fi link to the camera"), color = Color.White)
+            TextButton(onBack) { Text(tr("Назад", "Back")) }
+        }
         return
     }
-    val player = remember(clip.uri) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(clip))))
+    var playerError by remember(local?.item, clip?.uri) { mutableStateOf<String?>(null) }
+    val player = remember(playbackLocal?.item, clip?.uri, cameraFallback) {
+        livePlayer(context).apply {
+            addListener(object : Player.Listener {
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    vm.log("живое фото ${photo.name}: ${error.errorCodeName} ${error.message}")
+                    if (!cameraFallback && playbackLocal != null && cameraLivePreviewAvailable(vm, clip)) {
+                        cameraFallback = true
+                    } else playerError = livePlaybackMessage(error)
+                }
+            })
+            val uri = playbackLocal?.item?.toString() ?: vm.previewUrl(clip!!)
+            setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(uri)))
             setSeekParameters(SeekParameters.EXACT)
             repeatMode = Player.REPEAT_MODE_ONE
             seekTo(LivePhoto.DEFAULT_COVER_US / 1000) // where the photo was taken
@@ -1575,6 +1891,7 @@ private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFil
         }
     }
     DisposableEffect(player) { onDispose { player.release() } }
+    LaunchedEffect(player, active) { if (!active) player.pause() }
     var durationMs by remember { mutableLongStateOf(0L) }
     var positionMs by remember { mutableLongStateOf(LivePhoto.DEFAULT_COVER_US / 1000) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -1613,15 +1930,20 @@ private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFil
                 fontSize = 13.sp,
             )
             Spacer(Modifier.height(10.dp))
+            playerError?.let { error ->
+                Text(error, color = Color.White)
+                TextButton({ playerError = null; player.prepare() }) { Text(tr("Повторить", "Retry")) }
+            }
             Button(
                 { player.pause(); vm.setLiveCover(photo, player.currentPosition * 1000); onBack() },
                 Modifier.fillMaxWidth(),
+                enabled = playerError == null && durationMs > 0,
             ) { Text(tr("Сделать обложкой", "Make it the cover")) }
             OutlinedButton(onBack, Modifier.fillMaxWidth()) { Text(tr("Отмена", "Cancel"), color = Color.White) }
             Text(
                 tr(
-                    "Фото в галерее заменится этим кадром из видео 3840×2880 (чуть мягче фото). Вернуть исходное — кнопкой в просмотре.",
-                    "The gallery photo is replaced by this frame of the 3840×2880 clip (a bit softer). Get the original back from the viewer.",
+                    "Фото в галерее заменится кадром из видео (он может быть мягче фото). Исходное фото сохраняется в файле.",
+                    "The gallery photo is replaced by a frame from the video (which may be softer). The original is kept in the file.",
                 ),
                 color = Color(0x99FFFFFF),
                 fontSize = 12.sp,
@@ -1632,26 +1954,50 @@ private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFil
     }
 }
 
+/**
+ * A photo in the viewer, zoomable. With a colour of its own ([CameraController.photoLook]) and [coloured] (not while a
+ * live photo's clip plays over it — the GPU's surface would cover the player's) it is drawn by the GPU through the
+ * colour's steps, as in [PhotoColourEditor]; otherwise as decoded.
+ */
 @kotlin.OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class) // transformable(canPan)
 @Composable
-private fun PhotoPreview(vm: CameraController, file: CameraFile) {
+private fun PhotoPreview(vm: CameraController, file: CameraFile, coloured: Boolean) {
     val config = LocalConfiguration.current
     val maxSide = with(LocalDensity.current) { (maxOf(config.screenWidthDp, config.screenHeightDp).dp.toPx() * 1.5f).toInt() }
     // Reloaded after a cover change (the photo is then the chosen frame).
     var failed by remember(file.uri) { mutableStateOf(false) }
+    val look = if (coloured) vm.photoLook(file) else null
     val image by produceState<ImageBitmap?>(null, file.uri, file.localUri, vm.coverVersion) {
         value = vm.previewPhoto(file, maxSide)
         failed = value == null
     }
+    val still by produceState<android.graphics.Bitmap?>(null, file.uri, file.localUri, vm.coverVersion, look != null) {
+        value = if (look != null) vm.photoStill(file) else null
+    }
+    val steps = remember(still) { still?.let { PhotoSteps(look ?: ColorLook(), false, PhotoSteps.scaleFor(it)) } }
+    LaunchedEffect(steps, look) { if (look != null) steps?.set(look) }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     val zoom = rememberTransformableState { zoomChange, pan, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 6f)
         offset = if (scale == 1f) Offset.Zero else offset + pan
     }
+    val gestures = Modifier.fillMaxSize()
+        .pointerInput(Unit) {
+            // Double tap: 1x ↔ 2.5x.
+            detectTapGestures(onDoubleTap = {
+                if (scale > 1f) { scale = 1f; offset = Offset.Zero } else scale = 2.5f
+            })
+        }
+        // One finger moves the photo only when zoomed in; otherwise the swipe goes to the next file.
+        .transformable(zoom, canPan = { scale > 1f })
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val bmp = image
-        if (bmp == null && failed) {
+        val frame = still
+        if (look != null && frame != null && steps != null) {
+            key(frame) { StillFrame(frame, steps.steps, 0, scale, offset, Modifier.fillMaxSize()) }
+            Box(gestures)
+        } else if (bmp == null && failed) {
             // E.g. a RAW .dng the phone can't decode here: offer the phone's own apps.
             val context = LocalContext.current
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
@@ -1676,16 +2022,7 @@ private fun PhotoPreview(vm: CameraController, file: CameraFile) {
                 bmp,
                 file.name,
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-                    .pointerInput(Unit) {
-                        // Double tap: 1x ↔ 2.5x.
-                        detectTapGestures(onDoubleTap = {
-                            if (scale > 1f) { scale = 1f; offset = Offset.Zero } else scale = 2.5f
-                        })
-                    }
-                    // One finger moves the photo only when zoomed in; otherwise the swipe goes to the next file.
-                    .transformable(zoom, canPan = { scale > 1f })
-                    .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
+                modifier = gestures.graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
             )
         }
     }

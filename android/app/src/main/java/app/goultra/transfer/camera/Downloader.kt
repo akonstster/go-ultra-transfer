@@ -15,20 +15,26 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
+import java.io.FileInputStream
+import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 import kotlin.coroutines.coroutineContext
 
 /**
  * Downloads http://192.168.42.1/<uri> straight into the shared gallery: DCIM/Camera, next to the phone's own shots,
  * with DATE_TAKEN set from the camera so files land at the right place in the timeline.
  * An unfinished file stays a pending MediaStore item and is resumed with an HTTP Range request
- * (after a network hiccup, a cancel or on the next connection). An existing file is overwritten in place, never duplicated.
+ * (after a network hiccup, a cancel or on the next connection). Replacements keep the old item until the new one is ready.
  */
 object Downloader {
     private val TARGET = Environment.DIRECTORY_DCIM + "/Camera"
     private const val MAX_RETRIES = 5
+
+    /** Live photos get the Huawei Gallery trailer on Huawei phones so the gallery recognizes them (verified on Mate 80 Pro). */
+    internal fun isHuawei(): Boolean = Build.MANUFACTURER.equals("HUAWEI", ignoreCase = true)
 
     /** Where this app saves (and saved in earlier versions) — MediaStore only shows us our own items there. */
     private const val OUR_FOLDERS = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE 'DCIM/Camera%' OR " +
@@ -45,7 +51,11 @@ object Downloader {
                 null,
                 null,
             )?.use { c ->
-                while (c.moveToNext()) names += c.getString(0)
+                while (c.moveToNext()) {
+                    val name = c.getString(0) ?: continue
+                    names += name
+                    names += LivePhoto.cameraName(name)
+                }
             }
         }
         return names
@@ -59,7 +69,8 @@ object Downloader {
      * Date from the name like on the camera, else DATE_TAKEN; duration from MediaStore (videos only).
      */
     fun phoneFiles(context: Context): List<CameraFile> {
-        val out = mutableListOf<CameraFile>()
+        val out = mutableListOf<Pair<CameraFile, Boolean>>()
+        val motionNames = mutableSetOf<String>()
         for (video in listOf(false, true)) {
             val collection = collection(video)
             context.contentResolver.query(
@@ -78,7 +89,9 @@ object Downloader {
                 null,
             )?.use { c ->
                 while (c.moveToNext()) {
-                    val name = c.getString(1) ?: continue
+                    val storedName = c.getString(1) ?: continue
+                    val name = LivePhoto.cameraName(storedName)
+                    if (name != storedName) motionNames += name
                     val taken = if (c.isNull(3)) null else c.getLong(3)
                     out += CameraFile(
                         uri = "$PHONE_PREFIX$name",
@@ -91,11 +104,13 @@ object Downloader {
                             java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
                         },
                         localUri = ContentUris.withAppendedId(collection, c.getLong(0)).toString(),
-                    )
+                    ) to (name != storedName)
                 }
             }
         }
-        return out.sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+        return out.filter { (file, isMotionName) -> file.name !in motionNames || isMotionName }
+            .map { it.first }
+            .sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
     }
 
     /**
@@ -165,10 +180,10 @@ object Downloader {
     }
 
     /**
-     * [overwrite]: re-download a file that is already complete in the gallery (same item, no duplicate).
+     * [overwrite]: re-download a file that is already complete in the gallery (no duplicate).
      * Otherwise a complete file is left as is and a partial one is resumed. [takenAtMillis] goes to DATE_TAKEN.
-     * [liveVideo]: the photo [uri] is a live photo and this is its clip — one gallery file is written
-     * ([LivePhoto]: the photo with the Motion Photo XMP, the clip right after it, resumable).
+     * [liveVideo]: the original clip; [livePreview]: its optional LRV. Both are resumed in a pending item before
+     * the two-track Motion Photo is assembled and published without replacing an existing file prematurely.
      */
     suspend fun download(
         context: Context,
@@ -177,6 +192,7 @@ object Downloader {
         overwrite: Boolean = false,
         takenAtMillis: Long? = null,
         liveVideo: String? = null,
+        livePreview: String? = null,
         onProgress: (done: Long, total: Long) -> Unit,
     ): Uri = withContext(Dispatchers.IO) {
         val name = uri.substringAfterLast('/')
@@ -186,42 +202,70 @@ object Downloader {
         // Live photo: the photo part (with the XMP) is the same on every attempt, so a resume can trust it.
         val live = liveVideo?.let { clip ->
             val size = contentLength(link, clip) ?: throw IOException("нет размера видео $clip")
-            Triple(clip, size, LivePhoto.head(fetch(link, uri), size))
+            val previewSize = livePreview?.let {
+                contentLength(link, it) ?: throw IOException("нет размера превью $it")
+            } ?: 0L
+            LiveDownload(clip, size, LivePhoto.head(fetch(link, uri), size), livePreview, previewSize)
         }
-        val existing = findExisting(resolver, collection(video), name)
-        val item = existing?.uri ?: resolver.insert(
+        val targetName = if (live != null) LivePhoto.galleryName(name) else name
+        val targetExisting = findExisting(resolver, collection(video), targetName)
+        val legacyExisting = if (targetName != name) findExisting(resolver, collection(video), name) else null
+        val complete = targetExisting?.takeIf { !it.pending } ?: legacyExisting?.takeIf { !it.pending }
+        if (complete != null && !overwrite) return@withContext complete.uri
+        val old = complete?.takeIf { overwrite }?.uri
+        val oldName = if (complete === legacyExisting) name else targetName
+        val stagingName = "GOUltra-replace-$targetName"
+        val staging = if (old != null) findExisting(resolver, collection(video), stagingName) else null
+        if (staging != null && !staging.pending) throw IOException("имя временного файла уже занято: $stagingName")
+        val partial = if (old != null) staging else targetExisting ?: legacyExisting
+        val item = partial?.uri ?: resolver.insert(
             collection(video),
             ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.DISPLAY_NAME, if (old != null) stagingName else targetName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
                 put(MediaStore.MediaColumns.RELATIVE_PATH, TARGET)
                 takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             },
         ) ?: error("MediaStore insert failed")
-        if (existing != null && !existing.pending && !overwrite) return@withContext item
-
-        var restart = existing != null && !existing.pending // overwrite: start from byte 0
-        if (restart) {
-            // Back to pending while rewriting: an interrupted overwrite must not look like a complete file.
-            resolver.update(item, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) }, null, null)
-        }
         var attempt = 0
         while (true) {
             // A fresh item has no file on disk until the first write: "r" throws FileNotFoundException.
-            val have = if (restart) 0L else runCatching {
+            var have = runCatching {
                 resolver.openFileDescriptor(item, "r")?.use { it.statSize }
             }.getOrNull() ?: 0L
-            restart = false
             try {
                 if (live == null) {
                     transfer(resolver, link, uri, item, have, onProgress)
                 } else {
-                    val (clip, size, head) = live
+                    val (clip, size, head, preview, previewSize) = live
                     val base = head.size.toLong()
+                    if (have > 0) {
+                        val prefixLength = minOf(have, base).toInt()
+                        val matches = resolver.openFileDescriptor(item, "r")?.use { pfd ->
+                            java.io.FileInputStream(pfd.fileDescriptor).use { input ->
+                                readFullyAt(input, 0, prefixLength).contentEquals(head.copyOf(prefixLength))
+                            }
+                        } ?: throw IOException("не открыть недокачанное живое фото")
+                        if (!matches) {
+                            writeAt(resolver, item, 0, head)
+                            have = base
+                        }
+                    }
+                    val trailer = if (preview == null && isHuawei()) LivePhoto.huaweiTrailer(size) else null
+                    if (have > base + size + previewSize + (trailer?.size ?: 0))
+                        throw IOException("недокачанное живое фото больше оригинала")
                     if (have < base) writeAt(resolver, item, 0, head)
-                    val total = base + size
-                    transfer(resolver, link, clip, item, (have - base).coerceIn(0, size), { done, _ -> onProgress(base + done, total) }, base)
+                    val total = base + size + previewSize
+                    if (have < base + size) {
+                        transfer(resolver, link, clip, item, (have - base).coerceIn(0, size),
+                            { done, _ -> onProgress(base + done, total) }, base, expectedSize = size)
+                    }
+                    if (preview != null && have < base + size + previewSize) {
+                        transfer(resolver, link, preview, item, (have - base - size).coerceIn(0, previewSize),
+                            { done, _ -> onProgress(base + size + done, total) }, base + size, expectedSize = previewSize)
+                    }
+                    if (trailer != null) writeAt(resolver, item, base + size, trailer)
                     onProgress(total, total)
                 }
                 break
@@ -230,53 +274,175 @@ object Downloader {
                 delay(1_500L * attempt)
             }
         }
-        resolver.update(
-            item,
-            ContentValues().apply {
-                put(MediaStore.MediaColumns.IS_PENDING, 0)
-                takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
-            },
-            null,
-            null,
-        )
+        if (live != null && live.preview != null) {
+            return@withContext completeLiveDownload(
+                context, item, targetName, mime, takenAtMillis, old, oldName, live.head, live.size, live.previewSize,
+            )
+        }
+        if (old != null) {
+            publishReplacement(resolver, item, targetName, old, oldName)
+        } else {
+            val changed = resolver.update(
+                item,
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, targetName)
+                    takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+                },
+                null,
+                null,
+            )
+            if (changed != 1) throw IOException("не опубликовать скачанный файл $name")
+            val stored = resolver.query(item, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            }
+            if (stored != targetName) throw IOException("MediaStore сохранил файл как $stored вместо $targetName")
+        }
         item
     }
 
-    /**
-     * A clip made on the phone ([ClipMaker]) saved as [name] in DCIM/Camera. Written into a new pending item under a
-     * temporary name, removed if that fails or is stopped; only then does an older clip of the same name go and the
-     * new one take its name — a replace that fails leaves the old clip as it was.
-     */
-    fun saveClip(context: Context, name: String, takenAtMillis: Long?, write: (java.io.FileDescriptor) -> Unit): Uri {
+    internal fun completeLiveDownload(
+        context: Context,
+        item: Uri,
+        targetName: String,
+        mime: String,
+        takenAtMillis: Long?,
+        old: Uri?,
+        oldName: String,
+        head: ByteArray,
+        originalSize: Long,
+        previewSize: Long,
+    ): Uri {
         val resolver = context.contentResolver
-        val collection = collection(video = true)
+        val muxed = File.createTempFile("live-mux-", ".mp4", context.cacheDir)
+        try {
+            LiveMuxer.mux(resolver, item, head.size.toLong(), originalSize, previewSize, muxed)
+            val finalHead = LivePhoto.head(head, muxed.length(), originalVideoSize = originalSize)
+            val replacement = saveReplacement(
+                resolver, collection(video = false), targetName, mime, takenAtMillis,
+                old ?: item, oldName = if (old == null) targetName else oldName,
+            ) { fd ->
+                val inputDescriptor = resolver.openFileDescriptor(item, "r") ?: throw IOException("не открыть скачанное видео")
+                inputDescriptor.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { input ->
+                        input.channel.position(head.size.toLong())
+                        FileOutputStream(fd).use { out ->
+                            out.write(finalHead)
+                            copyExactly(input, out, originalSize)
+                            FileInputStream(muxed).use { preview -> copyExactly(preview, out, muxed.length()) }
+                            if (isHuawei()) out.write(LivePhoto.huaweiTrailer(muxed.length()))
+                        }
+                    }
+                }
+            }
+            if (old != null && resolver.delete(item, null, null) != 1)
+                throw IOException("новое живое фото сохранено, но временный элемент $item не удалён")
+            return replacement
+        } finally {
+            if (!muxed.delete() && muxed.exists()) android.util.Log.w("GUT", "не удалить временный файл ${muxed.name}")
+        }
+    }
+
+    private data class LiveDownload(
+        val clip: String,
+        val size: Long,
+        val head: ByteArray,
+        val preview: String?,
+        val previewSize: Long,
+    )
+
+    /** A clip made on the phone ([ClipMaker]) saved as [name] in DCIM/Camera. */
+    fun saveClip(context: Context, name: String, takenAtMillis: Long?, write: (java.io.FileDescriptor) -> Unit): Uri =
+        saveFile(context, name, "video/mp4", takenAtMillis, write)
+
+    /** A file made on the phone (a clip, a photo with its colour) saved as [name] in DCIM/Camera, in the collection of its [mime]. */
+    fun saveFile(context: Context, name: String, mime: String, takenAtMillis: Long?, write: (java.io.FileDescriptor) -> Unit): Uri {
+        val resolver = context.contentResolver
+        val collection = collection(video = mime.startsWith("video/"))
+        val existing = findExisting(resolver, collection, name)
+        if (existing?.pending == true) throw IOException("незавершённый файл с именем $name; сначала завершите его скачивание")
+        val old = existing?.uri
+        return saveReplacement(resolver, collection, name, mime, takenAtMillis, old, write = write)
+    }
+
+    /** Writes a replacement first; an existing item is kept under a backup name until publication succeeds. */
+    internal fun saveReplacement(
+        resolver: ContentResolver,
+        collection: Uri,
+        name: String,
+        mime: String,
+        takenAtMillis: Long?,
+        old: Uri?,
+        oldName: String = name,
+        write: (java.io.FileDescriptor) -> Unit,
+    ): Uri {
+        val token = UUID.randomUUID().toString()
+        val extension = name.substringAfterLast('.', "")
+        val suffix = if (extension.isEmpty()) "" else ".$extension"
+        val temporary = "GOUltra-$token.part$suffix"
         val item = resolver.insert(
             collection,
             ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name.removeSuffix(".mp4") + ".part.mp4")
-                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, temporary)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
                 put(MediaStore.MediaColumns.RELATIVE_PATH, TARGET)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
+                takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
             },
         ) ?: error("MediaStore insert failed")
         try {
-            resolver.openFileDescriptor(item, "rwt")!!.use { write(it.fileDescriptor) }
-        } catch (e: Throwable) {
-            runCatching { resolver.delete(item, null, null) }
+            val descriptor = resolver.openFileDescriptor(item, "rwt") ?: throw IOException("не открыть новый элемент $item")
+            descriptor.use { write(it.fileDescriptor) }
+        } catch (e: Exception) {
+            try {
+                if (resolver.delete(item, null, null) != 1) throw IOException("не удалить незавершённый элемент $item")
+            } catch (cleanup: Exception) {
+                e.addSuppressed(cleanup)
+            }
             throw e
         }
-        findExisting(resolver, collection, name)?.let { old -> runCatching { resolver.delete(old.uri, null, null) } }
-        resolver.update(
-            item,
-            ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.IS_PENDING, 0)
-                takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
-            },
-            null,
-            null,
-        )
+        publishReplacement(resolver, item, name, old, oldName)
         return item
+    }
+
+    private fun publishReplacement(resolver: ContentResolver, item: Uri, name: String, old: Uri?, oldName: String = name) {
+        val extension = name.substringAfterLast('.', "")
+        val suffix = if (extension.isEmpty()) "" else ".$extension"
+        val backup = name.removeSuffix(suffix) + ".backup-${UUID.randomUUID()}" + suffix
+        fun rename(uri: Uri, target: String, publish: Boolean = false) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, target)
+                if (publish) put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }
+            if (resolver.update(uri, values, null, null) != 1) throw IOException("не переименовать $uri в $target")
+            val actual = resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            }
+            if (actual != target) throw IOException("MediaStore сохранил $uri как $actual вместо $target")
+        }
+        try {
+            ReplacementTransaction.commit(
+                hasOld = old != null,
+                backupOld = { rename(requireNotNull(old), backup) },
+                publishNew = { rename(item, name, publish = true) },
+                discardNew = {
+                    if (resolver.delete(item, null, null) != 1) throw IOException("не удалить новый элемент $item")
+                },
+                restoreOld = { rename(requireNotNull(old), oldName) },
+                deleteOld = {
+                    try {
+                        if (resolver.delete(requireNotNull(old), null, null) != 1) throw IOException("MediaStore не удалил элемент")
+                    } catch (e: Exception) {
+                        throw IOException("новый файл сохранён, но резервная копия $backup не удалена: ${e.message}", e)
+                    }
+                },
+            )
+        } catch (e: Exception) {
+            if (e.suppressed.isNotEmpty()) {
+                throw IOException("${e.message}; ошибка восстановления: ${e.suppressed.joinToString { it.message ?: it.javaClass.simpleName }}; проверьте резервную копию $backup", e)
+            }
+            throw e
+        }
     }
 
     /** Truncates the item to [at] and writes [bytes] there (live photo: its photo part). */
@@ -302,18 +468,31 @@ object Downloader {
         from: Long,
         onProgress: (done: Long, total: Long) -> Unit,
         base: Long = 0,
+        expectedSize: Long? = null,
     ) {
         val conn = open(link, uri)
         try {
             if (from > 0) conn.setRequestProperty("Range", "bytes=$from-")
             var start = from
             val total = when (val code = conn.responseCode) {
-                206 -> conn.getHeaderField("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
-                    ?: (from + conn.contentLengthLong)
+                206 -> {
+                    val range = conn.getHeaderField("Content-Range")
+                    if (expectedSize != null && !HttpRanges.matchesRange(range, from, expectedSize))
+                        throw IOException("неверный Content-Range для $uri: $range")
+                    range?.substringAfterLast('/')?.toLongOrNull() ?: (from + conn.contentLengthLong)
+                }
                 200 -> { start = 0; conn.contentLengthLong }
-                416 -> return // nothing left: the file is already complete
+                416 -> {
+                    val size = HttpRanges.unsatisfiedSize(conn.getHeaderField("Content-Range")) ?: contentLength(link, uri)
+                    if (!HttpRanges.isComplete(from, size)) throw IOException("HTTP 416: на телефоне $from байт, на камере ${size ?: "неизвестно"}")
+                    if (expectedSize != null && size != expectedSize) throw IOException("размер файла $uri изменился")
+                    onProgress(from, from)
+                    return
+                }
                 else -> throw IOException("HTTP $code")
             }
+            if (expectedSize != null && total >= 0 && total != expectedSize)
+                throw IOException("размер файла $uri изменился: $total вместо $expectedSize")
             var done = start
             resolver.openFileDescriptor(item, "rw")!!.use { pfd ->
                 FileOutputStream(pfd.fileDescriptor).use { out ->
@@ -340,6 +519,7 @@ object Downloader {
             }
             onProgress(done, total)
             if (total >= 0 && done != total) throw IOException("получено $done из $total байт")
+            if (expectedSize != null && done != expectedSize) throw IOException("получено $done из $expectedSize байт")
         } finally {
             conn.disconnect()
         }
@@ -385,7 +565,11 @@ object Downloader {
     /** The finished gallery item for a camera file name (for opening it in the phone's player), or null. */
     fun galleryUri(context: Context, name: String): Uri? {
         val video = mimeType(name).startsWith("video/")
-        return findExisting(context.contentResolver, collection(video), name)?.takeIf { !it.pending }?.uri
+        val normalized = LivePhoto.cameraName(name)
+        val candidates = listOf(LivePhoto.galleryName(normalized), normalized).distinct()
+        return candidates.firstNotNullOfOrNull { candidate ->
+            findExisting(context.contentResolver, collection(video), candidate)?.takeIf { !it.pending }?.uri
+        }
     }
 
     private class Existing(val uri: Uri, val pending: Boolean)
