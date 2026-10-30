@@ -310,6 +310,7 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             context, link, file.uri, overwrite,
             takenAtMillis = file.created?.atZone(ZoneId.systemDefault())?.toInstant()?.toEpochMilli(),
             liveVideo = liveVideo?.uri,
+            livePreview = liveVideo?.let { previewUri(it).takeIf { uri -> uri != it.uri } },
             onProgress = onProgress,
         )
 

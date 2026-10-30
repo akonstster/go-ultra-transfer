@@ -42,6 +42,7 @@ import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
 import app.goultra.transfer.camera.LiveDecoder
 import app.goultra.transfer.camera.LiveCover
+import app.goultra.transfer.camera.LivePhoto
 import app.goultra.transfer.camera.MediaKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -73,7 +74,7 @@ sealed interface ConnState {
  * The gallery's filter: by kind, favorites, files added from the phone, videos with a colour of their own, and what the
  * app saved (clips …_HL, copies with colour …_COLOR, without sound …_MUTE).
  */
-enum class Filter { ALL, PHOTO, VIDEO, FAVORITE, ADDED, COLOURED, SAVED }
+enum class Filter { ALL, CAMERA, PHOTO, VIDEO, FAVORITE, ADDED, COLOURED, SAVED }
 
 /**
  * Colour over a video while viewing: the I-Log LUT on / off and how much of it (0…1) — I-Log files only; exposure in
@@ -218,15 +219,110 @@ class CameraController(private val app: Application) {
     /** The video has a colour of its own set in the viewer. */
     fun hasLook(file: CameraFile): Boolean = file.name in lookKeys
 
-    /** The copied colour onto every selected video (photos are left alone); how many got it. */
+    /** The copied colour onto every selected video or photo; how many got it. */
     fun pasteLookToSelected(): Int {
         val look = copiedLook ?: return 0
-        val videos = selectedFiles.filter { it.kind == MediaKind.VIDEO }
-        videos.forEach { saveLook(it, look) }
-        message = tr("Цвет вставлен в ${videos.size} видео", "Colour pasted into ${videos.size} videos")
-        return videos.size
+        val targets = selectedFiles.filter { it.kind == MediaKind.VIDEO || canColourPhoto(it) }
+        targets.forEach { saveLook(it, look) }
+        message = tr("Цвет вставлен: ${targets.size}", "Colour pasted: ${targets.size}")
+        return targets.size
     }
 
+    /** A photo the colour applies to: the decoders here read JPEG and the like, not RAW. */
+    fun canColourPhoto(file: CameraFile): Boolean =
+        file.kind == MediaKind.PHOTO && !file.name.endsWith(".dng", ignoreCase = true)
+
+    /** The photo's colour as set in the viewer, or null when it is shown as shot (observed: the viewer follows it). */
+    fun photoLook(file: CameraFile): ColorLook? =
+        if (!canColourPhoto(file)) null else lookKeys[file.name]?.let(ColorLook::decode)?.takeIf { !it.isPlain(false) }
+
+    // A plain JPEG (no clip), so a live photo's copy is named as a photo: IMG_…_COLOR.jpg.
+    private fun photoColourName(file: CameraFile, n: Int) =
+        LivePhoto.cameraName(file.name).substringBeforeLast('.').replaceFirst(Regex("^LIV_"), "IMG_") +
+            "_COLOR" + (if (n > 1) "$n" else "") + ".jpg"
+
+    /**
+     * Saves [file] with [look] as a copy, `…_COLOR.jpg` (EXIF kept): drawn by the same GPU steps as on the screen
+     * ([PhotoSteps.forSaving]), at most [PHOTO_SAVE_SIDE] px on the long side. From the phone's copy when there is one,
+     * else from the camera. Runs on its own (closing the viewer doesn't stop it); «Стоп» cancels; the result is a message.
+     */
+    fun savePhotoColour(file: CameraFile, look: ColorLook) {
+        if (exportJob?.isActive == true || isDownloading) {
+            message = tr("Подождите — идёт другая работа", "Wait — another job is running")
+            return
+        }
+        export = ExportProgress(file.name, 0)
+        exportJob = scope.launch {
+            message = try {
+                val name = withContext(Dispatchers.IO) {
+                    var n = 1
+                    while (Downloader.galleryUri(app, photoColourName(file, n)) != null) n++
+                    photoColourName(file, n)
+                }
+                export = ExportProgress(name, 10)
+                val (bitmap, exif) = withContext(Dispatchers.IO) { decodeForSaving(file) }
+                export = ExportProgress(name, 40)
+                try {
+                    val jpeg = withContext(Dispatchers.IO) {
+                        renderStepsInto(bitmap, PhotoSteps.forSaving(look, bitmap))
+                        LiveCover.jpeg(bitmap, exif)
+                    }
+                    export = ExportProgress(name, 80)
+                    val takenAt = file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()
+                    withContext(Dispatchers.IO) {
+                        Downloader.saveFile(app, name, "image/jpeg", takenAt) { fd -> java.io.FileOutputStream(fd).use { it.write(jpeg) } }
+                    }
+                } finally {
+                    bitmap.recycle()
+                }
+                loadPhoneFiles()
+                tr("Сохранено: $name", "Saved: $name")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("цвет фото ${file.name}: ${e.javaClass.simpleName}: ${e.message}")
+                tr("Не удалось сохранить: ", "Couldn't save: ") + e.message
+            } finally {
+                export = null
+            }
+        }
+    }
+
+    /**
+     * The photo for saving, as stored (BitmapFactory leaves the EXIF orientation alone, so the copied EXIF stays
+     * right), mutable ARGB_8888 within [PHOTO_SAVE_SIDE]; and its first bytes for the EXIF. The phone's copy if any.
+     */
+    private suspend fun decodeForSaving(file: CameraFile): Pair<Bitmap, ByteArray> {
+        val local = file.localUri?.let(android.net.Uri::parse)
+            ?: withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }
+        val bytes: ByteArray? = if (local == null) session.fetchFile(file.uri) else null
+        fun open(): java.io.InputStream = bytes?.inputStream()
+            ?: app.contentResolver.openInputStream(local!!) ?: throw java.io.IOException("не открыть фото")
+        val head = open().use { input -> input.readNBytesCompat(256 * 1024) }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        open().use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw java.io.IOException("не удалось прочитать фото")
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > PHOTO_SAVE_SIDE) sample *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inMutable = true
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val bitmap = open().use { BitmapFactory.decodeStream(it, null, options) } ?: throw java.io.IOException("не удалось прочитать фото")
+        return bitmap to head
+    }
+
+    private fun java.io.InputStream.readNBytesCompat(max: Int): ByteArray {
+        val buf = ByteArray(max)
+        var n = 0
+        while (n < max) {
+            val r = read(buf, n, max - n)
+            if (r < 0) break
+            n += r
+        }
+        return buf.copyOf(n)
+    }
     /** A video's whole colour, copied to paste onto other videos (kept across restarts); null: nothing copied. */
     var copiedLook by mutableStateOf(prefs.getString("look_copied", null)?.let(ColorLook::decode))
         private set
@@ -237,6 +333,35 @@ class CameraController(private val app: Application) {
     }
 
     /** Clipping stripes over the video in the viewer (blown whites red, crushed blacks blue), for every video. */
+    /**
+     * The «камера не подключена» bar and the Bluetooth / Wi-Fi / VPN hints, put away with × for working without the
+     * camera: until the app starts again, or until a connection is asked for ([showLinkHints]) — then they matter.
+     */
+    var connectBarHidden by mutableStateOf(false)
+        private set
+    var radioHintsHidden by mutableStateOf(false)
+        private set
+    var vpnHintHidden by mutableStateOf(false)
+        private set
+
+    fun hideConnectBar() {
+        connectBarHidden = true
+    }
+
+    fun hideRadioHints() {
+        radioHintsHidden = true
+    }
+
+    fun hideVpnHint() {
+        vpnHintHidden = true
+    }
+
+    fun showLinkHints() {
+        connectBarHidden = false
+        radioHintsHidden = false
+        vpnHintHidden = false
+    }
+
     /** A check while setting the colour, not a setting: off at start, and off again when the colour panel closes. */
     var clipping by mutableStateOf(false)
         private set
@@ -458,6 +583,7 @@ class CameraController(private val app: Application) {
             snapshotFlow { showsPhone }.drop(1).collect {
                 selected.clear()
                 viewing = null
+                if (it && filter == Filter.CAMERA) filter = Filter.ALL
             }
         }
         scope.launch {
@@ -475,6 +601,7 @@ class CameraController(private val app: Application) {
             while (true) {
                 delay(1_000)
                 tick++
+                if (uiShown && tick % 3 == 0) refreshRadios()
                 val linked = conn == ConnState.Connected || conn == ConnState.Remote
                 if (linked && !recordBusy && !session.hasControl) onControlLost()
                 if (!linked || recordBusy || !session.hasControl) continue
@@ -490,7 +617,7 @@ class CameraController(private val app: Application) {
         }
         PhoneRadios.watch(app) {
             scope.launch {
-                radios = PhoneRadios.check(app)
+                refreshRadios()
                 afterRadios?.let { retry ->
                     afterRadios = null
                     retry() // checks the radios again and waits further if something is still off
@@ -574,12 +701,28 @@ class CameraController(private val app: Application) {
         val v = liveFileWithOriginalClip(file) ?: return@changeCover tr("Не удалось скачать живое фото", "Couldn't download the live photo")
         val frame = withContext(Dispatchers.IO) { LiveCover.frame(app, v, us) }
             ?: return@changeCover tr("Не удалось взять кадр из видео", "Couldn't take the frame from the clip")
-        withContext(Dispatchers.IO) {
-            val photo = LiveCover.jpeg(frame, LiveCover.photoPart(app, v))
-            LiveCover.replacePhoto(app, v, photo, app.cacheDir)
-            showThumb(file, frame)
+        try {
+            val stored = withContext(Dispatchers.IO) { LiveCover.originalPhoto(app, v) }
+            val original = stored ?: if (coverReplaced(file) && !v.originalPhotoTracked) {
+                val cameraFile = files.firstOrNull { it.name == file.name && it.isLivePhoto }
+                if (conn != ConnState.Connected || cameraFile == null) {
+                    return@changeCover tr("Исходное фото уже заменено. Подключите камеру, чтобы сохранить оригинал перед новой заменой.",
+                        "The original photo was already replaced. Connect the camera to preserve it before changing the cover again.")
+                }
+                LivePhoto.head(session.fetchFile(cameraFile.uri), v.length)
+            } else {
+                withContext(Dispatchers.IO) { LiveCover.photoPart(app, v) }
+                    ?: error(tr("не удалось прочитать исходное фото", "couldn't read the original photo"))
+            }
+            withContext(Dispatchers.IO) {
+                val photo = LiveCover.jpeg(frame, original)
+                LiveCover.replacePhoto(app, v, photo, original, coverUs = us)
+                showThumb(file, frame)
+            }
+        } finally {
             frame.recycle()
         }
+        loadPhoneFiles()
         markCover(file, true)
         tr("Обложка заменена кадром из видео", "The cover is now the frame from the clip")
     }
@@ -587,9 +730,23 @@ class CameraController(private val app: Application) {
     /** Back to the camera's own photo as the cover (downloaded again from the camera). */
     fun restoreLiveCover(file: CameraFile) = changeCover(file, tr("Возвращаю исходное фото…", "Restoring the original photo…")) {
         val v = withContext(Dispatchers.IO) { LiveCover.video(app, file.name) }
-            ?: return@changeCover tr("Живого фото нет в галерее", "The live photo isn't in the gallery")
-        val original = session.fetchFile(file.uri)
-        withContext(Dispatchers.IO) { LiveCover.replacePhoto(app, v, original, app.cacheDir) }
+            ?: return@changeCover tr("Скачанного живого фото нет в галерее. При необходимости скачайте его с камеры.",
+                "The downloaded live photo isn't in the gallery. Download it from the camera if needed.")
+        val saved = withContext(Dispatchers.IO) { LiveCover.originalPhoto(app, v) }
+        if (saved == null && v.originalPhotoTracked) {
+            if (coverReplaced(file)) markCover(file, false)
+            return@changeCover tr("Исходное фото уже установлено", "The original photo is already the cover")
+        }
+        val original = saved ?: run {
+            val cameraFile = files.firstOrNull { it.name == file.name && it.isLivePhoto }
+            if (conn != ConnState.Connected || cameraFile == null) {
+                return@changeCover tr("Оригинал не сохранён в этом файле. Подключите камеру, чтобы вернуть исходное фото.",
+                    "This file has no saved original. Connect the camera to restore the original photo.")
+            }
+            LivePhoto.head(session.fetchFile(cameraFile.uri), v.length)
+        }
+        withContext(Dispatchers.IO) { LiveCover.replacePhoto(app, v, original, restore = true) }
+        loadPhoneFiles()
         memCache.remove(file.name)
         File(thumbDir, file.name + ".jpg").delete()
         markCover(file, false)
@@ -597,7 +754,7 @@ class CameraController(private val app: Application) {
     }
 
     private fun changeCover(file: CameraFile, busy: String, work: suspend () -> String) {
-        if (coverBusy != null || isDownloading || conn != ConnState.Connected) return
+        if (coverBusy != null || isDownloading) return
         touch()
         coverBusy = busy
         scope.launch {
@@ -614,14 +771,21 @@ class CameraController(private val app: Application) {
         }
     }
 
-    /** The gallery live photo of [file], downloaded (again) if missing, plain, or holding only the light clip copy. */
+    /** The gallery live photo of [file], downloaded from the camera only if no local motion photo exists. */
     private suspend fun liveFileWithOriginalClip(file: CameraFile): LiveCover.Video? {
-        val clip = liveClipOf(file) ?: return null
         val have = withContext(Dispatchers.IO) { LiveCover.video(app, file.name) }
-        if (have != null && withContext(Dispatchers.IO) { LiveCover.width(app, have) } >= 2000) return have
+        if (have != null) return have
+        val clip = liveClipOf(file)
+        if (conn != ConnState.Connected || clip == null) {
+            return null
+        }
         coverBusy = tr("Скачиваю живое фото…", "Downloading the live photo…")
         session.download(file, overwrite = true, liveVideo = clip) { done, total ->
             scope.launch { coverBusy = tr("Скачиваю живое фото… ", "Downloading the live photo… ") + (if (total > 0) "${done * 100 / total} %" else "") }
+        }
+        if (coverReplaced(file)) {
+            markCover(file, false)
+            forgetThumbnail(file.name)
         }
         downloaded = downloaded + file.name
         coverBusy = tr("Меняю обложку…", "Changing the cover…")
@@ -652,26 +816,27 @@ class CameraController(private val app: Application) {
     val visibleFiles: List<CameraFile> by derivedStateOf {
         when (filter) {
             Filter.ALL -> listedFiles
+            Filter.CAMERA -> cameraFiles(listedFiles, !showsPhone)
             Filter.PHOTO -> listedFiles.filter { it.kind == MediaKind.PHOTO }
             Filter.VIDEO -> listedFiles.filter { it.kind == MediaKind.VIDEO }
             Filter.FAVORITE -> listedFiles.filter { it.name in favorites }
             Filter.ADDED -> listedFiles.filter { it.isAdded }
-            Filter.COLOURED -> listedFiles.filter { it.kind == MediaKind.VIDEO && hasLook(it) }
+            Filter.COLOURED -> listedFiles.filter { (it.kind == MediaKind.VIDEO || canColourPhoto(it)) && hasLook(it) }
             Filter.SAVED -> listedFiles.filter(::isSaved)
         }
     }
 
     /** The filter chips' counts, worked out once per change of the list, favorites or colours (not per tap). */
-    data class FilterCounts(val all: Int, val photos: Int, val videos: Int, val favorites: Int, val added: Int, val coloured: Int, val saved: Int)
+    data class FilterCounts(val all: Int, val camera: Int, val photos: Int, val videos: Int, val favorites: Int, val added: Int, val coloured: Int, val saved: Int)
 
     val filterCounts: FilterCounts by derivedStateOf {
         val l = listedFiles
         val photos = l.count { it.kind == MediaKind.PHOTO }
         FilterCounts(
-            l.size, photos, l.size - photos,
+            l.size, cameraFiles(l, !showsPhone).size, photos, l.size - photos,
             l.count { it.name in favorites },
             l.count { it.isAdded },
-            l.count { it.kind == MediaKind.VIDEO && hasLook(it) },
+            l.count { (it.kind == MediaKind.VIDEO || canColourPhoto(it)) && hasLook(it) },
             l.count(::isSaved),
         )
     }
@@ -1257,7 +1422,7 @@ class CameraController(private val app: Application) {
      * and [retry] runs once it is — no need to press «Подключиться» again.
      */
     private fun radiosReady(needWifi: Boolean, retry: () -> Unit): Boolean {
-        radios = PhoneRadios.check(app)
+        refreshRadios()
         val ok = radios.bluetooth && (radios.wifi || !needWifi)
         afterRadios = if (ok) null else retry
         if (!ok) log("ждём: Bluetooth ${radios.bluetooth}, Wi-Fi ${radios.wifi}")
@@ -1266,6 +1431,12 @@ class CameraController(private val app: Application) {
 
     /** The UI shows the Bluetooth / Wi-Fi prompt only while a connection waits for it. */
     val waitingForRadios: Boolean get() = afterRadios != null && (!radios.bluetooth || !radios.wifi)
+
+    private fun refreshRadios() {
+        val current = PhoneRadios.check(app)
+        if (!radios.vpn && current.vpn) vpnHintHidden = false
+        radios = current
+    }
 
     fun disconnect() {
         if (isLinked) log("отключение от камеры (Wi-Fi и Bluetooth)")
@@ -1926,7 +2097,7 @@ class CameraController(private val app: Application) {
 
     /** Seconds left before the background disconnect, or null when the app is visible / nothing to release. */
     fun backgroundSecondsLeft(): Int? {
-        if (uiShown || !isLinked || isDownloading || capture?.recording == true) return null
+        if (uiShown || !isLinked || isDownloading || isExporting || coverBusy != null || capture?.recording == true) return null
         val since = maxOf(backgroundSince, lastActivity)
         return ((BACKGROUND_GRACE_MS - (SystemClock.elapsedRealtime() - since)) / 1000).toInt().coerceAtLeast(0)
     }
@@ -1934,7 +2105,7 @@ class CameraController(private val app: Application) {
     /** Back in the foreground: reconnect if the background timer dropped the connection. */
     fun onForeground() {
         uiShown = true
-        radios = PhoneRadios.check(app)
+        refreshRadios()
         touch()
         resumeLive()
         // Files deleted in the gallery meanwhile lose their «downloaded» tick.
@@ -1971,7 +2142,7 @@ class CameraController(private val app: Application) {
     }
 
     private fun disconnectIfIdle() {
-        if (!isLinked || isDownloading || keepConnected || recordBusy || (viewing != null && uiShown)) return
+        if (!isLinked || isDownloading || isExporting || coverBusy != null || keepConnected || recordBusy || (viewing != null && uiShown)) return
         if (capture?.recording == true) {
             // Recording: stay connected (the notification's Stop needs it), but in the background stop the live
             // view — the camera's biggest extra drain. Wi-Fi is kept: mid-recording the camera turns its access
@@ -2003,6 +2174,14 @@ class CameraController(private val app: Application) {
     }
 
     // ---------- selection ----------
+
+    fun chooseFilter(value: Filter) {
+        if (value == Filter.CAMERA) {
+            listedFiles.filter { it.isOnPhone }.forEach { selected.remove(it.name) }
+        }
+        filter = value
+        touch()
+    }
 
     fun toggle(file: CameraFile) {
         touch()
@@ -2076,8 +2255,9 @@ class CameraController(private val app: Application) {
     }
 
     /** Photo for the viewer, decoded to about screen size (a 50 MP JPEG must not be decoded in full). */
-    suspend fun previewPhoto(file: CameraFile, maxSide: Int): ImageBitmap? = withContext(Dispatchers.IO) {
+    suspend fun previewPhoto(file: CameraFile, maxSide: Int, software: Boolean = false): ImageBitmap? = withContext(Dispatchers.IO) {
         // A copy on the phone: decoded from there (ImageDecoder also reads RAW .dng where the phone supports it).
+        // [software]: pixels in memory, for the colour's GPU steps (a HARDWARE bitmap can't be uploaded as a texture).
         file.localUri?.let { local ->
             return@withContext runCatching {
                 val source = android.graphics.ImageDecoder.createSource(app.contentResolver, android.net.Uri.parse(local))
@@ -2086,6 +2266,7 @@ class CameraController(private val app: Application) {
                     var sample = 1
                     while (side / (sample * 2) >= maxSide) sample *= 2
                     decoder.setTargetSampleSize(sample)
+                    if (software) decoder.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
                 }.asImageBitmap()
             }.onFailure { log("просмотр ${file.name} с телефона: ${it.message}") }.getOrNull()
         }
@@ -2104,6 +2285,18 @@ class CameraController(private val app: Application) {
 
     /** The last camera photo shown in the viewer, for its EXIF in «i» without fetching it again. */
     private var shownPhoto: Pair<String, ByteArray>? = null
+
+    /** The photo as a software ARGB_8888 bitmap within [PHOTO_STILL_SIDE], for its colour drawn by the GPU. */
+    suspend fun photoStill(file: CameraFile): Bitmap? = withContext(Dispatchers.IO) {
+        val decoded = previewPhoto(file, PHOTO_STILL_SIDE, software = true)?.asAndroidBitmap() ?: return@withContext null
+        val argb = if (decoded.config == Bitmap.Config.ARGB_8888) decoded
+            else decoded.copy(Bitmap.Config.ARGB_8888, false).also { decoded.recycle() }
+        val side = maxOf(argb.width, argb.height)
+        if (side <= PHOTO_STILL_SIDE) argb else {
+            val k = PHOTO_STILL_SIDE.toFloat() / side
+            Bitmap.createScaledBitmap(argb, Math.round(argb.width * k), Math.round(argb.height * k), true).also { argb.recycle() }
+        }
+    }
 
     /**
      * «i» in the viewer: what is known about [file] — name, place, size, date; a photo's EXIF (camera, exposure,
@@ -2165,19 +2358,29 @@ class CameraController(private val app: Application) {
             }
             add("Отметок", "Highlights", highlights(file).size.takeIf { it > 0 })
         } else {
+            val bounds = local?.let { uri ->
+                runCatching {
+                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    val input = app.contentResolver.openInputStream(uri) ?: throw java.io.IOException("не открыть фото")
+                    input.use { BitmapFactory.decodeStream(it, null, options) }
+                    if (options.outWidth > 0 && options.outHeight > 0) options.outWidth to options.outHeight else null
+                }.onFailure { log("размер фото ${file.name}: ${it.message}") }.getOrNull()
+            }
             val exif = runCatching {
                 when {
                     local != null -> app.contentResolver.openInputStream(local)?.use { android.media.ExifInterface(it) }
                     shownPhoto?.first == file.name -> android.media.ExifInterface(java.io.ByteArrayInputStream(shownPhoto!!.second))
                     else -> null
                 }
-            }.getOrNull()
+            }.onFailure { log("EXIF ${file.name}: ${it.message}") }.getOrNull()
             if (exif == null) {
-                if (file.width != null && file.height != null) add("Разрешение", "Resolution", "${file.width} × ${file.height}")
+                val width = bounds?.first ?: file.width
+                val height = bounds?.second ?: file.height
+                if (width != null && height != null) add("Разрешение", "Resolution", "$width × $height")
             } else {
                 fun tag(t: String) = exif.getAttribute(t)
-                val w = tag(android.media.ExifInterface.TAG_IMAGE_WIDTH) ?: tag(android.media.ExifInterface.TAG_PIXEL_X_DIMENSION)
-                val h = tag(android.media.ExifInterface.TAG_IMAGE_LENGTH) ?: tag(android.media.ExifInterface.TAG_PIXEL_Y_DIMENSION)
+                val w = bounds?.first?.toString() ?: tag(android.media.ExifInterface.TAG_IMAGE_WIDTH) ?: tag(android.media.ExifInterface.TAG_PIXEL_X_DIMENSION)
+                val h = bounds?.second?.toString() ?: tag(android.media.ExifInterface.TAG_IMAGE_LENGTH) ?: tag(android.media.ExifInterface.TAG_PIXEL_Y_DIMENSION)
                 if (w != null && h != null) add("Разрешение", "Resolution", "$w × $h")
                 add("Камера", "Camera", listOfNotNull(tag(android.media.ExifInterface.TAG_MAKE), tag(android.media.ExifInterface.TAG_MODEL)).joinToString(" "))
                 add("Снято", "Taken", tag(android.media.ExifInterface.TAG_DATETIME_ORIGINAL))
@@ -2364,7 +2567,7 @@ class CameraController(private val app: Application) {
      */
     suspend fun tileImage(file: CameraFile): ImageBitmap? {
         val base = thumbnail(file) ?: return null
-        if (file.kind != MediaKind.VIDEO) return base
+        if (file.kind != MediaKind.VIDEO && !canColourPhoto(file)) return base
         val key = lookKeys[file.name] ?: return base
         colouredThumbs.get(file.name)?.takeIf { it.first == key }?.let { return it.second }
         val look = ColorLook.decode(key) ?: return base
@@ -2497,11 +2700,17 @@ class CameraController(private val app: Application) {
                     var startedFrom = -1L
                     download = DownloadProgress(file.name, i + 1, queue.size, 0, file.size ?: 0, 0)
                     try {
+                        val resetCover = file.isLivePhoto && coverReplaced(file) &&
+                            (overwrite || withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) == null })
                         session.download(file, overwrite, liveVideo = liveClipOf(file)) { done, total ->
                             if (startedFrom < 0) startedFrom = done
                             val sec = (System.currentTimeMillis() - startedAt) / 1000.0
                             val speed = if (sec > 0.5) ((done - startedFrom) / sec).toLong() else 0L
                             scope.launch { download = DownloadProgress(file.name, i + 1, queue.size, done, total, speed) }
+                        }
+                        if (resetCover) {
+                            markCover(file, false)
+                            forgetThumbnail(file.name)
                         }
                         ok++
                         downloaded = downloaded + file.name
@@ -2732,6 +2941,7 @@ class CameraController(private val app: Application) {
 
     var export by mutableStateOf<ExportProgress?>(null)
         private set
+    val isExporting: Boolean get() = export != null
     private var exportJob: Job? = null
     private var exporter: androidx.media3.transformer.Transformer? = null
 
@@ -2786,6 +2996,7 @@ class CameraController(private val app: Application) {
             message = tr("Чтобы сохранить файл с камеры, подключитесь", "Connect to save a file from the camera")
             return
         }
+        export = ExportProgress(name, 0)
         exportJob = scope.launch {
             val tmp = java.io.File(app.cacheDir, "export.mp4")
             val soundTmp = java.io.File(app.cacheDir, "export.aac")
@@ -2799,7 +3010,6 @@ class CameraController(private val app: Application) {
                     local = withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) }?.toString()
                         ?: error(tr("оригинал не скачался", "the original didn't download"))
                 }
-                export = ExportProgress(name, 0)
                 val camera = if (local == null) session.indexSource(file) else null
                 val source = withContext(Dispatchers.IO) {
                     exportSource(file.size) { ex -> if (camera != null) ex.setDataSource(camera) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) }
@@ -2883,6 +3093,7 @@ class CameraController(private val app: Application) {
                 soundTmp.delete()
                 export = null
                 message = lastResult
+                touch()
             }
         }
     }

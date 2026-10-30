@@ -235,10 +235,28 @@ Ask for each Options type in its own request: a type the camera doesn't answer m
 ### Live photos (LIV)
 
 A live photo is `LIV_….jpg` (the photo) + `LIV_….mp4` (≈3 s: 1.5 s before and after the shot, 3840×2880 H.265,
-~18 MB) + `LIV_….lrv` (1280×960 copy, ~6 MB). The app saves one file in the Android Motion Photo 1.0 format: the
-full-size JPEG with Camera + Container XMP, the MP4 appended. (Huawei Gallery recognises only its own trailer
-`"v3_f…_c" "0:<cover ms>" "LIVE_<n>"`, 20-byte fields at the end; the official app writes that on Huawei phones,
-with the photo scaled down to 1440×1080 and the clip re-encoded.)
+~18 MB) + `LIV_….lrv` (1280×960 copy, ~6 MB). With an LRV, the app verifies identical video sample timestamps and
+muxes two video tracks into the Motion Photo MP4: the LRV first, the original second, plus original audio. Four
+camera pairs checked on 30.10 had all 91 video timestamps identical. The unmodified original MP4, including Insta360
+metadata, is also kept in JPEG padding before the Motion Photo MP4; `GUT:OriginalVideoLength` locates it for
+full-resolution frame extraction. Without an LRV the app stores the original as the sole video instead.
+This is the Motion Photo specification's two-track structure, not MP4-AT. The primary item's XMP `Item:Padding`
+includes camera data after JPEG EOI, the original MP4, and, after a cover change, the original JPEG.
+`GUT:OriginalPhotoLength` locates that JPEG for offline restoration. New files use `_MP.jpg`. Earlier downloads remain
+readable; overwriting adds the preview track when available. Other editors may discard the padding, so keep a copy.
+Huawei and Poco galleries on the tested phones do not recognize the plain Google-format file as a live photo.
+
+#### Huawei Gallery trailer (*verified 30.10 on Mate 80 Pro, EMUI 15*)
+
+Native Huawei live photos (`IMG_….jpg` from com.huawei.camera) carry **no Motion Photo XMP**: JPEG (APP1 Exif, ICC,
+HUAWEI APPn segments) + appended MP4 (hvc1 1920×1440 + AAC, moov before mdat) + a Huawei timestamp table + four
+20-byte fields at the very end: `[16 zero bytes + u32 = table size − 60]` `"v3_f44_c"` (or `v3_f42_c`)
+`"<cover ms>:600"` `"LIVE_<n>"`, where n covers the MP4 plus the first two fields (video start = size − n − 40).
+Huawei's MediaStore parses the trailer and sets `special_file_type` (1050 for camera-owned files, **50 for ours**),
+`livephoto_video_status=1`, `special_file_offset=n`. The app appends this trailer (zeros instead of the timestamp
+table) when saving a live photo on a HUAWEI device; the Google XMP stays, and the video is located via the trailer.
+Poco (MIUI 14) galleries do not support third-party live photos per Xiaomi's SDK documentation, so no trailer is
+written there.
 
 ### During a recording (*verified* 27.10)
 

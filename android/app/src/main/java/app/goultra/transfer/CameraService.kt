@@ -108,11 +108,11 @@ class CameraService : Service() {
                     }
                 }
                 snapshotFlow {
-                    listOf(controller.download, controller.conn, controller.inBackground, controller.capture?.recording)
+                    listOf(controller.download, controller.export, controller.conn, controller.inBackground, controller.capture?.recording)
                 }.collect {
                     // Kept through a reconnect (the recording notification must not blink away meanwhile).
                     val idle = !controller.isLinked && controller.conn !is ConnState.Working
-                    if (controller.download == null && idle && !controller.isDownloading) {
+                    if (controller.download == null && idle && !controller.isDownloading && !controller.isExporting) {
                         finish(controller.takeDownloadResult())
                     } else {
                         refresh(force = false)
@@ -125,7 +125,7 @@ class CameraService : Service() {
 
     private fun refresh(force: Boolean) {
         val p = cameraController.download
-        val key = p?.name ?: "connected:${cameraController.inBackground}:${cameraController.capture?.recording}"
+        val key = p?.name ?: cameraController.export?.name ?: "connected:${cameraController.inBackground}:${cameraController.capture?.recording}"
         val now = System.currentTimeMillis()
         if (!force && now - lastUpdate < 700 && key == lastKey) return
         lastUpdate = now
@@ -153,7 +153,8 @@ class CameraService : Service() {
     private fun buildNotification(): Notification {
         val controller = cameraController
         val p: DownloadProgress? = controller.download
-        val recording = p == null && !controller.isDownloading && controller.capture?.recording == true
+        val export = controller.export
+        val recording = p == null && !controller.isDownloading && export == null && controller.capture?.recording == true
         val builder = NotificationCompat.Builder(this, if (recording) CHANNEL_RECORDING else CHANNEL)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -164,6 +165,12 @@ class CameraService : Service() {
                 .setContentTitle(if (p == null) tr("Подготовка к скачиванию…", "Preparing download…") else tr("Скачивание ${p.index} из ${p.count}", "Downloading ${p.index} of ${p.count}"))
                 .setContentText(p?.let { "${it.name} · ${it.details()}" })
                 .setProgress(100, percent, p == null || p.total <= 0)
+                .addAction(0, tr("Стоп", "Stop"), serviceIntent(ACTION_CANCEL, 1))
+        } else if (export != null) {
+            builder.setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle(tr("Сохранение видео", "Saving video"))
+                .setContentText(export.name)
+                .setProgress(100, export.percent.coerceIn(0, 100), false)
                 .addAction(0, tr("Стоп", "Stop"), serviceIntent(ACTION_CANCEL, 1))
         } else if (controller.capture?.recording == true) {
             // The chronometer counts by itself from the recording's start; Stop works from the lock screen.
