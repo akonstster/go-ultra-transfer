@@ -186,6 +186,18 @@ fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostSta
 @Composable
 private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, onClose: () -> Unit, onLock: (Boolean) -> Unit) {
     val context = LocalContext.current
+    val addedFileAvailable by produceState<Boolean?>(if (!file.isAdded) true else null, file.uri, file.localUri) {
+        if (file.isAdded) {
+            value = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openFileDescriptor(
+                        android.net.Uri.parse(file.localUri),
+                        "r",
+                    )?.use { true } ?: false
+                }.getOrDefault(false)
+            }
+        }
+    }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         val clip = vm.liveClipOf(file)
         val localState by key(file.name, vm.coverVersion) {
@@ -241,6 +253,15 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         var colouring by remember(file.uri) { mutableStateOf(false) }
         if (info && photoReady) FileInfo(vm, if (file.isLivePhoto || localLive != null) photo else file) { info = false }
         when {
+            file.isAdded && addedFileAvailable == false -> MissingAddedFile(
+                fileName = file.name,
+                onRemove = { vm.removeAdded(listOf(file)); onClose() },
+                onClose = onClose,
+            )
+            file.isAdded && addedFileAvailable == null -> CircularProgressIndicator(
+                color = Color.White,
+                modifier = Modifier.align(Alignment.Center),
+            )
             isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
@@ -387,6 +408,24 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         }
         if (choose) SaveDialog(vm, file, pieces, onDismiss = { choose = false }, onStarted = { choose = false; onClose() })
         if (choosePhoto) PhotoSaveDialog(vm, file, photo, onDismiss = { choosePhoto = false }, onStarted = { choosePhoto = false; onClose() })
+    }
+}
+
+@Composable
+private fun MissingAddedFile(fileName: String, onRemove: () -> Unit, onClose: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            tr("Файл «$fileName» недоступен или удалён.", "File “$fileName” is unavailable or was deleted."),
+            color = Color.White,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(onRemove) { Text(tr("Убрать из списка", "Remove from list")) }
+        OutlinedButton(onClose) { Text(tr("Назад", "Back"), color = Color.White) }
     }
 }
 
@@ -1210,6 +1249,8 @@ private fun ColorPanel(
                     { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
                 } else null,
             )
+            Spacer(Modifier.weight(1f))
+            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (filmTab) {
@@ -1222,7 +1263,6 @@ private fun ColorPanel(
                 Spacer(Modifier.width(10.dp))
                 Text(tr("Пересвет и провалы", "Clipping"), color = Color.White, fontSize = 13.sp)
                 Text(tr("  красным / синим", "  red / blue"), color = Color(0x99FFFFFF), fontSize = 12.sp, modifier = Modifier.weight(1f))
-                if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
             }
             if (failed) {
                 Text(
@@ -1289,10 +1329,17 @@ private fun ColourActions(
  * ([PhotoSteps]), so the sliders show at once; the look is kept per file name, as with videos.
  */
 @Composable
+@kotlin.OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun PhotoColourEditor(vm: CameraController, file: CameraFile, onLock: (Boolean) -> Unit, onDone: () -> Unit) {
     var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
     val look = saved ?: ColorLook()
     var bypass by remember(file.uri) { mutableStateOf(false) }
+    var zoom by remember(file.uri) { mutableFloatStateOf(1f) }
+    var shift by remember(file.uri) { mutableStateOf(Offset.Zero) }
+    val photoZoom = rememberTransformableState { zoomChange, pan, _ ->
+        zoom = (zoom * zoomChange).coerceIn(1f, 6f)
+        shift = if (zoom == 1f) Offset.Zero else shift + pan
+    }
     var failed by remember(file.uri) { mutableStateOf(false) }
     val still by produceState<android.graphics.Bitmap?>(null, file.uri, file.localUri, vm.coverVersion) {
         value = vm.photoStill(file)
@@ -1313,7 +1360,10 @@ private fun PhotoColourEditor(vm: CameraController, file: CameraFile, onLock: (B
             val frame = still
             when {
                 frame != null && steps != null -> key(frame) {
-                    StillFrame(frame, steps.steps, 0, 1f, Offset.Zero, Modifier.fillMaxSize())
+                    StillFrame(frame, steps.steps, 0, zoom, shift, Modifier.fillMaxSize())
+                    Box(
+                        Modifier.fillMaxSize().transformable(photoZoom, canPan = { zoom > 1f }),
+                    )
                 }
                 failed -> Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White, modifier = Modifier.align(Alignment.Center))
                 else -> CircularProgressIndicator(color = Color.White, modifier = Modifier.align(Alignment.Center))
