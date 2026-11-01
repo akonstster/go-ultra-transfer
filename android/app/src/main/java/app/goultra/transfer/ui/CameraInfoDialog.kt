@@ -64,7 +64,7 @@ fun CameraInfoDialog(vm: CameraController, onDismiss: () -> Unit) {
             if (live || conn is ConnState.Working) {
                 TextButton({ vm.disconnect() }) { Text(tr("Отключить", "Disconnect")) }
             } else {
-                TextButton({ vm.connect() }) { Text(tr("Подключить", "Connect")) }
+                TextButton({ vm.showLinkHints(); vm.connect() }) { Text(tr("Подключить", "Connect")) }
             }
         },
         dismissButton = { TextButton(onDismiss) { Text(tr("Закрыть", "Close")) } },

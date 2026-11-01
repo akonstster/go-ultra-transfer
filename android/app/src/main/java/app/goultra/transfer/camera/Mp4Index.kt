@@ -32,9 +32,26 @@ class KeyFrames(val ms: List<Long>, val bFrames: Boolean) {
  * elst = where the presentation starts (applied as the platform extractor does).
  */
 object Mp4Index {
-    /** [read] (position, length) → bytes of a file [size] bytes long; null when it has no index or no video track. */
-    fun keyFrames(size: Long, read: (Long, Int) -> ByteArray): KeyFrames? {
-        // Top-level boxes: the media data is skipped by its size, only the index is read.
+    /**
+     * The video track's average frame rate: its frames over their total duration (stts), as players and ffprobe
+     * give it — from the index alone, right whatever the order the frames are stored in (B-frames). Null without an
+     * index or a video track.
+     */
+    fun frameRate(size: Long, read: (Long, Int) -> ByteArray): Double? {
+        val (timescale, stbl) = videoTrack(size, read) ?: return null
+        val stts = child(stbl, "stts") ?: return null
+        var frames = 0L
+        var duration = 0L
+        for (e in 0 until be32(stts, 4).toInt()) {
+            val count = be32(stts, 8 + e * 8)
+            frames += count
+            duration += count * be32(stts, 12 + e * 8)
+        }
+        return if (frames > 0 && duration > 0) frames * timescale.toDouble() / duration else null
+    }
+
+    /** The video track's timescale and sample table (with its trak), from the index; null without one. */
+    private fun videoTrack(size: Long, read: (Long, Int) -> ByteArray): Triple<Long, ByteArray, ByteArray>? {
         var pos = 0L
         var moov: ByteArray? = null
         while (pos + 8 <= size) {
@@ -59,13 +76,20 @@ object Mp4Index {
             val timescale = if (mdhd[0].toInt() == 1) be32(mdhd, 20) else be32(mdhd, 12)
             if (timescale <= 0) return null
             val stbl = child(mdia, "minf")?.let { child(it, "stbl") } ?: return null
-            val stts = child(stbl, "stts") ?: return null
-            val stss = child(stbl, "stss") ?: return KeyFrames(emptyList(), false) // every frame is a key frame
-            val ctts = child(stbl, "ctts")
-            val shift = child(trak, "edts")?.let { child(it, "elst") }?.let(::mediaStart) ?: 0L
-            return KeyFrames(times(stts, stss, ctts, shift).map { t -> ceilMs(t, timescale) }, hasOffsets(ctts))
+            return Triple(timescale, stbl, trak)
         }
         return null
+    }
+
+    /** [read] (position, length) → bytes of a file [size] bytes long; null when it has no index or no video track. */
+    fun keyFrames(size: Long, read: (Long, Int) -> ByteArray): KeyFrames? {
+        // Top-level boxes: the media data is skipped by its size, only the index is read.
+        val (timescale, stbl, trak) = videoTrack(size, read) ?: return null
+        val stts = child(stbl, "stts") ?: return null
+        val stss = child(stbl, "stss") ?: return KeyFrames(emptyList(), false) // every frame is a key frame
+        val ctts = child(stbl, "ctts")
+        val shift = child(trak, "edts")?.let { child(it, "elst") }?.let(::mediaStart) ?: 0L
+        return KeyFrames(times(stts, stss, ctts, shift).map { t -> ceilMs(t, timescale) }, hasOffsets(ctts))
     }
 
     /** Display time (track timescale) of each key frame. */

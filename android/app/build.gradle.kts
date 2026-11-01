@@ -1,7 +1,23 @@
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+abstract class GenerateBuildInfo : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val directory = outputDir.get().asFile
+        directory.mkdirs()
+        directory.resolve("build-info.txt").writeText(System.currentTimeMillis().toString())
+    }
 }
 
 android {
@@ -12,8 +28,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.12"
+        versionCode = 13
+        versionName = "0.13"
     }
 
     buildTypes {
@@ -35,6 +51,17 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        val task = tasks.register<GenerateBuildInfo>("generate${variant.name.replaceFirstChar { it.uppercase() }}BuildInfo") {
+            outputDir.set(layout.buildDirectory.dir("generated/build-info/${variant.name}"))
+            outputs.upToDateWhen { false }
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(task, GenerateBuildInfo::outputDir)
     }
 }
 

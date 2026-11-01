@@ -109,7 +109,7 @@ class MainActivity : ComponentActivity() {
                     OnboardingScreen(
                         controller = controller,
                         hasPermissions = hasPermissions,
-                        onStart = { withPermissions(controller::runSetup) },
+                        onStart = { controller.showLinkHints(); withPermissions(controller::runSetup) },
                         onShareLog = shareLog,
                     )
                 } else {
