@@ -28,8 +28,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.13"
+        versionCode = 14
+        versionName = "0.14"
     }
 
     buildTypes {
