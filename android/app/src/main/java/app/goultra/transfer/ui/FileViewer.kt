@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
@@ -48,6 +50,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -224,11 +229,16 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         val hasLive = clip != null || localLive != null
         // Colour on photos: panel and the decoded photo with the look (viewing only; the file stays as shot).
         var photoColouring by remember(file.uri) { mutableStateOf(false) }
-        LaunchedEffect(active, vm.inBackground, localState.first, hasLive, editingLive, photoColouring, vm.coverBusy) {
-            if (autoplay.update(active, !vm.inBackground, localState.first && hasLive && vm.coverBusy == null, editingLive || photoColouring)) {
+        // Full screen (the button at the bottom): the top bar and the chips hide. A landscape file is turned 90° there,
+        // since the app is locked to portrait; a portrait one stays as it is.
+        var full by remember(file.uri) { mutableStateOf(false) }
+        var videoOverlay by remember(file.uri) { mutableStateOf(false) } // a video panel (timeline / film strip) is open
+        val landscapeFile = isLandscape(file.width, file.height)
+        LaunchedEffect(active, vm.inBackground, localState.first, hasLive, editingLive, photoColouring, full, vm.coverBusy) {
+            if (!full && autoplay.update(active, !vm.inBackground, localState.first && hasLive && vm.coverBusy == null, editingLive || photoColouring || full)) {
                 playingLive = true
             }
-            if (!active || vm.inBackground || editingLive || photoColouring || vm.coverBusy != null) playingLive = false
+            if (!active || vm.inBackground || editingLive || photoColouring || full || vm.coverBusy != null) playingLive = false
         }
         // Video: the pieces to play, show in the film strip and download — the camera's marks as its film strip
         // shows them (2 s pieces, nearby ones merged), or the pieces as edited on the phone.
@@ -253,6 +263,17 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         var info by remember(file.uri) { mutableStateOf(false) }
         // Setting the colour: only the video and the panel — the top bar and the ♥ / «i» / share column hide.
         var colouring by remember(file.uri) { mutableStateOf(false) }
+        // Full screen: the system bars hide (as the sideways live preview does) and Back leaves it before the viewer.
+        val view = LocalView.current
+        DisposableEffect(full) {
+            if (!full) return@DisposableEffect onDispose {}
+            val window = (view.context as? android.app.Activity)?.window
+            val bars = window?.let { w -> androidx.core.view.WindowCompat.getInsetsController(w, view) }
+            bars?.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            bars?.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            onDispose { bars?.show(androidx.core.view.WindowInsetsCompat.Type.systemBars()) }
+        }
+        BackHandler(enabled = full) { full = false }
         // The top bar's real height (a large system font makes it taller): the chips under it start below it.
         val density = LocalDensity.current
         var topBar by remember { mutableStateOf(52.dp) }
@@ -281,7 +302,10 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 color = Color.White,
                 modifier = Modifier.align(Alignment.Center),
             )
-            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }, topBar, saveButton) { ms ->
+            isVideo -> VideoPreview(
+                vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }, topBar, saveButton,
+                full = full, landscapeFile = landscapeFile, onOverlay = { videoOverlay = it },
+            ) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
@@ -290,7 +314,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             photoColouring && photoReady -> PhotoColourEditor(vm, photo, onLock) { photoColouring = false }
             else -> {
                 val livePlays = hasLive && playingLive && active && !vm.inBackground
-                if (photoReady) PhotoPreview(vm, photo, coloured = !livePlays)
+                if (photoReady) PhotoPreview(vm, photo, coloured = !livePlays, full = full, landscapeFile = landscapeFile)
                 if (livePlays) {
                     LivePhotoPlayback(
                         vm, photo, clip, localLive,
@@ -301,7 +325,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             }
         }
         // Live photo: its clip, where a frame can become the cover; and the way back to the camera's photo.
-        if (hasLive && !editingLive && !photoColouring && vm.coverBusy == null) {
+        if (hasLive && !editingLive && !photoColouring && !full && vm.coverBusy == null) {
             Column(
                 Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -318,14 +342,14 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 Button({ autoplay.suppress(); livePlaybackError = null; playingLive = true }, enabled = localState.first && !playingLive) {
                     Text(tr("▶ Повторить", "▶ Replay"))
                 }
-                if (localLive == null || localLive.ownXmp) {
+                if (localLive == null || (localLive.ownXmp && localLive.writable)) {
                     OutlinedButton({ autoplay.suppress(); playingLive = false; editingLive = true }, enabled = localState.first) {
                         Text(tr("Выбрать обложку", "Pick cover"), color = Color.White)
                     }
                 }
                 if (canRestoreLiveCover(localLive != null, localLive?.originalSize ?: 0L,
                         localLive?.originalPhotoTracked == true, vm.coverReplaced(file)) &&
-                    (localLive == null || localLive.ownXmp)) {
+                    (localLive == null || (localLive.ownXmp && localLive.writable))) {
                     OutlinedButton({ vm.restoreLiveCover(file) }) { Text(tr("Вернуть исходное фото", "Back to the original photo"), color = Color.White) }
                 }
             }
@@ -340,7 +364,22 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 Text(busy, color = Color.White, modifier = Modifier.padding(top = 12.dp))
             }
         }
-        if (!colouring && !photoColouring) Row(
+        // Full screen: a bottom-left button (out of the way of the live photo's buttons and the ♥ column). It hides
+        // while a video panel is open, the colour panel shows or the live photo's own buttons are there — it would sit on them.
+        if (!colouring && !photoColouring && !editingLive && !videoOverlay && vm.coverBusy == null) {
+            IconButton(
+                { full = !full },
+                Modifier.align(Alignment.BottomStart).safeDrawingPadding().padding(start = 8.dp, bottom = 12.dp)
+                    .background(Color(0x66000000), CircleShape),
+            ) {
+                Icon(
+                    if (full) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                    tr("На весь экран", "Full screen"),
+                    tint = Color.White,
+                )
+            }
+        }
+        if (!colouring && !photoColouring && !full) Row(
             Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
                 .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)
                 .onSizeChanged { topBar = with(density) { it.height.toDp() } },
@@ -366,7 +405,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             }
         }
         // A photo's chips and its «Сохранить» / «Скачать» (a video has its own row, with the same button).
-        if (!colouring && !photoColouring && !isVideo) FlowRow(
+        if (!colouring && !photoColouring && !isVideo && !full) FlowRow(
             Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = topBar + 8.dp, start = 12.dp, end = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -388,7 +427,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             saveButton?.invoke()
         }
         // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
-        if (!colouring && !photoColouring) Column(
+        if (!colouring && !photoColouring && !full) Column(
             Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -687,6 +726,9 @@ private fun VideoPreview(
     onColouring: (Boolean) -> Unit,
     topBar: androidx.compose.ui.unit.Dp,
     saveButton: (@Composable () -> Unit)?,
+    full: Boolean,
+    landscapeFile: Boolean?,
+    onOverlay: (Boolean) -> Unit,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -736,6 +778,8 @@ private fun VideoPreview(
     val bypassNow by rememberUpdatedState(bypass)
     var paused by remember(file.uri) { mutableStateOf(!active) }
     var sourceLines by remember(file.uri) { mutableIntStateOf(knownLines ?: 0) } // the video's short side
+    // Whether the frame is wider than tall; only needed when the file's own size is missing (the player reports it).
+    var videoLandscape by remember(file.uri) { mutableStateOf<Boolean?>(null) }
     var seeks by remember(file.uri) { mutableIntStateOf(0) } // jumps of the position: a paused still is taken again
     val previewLines = PLAY_SIZES[level].takeIf { sourceLines > it }
     val light = !paused && level == PLAY_SIZES.lastIndex
@@ -752,7 +796,7 @@ private fun VideoPreview(
     }
     val player = remember(file.uri, effects) {
         ExoPlayer.Builder(context).build().apply {
-            if (effects) setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines))
+            if (effects) setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines, 0))
             addListener(object : Player.Listener {
                 override fun onRenderedFirstFrame() { firstFrame[0] = true }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { paused = !playWhenReady }
@@ -761,7 +805,10 @@ private fun VideoPreview(
                     if (!playWhenReady) seeks++
                 }
                 override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                    if (videoSize.width > 0 && videoSize.height > 0) sourceLines = minOf(videoSize.width, videoSize.height)
+                    if (videoSize.width > 0 && videoSize.height > 0) {
+                        sourceLines = minOf(videoSize.width, videoSize.height)
+                        videoLandscape = videoSize.width > videoSize.height
+                    }
                 }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     vm.log("плеер ${file.name}: ${error.errorCodeName} ${error.message ?: ""} ${error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: ""}")
@@ -783,7 +830,7 @@ private fun VideoPreview(
     }
     // False once the player is released (the page swiped away, the viewer closed): late callers leave it alone.
     val alive = remember(player) { booleanArrayOf(true) }
-    DisposableEffect(player) { onDispose { alive[0] = false; player.release(); vm.closeTimeline() } }
+    DisposableEffect(player) { onDispose { alive[0] = false; player.release(); vm.closeTimeline(); onOverlay(false) } }
     // Paused, the player draws no new frame — not even after a seek to the same spot (tried; many seeks of a 4K video
     // hung the viewer). When its view is made anew (the panel opened / closed) or its effects are rebuilt, it plays
     // without sound until one new frame is drawn (at most 0.4 s) and pauses again. Colour changes while paused show on
@@ -807,16 +854,20 @@ private fun VideoPreview(
             }
         }
     }
+    // Full screen: a landscape video is turned 90° (the app is locked to portrait), a portrait one is left alone. The
+    // player's own effect does it, so the SurfaceView, its layers and the zoom stay as they are.
+    val rotation = if (full && (landscapeFile ?: videoLandscape ?: false)) 90 else 0
+    val rotationNow by rememberUpdatedState(rotation) // the gesture block is set up once — read it live there
     // The LUT, the stripes or the preview size changed: the effects again (not right after the player got them at its
     // start). After an error the player starts again with them.
     // Only the preview size rebuilds the effects (a phone that can't keep up); everything else — the LUT on / off and
     // its strength, the stripes, before / after — is read by the effects on every frame.
-    val applied = remember(player) { arrayOf<Any>(listOf(previewLines, level)) }
-    LaunchedEffect(player, previewLines, level) {
-        val now = listOf(previewLines, level)
+    val applied = remember(player) { arrayOf<Any>(listOf(previewLines, level, rotation)) }
+    LaunchedEffect(player, previewLines, level, rotation) {
+        val now = listOf(previewLines, level, rotation)
         if (effects && now != applied[0]) {
             applied[0] = now
-            player.setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines))
+            player.setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines, rotation))
             if (player.playerError != null) player.prepare() else redraw++
         }
     }
@@ -916,6 +967,8 @@ private fun VideoPreview(
     val stillSteps = remember(player) { listOfNotNull<ColorStep>(liveLut, matrix, sharpen, filmLook, stripes) }
     // No swiping to the next file while the timeline or the colour sliders own the gestures.
     LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
+    // A video panel open (timeline or film strip): the viewer hides the full-screen button, which would sit on it.
+    LaunchedEffect(film, editing) { onOverlay(film || editing) }
     LaunchedEffect(colouring) {
         onColouring(colouring)
         // The panel closed: the before / after and the clipping stripes were checks while setting it — both off.
@@ -1014,12 +1067,12 @@ private fun VideoPreview(
                         val fingers = event.changes.count { it.pressed }
                         if (fingers >= 2) {
                             zoom = (zoom * event.calculateZoom()).coerceIn(1f, 5f)
-                            shift = clampShift(shift + event.calculatePan(), zoom, size.width.toFloat(), size.height.toFloat(), player.videoSize)
+                            shift = clampShift(shift + event.calculatePan(), zoom, size.width.toFloat(), size.height.toFloat(), player.videoSize, rotationNow != 0)
                             event.changes.forEach { it.consume() }
                         } else if (fingers == 1 && zoom > 1f) {
                             val pan = event.calculatePan()
                             if (pan != Offset.Zero) {
-                                shift = clampShift(shift + pan, zoom, size.width.toFloat(), size.height.toFloat(), player.videoSize)
+                                shift = clampShift(shift + pan, zoom, size.width.toFloat(), size.height.toFloat(), player.videoSize, rotationNow != 0)
                                 event.changes.forEach { it.consume() }
                             }
                         }
@@ -1069,7 +1122,7 @@ private fun VideoPreview(
                 }
             }
             // The phone couldn't keep up: playing shows a lighter preview (a paused frame is in full).
-            if (effects && level > 0 && !paused) {
+            if (effects && level > 0 && !paused && !full) {
                 Text(
                     tr("упрощённо", "simplified") + " · ${PLAY_SIZES[level]}p",
                     color = Color.White,
@@ -1088,7 +1141,7 @@ private fun VideoPreview(
                 onDone = { colorPanel = false },
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
             )
-            if (!colouring) FlowRow(
+            if (!colouring && !full) FlowRow(
                 Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = topBar + 8.dp, start = 12.dp, end = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1200,6 +1253,7 @@ private fun colorEffects(
     film: FilmLook,
     stripes: ClippingStripes,
     previewLines: Int?,
+    rotationDegrees: Int,
 ): List<androidx.media3.common.Effect> {
     val out = mutableListOf<androidx.media3.common.Effect>()
     if (previewLines != null) out += androidx.media3.effect.Presentation.createForHeight(previewLines)
@@ -1208,6 +1262,11 @@ private fun colorEffects(
     out += sharpen
     out += film
     out += stripes
+    // Full screen: the landscape frame turned upright (the app is locked to portrait). The picture itself is rotated,
+    // so the SurfaceView, its layers and the zoom are left as they are.
+    if (rotationDegrees != 0) {
+        out += androidx.media3.effect.ScaleAndRotateTransformation.Builder().setRotationDegrees(rotationDegrees.toFloat()).build()
+    }
     return out
 }
 
@@ -1226,6 +1285,9 @@ private fun videoShortSide(context: android.content.Context, uri: String?): Int 
         r.release()
     }
 }
+
+/** Whether a picture is wider than tall (for the full-screen turn); null when its size is unknown. */
+internal fun isLandscape(w: Int?, h: Int?): Boolean? = if (w != null && h != null && w > 0 && h > 0) w > h else null
 
 /** Preview sizes (lines), from the first choice to the lightest. */
 private val PLAY_SIZES = intArrayOf(1080, 720, 540)
@@ -1528,8 +1590,10 @@ private fun LookSlider(
  * A zoomed picture may move only as far as its edges reach the frame's. The picture is fitted into the [w]×[h] box
  * (black bars on two sides), so the room to move comes from its shown size, not the box's.
  */
-private fun clampShift(shift: Offset, zoom: Float, w: Float, h: Float, video: androidx.media3.common.VideoSize): Offset {
-    val aspect = if (video.width > 0 && video.height > 0) video.width * video.pixelWidthHeightRatio / video.height else w / h
+private fun clampShift(shift: Offset, zoom: Float, w: Float, h: Float, video: androidx.media3.common.VideoSize, rotated: Boolean): Offset {
+    val source = if (video.width > 0 && video.height > 0) video.width * video.pixelWidthHeightRatio / video.height else w / h
+    // Full screen turns the picture 90°: on screen its width is the source's height and the other way round.
+    val aspect = if (rotated) 1f / source else source
     val (shownW, shownH) = if (aspect > w / h) w to w / aspect else h * aspect to h
     val maxX = maxOf(0f, (zoom * shownW - w) / 2)
     val maxY = maxOf(0f, (zoom * shownH - h) / 2)
@@ -2035,7 +2099,7 @@ private fun FramePicker(vm: CameraController, photo: CameraFile, clip: CameraFil
  */
 @kotlin.OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class) // transformable(canPan)
 @Composable
-private fun PhotoPreview(vm: CameraController, file: CameraFile, coloured: Boolean) {
+private fun PhotoPreview(vm: CameraController, file: CameraFile, coloured: Boolean, full: Boolean, landscapeFile: Boolean?) {
     val config = LocalConfiguration.current
     val maxSide = with(LocalDensity.current) { (maxOf(config.screenWidthDp, config.screenHeightDp).dp.toPx() * 1.5f).toInt() }
     // Reloaded after a cover change (the photo is then the chosen frame).
@@ -2065,39 +2129,63 @@ private fun PhotoPreview(vm: CameraController, file: CameraFile, coloured: Boole
         }
         // One finger moves the photo only when zoomed in; otherwise the swipe goes to the next file.
         .transformable(zoom, canPan = { scale > 1f })
+    // Full screen: a landscape photo is turned 90° (the app is locked to portrait); a portrait one is left alone.
+    val rotate = full && (landscapeFile ?: image?.let { it.width > it.height } ?: false)
+    val bmp = image
+    val frame = still
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        val bmp = image
-        val frame = still
-        if (look != null && frame != null && steps != null) {
-            key(frame) { StillFrame(frame, steps.steps, 0, scale, offset, Modifier.fillMaxSize()) }
-            Box(gestures)
-        } else if (bmp == null && failed) {
-            // E.g. a RAW .dng the phone can't decode here: offer the phone's own apps.
-            val context = LocalContext.current
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
-                Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White)
-                file.localUri?.let { uri ->
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedButton({
-                        runCatching {
-                            context.startActivity(
-                                android.content.Intent(android.content.Intent.ACTION_VIEW)
-                                    .setDataAndType(android.net.Uri.parse(uri), Downloader.mimeType(file.name))
-                                    .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                            )
-                        }
-                    }) { Text(tr("Открыть в другом приложении", "Open in another app"), color = Color.White) }
+        when {
+            // Drawn by the player's own steps (a photo with a colour of its own): a SurfaceView can't be turned by the
+            // layout, so it is turned inside its GL view. A new view on the turn (the renderer is bound once).
+            look != null && frame != null && steps != null -> {
+                key(frame, rotate) {
+                    StillFrame(frame, steps.steps, 0, scale, offset, Modifier.fillMaxSize(), if (rotate) 90 else 0)
+                }
+                Box(gestures)
+            }
+            bmp == null && failed -> {
+                // E.g. a RAW .dng the phone can't decode here: offer the phone's own apps.
+                val context = LocalContext.current
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+                    Text(tr("Не удалось показать файл", "Couldn't show the file"), color = Color.White)
+                    file.localUri?.let { uri ->
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedButton({
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent(android.content.Intent.ACTION_VIEW)
+                                        .setDataAndType(android.net.Uri.parse(uri), Downloader.mimeType(file.name))
+                                        .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                                )
+                            }
+                        }) { Text(tr("Открыть в другом приложении", "Open in another app"), color = Color.White) }
+                    }
                 }
             }
-        } else if (bmp == null) {
-            CircularProgressIndicator(color = Color.White)
-        } else {
-            Image(
-                bmp,
-                file.name,
-                contentScale = ContentScale.Fit,
-                modifier = gestures.graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
-            )
+            bmp == null -> CircularProgressIndicator(color = Color.White)
+            else -> {
+                val photo: @Composable () -> Unit = {
+                    Image(
+                        bmp,
+                        file.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = gestures.graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
+                    )
+                }
+                if (rotate) {
+                    // Laid out as if landscape, then turned to fill the portrait screen (as the sideways live preview does).
+                    Box(
+                        Modifier.fillMaxSize()
+                            .layout { measurable, c ->
+                                val p = measurable.measure(Constraints.fixed(c.maxHeight, c.maxWidth))
+                                layout(c.maxWidth, c.maxHeight) { p.place((c.maxWidth - p.width) / 2, (c.maxHeight - p.height) / 2) }
+                            }
+                            .graphicsLayer { rotationZ = -90f },
+                    ) { photo() }
+                } else {
+                    photo()
+                }
+            }
         }
     }
 }

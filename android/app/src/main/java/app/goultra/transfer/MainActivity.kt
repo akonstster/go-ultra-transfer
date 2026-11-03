@@ -97,6 +97,17 @@ class MainActivity : ComponentActivity() {
                         permissions.launch(requestedPermissions())
                     }
                 }
+                // Ask once for the gallery (to see a copy saved by an earlier install, not only this install's items).
+                val galleryPermission = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions(),
+                ) {}
+                LaunchedEffect(Unit) {
+                    val asked = getSharedPreferences("gallery", 0)
+                    if (!hasGalleryAccess() && !asked.getBoolean("asked", false)) {
+                        asked.edit().putBoolean("asked", true).apply()
+                        galleryPermission.launch(galleryPermissions())
+                    }
+                }
 
                 val shareLog = {
                     val send = Intent(Intent.ACTION_SEND)

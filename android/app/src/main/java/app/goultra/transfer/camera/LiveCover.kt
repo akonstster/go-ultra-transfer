@@ -39,7 +39,8 @@ object LiveCover {
                     throw IOException("неверный размер исходного фото или видео")
                 Video(item, range.first, range.second, size, originalSize, originalVideoSize,
                     LivePhoto.hasOriginalPhotoLength(text), hasHuaweiTrailer = hasTrailer,
-                    ownXmp = text.contains("x:xmptk=\"GO Ultra Transfer\""))
+                    ownXmp = text.contains("x:xmptk=\"GO Ultra Transfer\""),
+                    writable = canWrite(resolver, item))
             }
         }
     }
@@ -52,9 +53,19 @@ object LiveCover {
         val hasHuaweiTrailer: Boolean = false,
         /** Written by this app (its XMP): the cover can be replaced in place. Native/added live photos can't. */
         val ownXmp: Boolean = true,
+        /** This install may write it: a file saved by an earlier install belongs to another UID, read-only for us. */
+        val writable: Boolean = true,
     ) {
         val fullVideoStart: Long get() = if (originalVideoSize > 0) start - originalVideoSize else start
         val fullVideoLength: Long get() = if (originalVideoSize > 0) originalVideoSize else length
+    }
+
+    /** Whether this app may modify the gallery item (its own file); another install's file can be read but not written. */
+    private fun canWrite(resolver: android.content.ContentResolver, item: Uri): Boolean = try {
+        resolver.openFileDescriptor(item, "rw")?.close()
+        true
+    } catch (e: Exception) {
+        false
     }
 
     /** Null if [name] is not in the gallery or is not a live photo written by this app. */

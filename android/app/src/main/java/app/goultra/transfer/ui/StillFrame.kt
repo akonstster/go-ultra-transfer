@@ -45,6 +45,18 @@ void main() {
 }
 """
 
+/** As [SCREEN_VERTEX], but the picture turned 90° anti-clockwise (a full-screen landscape photo, the app portrait-locked). */
+private const val SCREEN_VERTEX_ROT90 = """#version 100
+attribute vec4 aFramePosition;
+varying vec2 vTexSamplingCoord;
+void main() {
+  gl_Position = aFramePosition;
+  float u = aFramePosition.x * 0.5 + 0.5;
+  float v = 0.5 - aFramePosition.y * 0.5;
+  vTexSamplingCoord = vec2(1.0 - v, u);
+}
+"""
+
 private const val COPY = """#version 100
 precision mediump float;
 uniform sampler2D uTexSampler;
@@ -61,7 +73,7 @@ void main() {
  * [frame] in one go whenever a setting changes ([LiveEdits]); the picture is fitted into the view like the player's.
  */
 @OptIn(UnstableApi::class)
-private class StillRenderer(first: Bitmap, private val steps: List<ColorStep>, @Volatile var timeUs: Long) :
+private class StillRenderer(first: Bitmap, private val steps: List<ColorStep>, @Volatile var timeUs: Long, private val rotationDegrees: Int = 0) :
     GLSurfaceView.Renderer {
     /** The frame to show; a new one (after a seek) replaces the old in the same view. */
     @Volatile var next: Bitmap = first
@@ -117,7 +129,7 @@ private class StillRenderer(first: Bitmap, private val steps: List<ColorStep>, @
         for (i in 0..1) targets[i] = texture()
         programs = steps.map { program(STEP_VERTEX, it.fragment) }
         resources = IntArray(steps.size) { steps[it].create() }
-        screen = program(SCREEN_VERTEX, COPY)
+        screen = program(if (rotationDegrees != 0) SCREEN_VERTEX_ROT90 else SCREEN_VERTEX, COPY)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -141,12 +153,12 @@ private class StillRenderer(first: Bitmap, private val steps: List<ColorStep>, @
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             source = targets[target]
         }
-        // Fitted into the view, black around (as the player shows it).
+        // Fitted into the view, black around (as the player shows it). Turned, its width is the frame's height.
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glViewport(0, 0, viewW, viewH)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        val aspect = frame.width.toFloat() / frame.height
+        val aspect = if (rotationDegrees != 0) frame.height.toFloat() / frame.width else frame.width.toFloat() / frame.height
         val (w, h) = if (aspect > viewW.toFloat() / viewH) viewW to Math.round(viewW / aspect) else Math.round(viewH * aspect) to viewH
         GLES20.glViewport((viewW - w) / 2, (viewH - h) / 2, w, h)
         screen.use()
@@ -252,8 +264,8 @@ private fun stepProgram(vertex: String, fragment: String) = GlProgram(vertex, fr
  * new frame comes (one view for the whole pause); zoomed and moved like the player's picture ([zoom], [shift]).
  */
 @Composable
-fun StillFrame(frame: Bitmap, steps: List<ColorStep>, timeUs: Long, zoom: Float, shift: Offset, modifier: Modifier = Modifier) {
-    val renderer = remember { StillRenderer(frame, steps, timeUs) }
+fun StillFrame(frame: Bitmap, steps: List<ColorStep>, timeUs: Long, zoom: Float, shift: Offset, modifier: Modifier = Modifier, rotationDegrees: Int = 0) {
+    val renderer = remember { StillRenderer(frame, steps, timeUs, rotationDegrees) }
     val view = remember { arrayOfNulls<GLSurfaceView>(1) }
     var settle by remember { mutableIntStateOf(0) }
     AndroidView(

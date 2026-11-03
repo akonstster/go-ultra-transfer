@@ -40,6 +40,7 @@ import app.goultra.transfer.camera.PbWriter
 import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
+import app.goultra.transfer.camera.AlreadyInGalleryException
 import app.goultra.transfer.camera.LiveDecoder
 import app.goultra.transfer.camera.LiveCover
 import app.goultra.transfer.camera.LivePhoto
@@ -699,6 +700,7 @@ class CameraController(private val app: Application) {
      */
     fun setLiveCover(file: CameraFile, us: Long) = changeCover(file, tr("Меняю обложку…", "Changing the cover…")) {
         val v = liveFileWithOriginalClip(file) ?: return@changeCover tr("Не удалось скачать живое фото", "Couldn't download the live photo")
+        if (!v.writable) return@changeCover notWritableMessage()
         val frame = withContext(Dispatchers.IO) { LiveCover.frame(app, v, us) }
             ?: return@changeCover tr("Не удалось взять кадр из видео", "Couldn't take the frame from the clip")
         try {
@@ -732,6 +734,7 @@ class CameraController(private val app: Application) {
         val v = withContext(Dispatchers.IO) { LiveCover.video(app, file.name) }
             ?: return@changeCover tr("Скачанного живого фото нет в галерее. При необходимости скачайте его с камеры.",
                 "The downloaded live photo isn't in the gallery. Download it from the camera if needed.")
+        if (!v.writable) return@changeCover notWritableMessage()
         val saved = withContext(Dispatchers.IO) { LiveCover.originalPhoto(app, v) }
         if (saved == null && v.originalPhotoTracked) {
             if (coverReplaced(file)) markCover(file, false)
@@ -770,6 +773,12 @@ class CameraController(private val app: Application) {
             }
         }
     }
+
+    /** A file saved by an earlier install of the app (a different UID): readable, but this install can't write it. */
+    private fun notWritableMessage() = tr(
+        "Файл сохранён прошлой установкой приложения — изменить его нельзя. Удалите его в галерее и скачайте заново.",
+        "This file was saved by an earlier install of the app and can't be changed. Delete it in the gallery and download it again.",
+    )
 
     /** The gallery live photo of [file], downloaded from the camera only if no local motion photo exists. */
     private suspend fun liveFileWithOriginalClip(file: CameraFile): LiveCover.Video? {
@@ -889,26 +898,44 @@ class CameraController(private val app: Application) {
     fun addFiles(uris: List<android.net.Uri>) {
         if (uris.isEmpty()) return
         scope.launch {
-            val added = addedLock.withLock {
+            val (added, already) = addedLock.withLock {
                 withContext(Dispatchers.IO) {
                     val taken = (phoneFiles.map { it.name } + files.map { it.name } + storedAdded().map { it.name }).toMutableSet()
+                    // Links already in the list: added ones, and the phone copies that show up on their own.
+                    val knownUris = (phoneFiles.mapNotNull { it.localUri } + addedStore.all.keys).toMutableSet()
                     var count = 0
+                    var skipped = 0
                     for (u in uris) {
-                        if (addedStore.contains(u.toString())) continue
+                        // Already here: the very same link, or a file the list already shows under that name (a phone
+                        // copy is listed by its camera name, so a picked «…_MP.jpg» is matched through LivePhoto too).
+                        val raw = runCatching { addedName(u) }.getOrNull() ?: u.lastPathSegment ?: "file"
+                        val name = raw.replace('/', '_').replace('\t', ' ')
+                        if (u.toString() in knownUris || name in taken || LivePhoto.cameraName(name) in taken) {
+                            skipped++
+                            continue
+                        }
                         runCatching { app.contentResolver.takePersistableUriPermission(u, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
                             .onFailure { log("добавить ${u.lastPathSegment}: нет постоянного доступа (${it.message})") }
                         val entry = runCatching { describeAdded(u, taken) }.onFailure { log("добавить ${u.lastPathSegment}: ${it.message}") }.getOrNull() ?: continue
                         taken += entry.first
+                        knownUris += u.toString()
                         addedStore.edit().putString(u.toString(), entry.second).apply()
                         count++
                     }
-                    count
+                    count to skipped
                 }
             }
             addedFiles = storedAdded()
-            message = tr("Добавлено: $added", "Added: $added")
+            message = tr("Добавлено: $added", "Added: $added") +
+                (if (already > 0) tr(", уже в списке: $already", ", already in the list: $already") else "")
         }
     }
+
+    /** The picker file's display name (without touching its media metadata), or null. */
+    private fun addedName(uri: android.net.Uri): String? =
+        app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
+        }
 
     /** Takes [files] off the list (only the app forgets them: nothing is deleted from the phone). */
     fun removeAdded(files: List<CameraFile>) {
@@ -2330,7 +2357,20 @@ class CameraController(private val app: Application) {
             else -> tr("на камере", "on the camera")
         })
         add("Дата", "Date", file.created?.format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")))
-        add("Размер", "Size", file.size?.let(::formatSize))
+        // A live photo on the camera is two files (the picture LIV_….jpg and its clip LIV_….mp4): show their total.
+        // A copy on the phone is a single Motion Photo that already holds the clip, so its own size is the whole thing
+        // (adding the camera's clip again would count the video twice).
+        val liveClip = liveClipOf(file)
+        val localBytes = if (file.isLivePhoto) file.localUri?.let { uri ->
+            runCatching { readLocal(android.net.Uri.parse(uri)) { size, _ -> size } }.getOrNull()?.takeIf { it > 0 }
+        } else null
+        val sizeBytes = when {
+            localBytes != null -> localBytes
+            file.size == null -> liveClip?.size
+            liveClip?.size == null -> file.size
+            else -> file.size!! + liveClip.size!!
+        }
+        add("Размер", "Size", sizeBytes?.let(::formatSize))
         add("Избранное", "Favorite", if (file.name in favorites) "♥" else null)
         val local = file.localUri?.let(android.net.Uri::parse)
         if (file.kind == MediaKind.VIDEO) {
@@ -2412,7 +2452,13 @@ class CameraController(private val app: Application) {
                 val latLong = FloatArray(2)
                 if (exif.getLatLong(latLong)) add("Место", "Location", "%.5f, %.5f".format(latLong[0], latLong[1]))
             }
-            add("Живое фото", "Live photo", if (file.isLive) tr("да", "yes") else null)
+            add("Живое фото", "Live photo", when {
+                localBytes == null && file.size != null && liveClip?.size != null ->
+                    tr("фото ${formatSize(file.size!!)} + ролик ${formatSize(liveClip.size!!)}",
+                        "photo ${formatSize(file.size!!)} + clip ${formatSize(liveClip.size!!)}")
+                file.isLive -> tr("да", "yes")
+                else -> null
+            })
         }
         out
     }
@@ -2709,6 +2755,7 @@ class CameraController(private val app: Application) {
         downloadJob = scope.launch {
             var ok = 0
             var failed = 0
+            var skipped = 0
             try {
                 for ((i, file) in queue.withIndex()) {
                     if (conn != ConnState.Connected) break
@@ -2733,13 +2780,21 @@ class CameraController(private val app: Application) {
                         selected.remove(file.name)
                     } catch (e: CancellationException) {
                         throw e
+                    } catch (e: AlreadyInGalleryException) {
+                        // A file with this name is already in the gallery but this install may not see it (its own UID
+                        // differs, e.g. after a reinstall — the gallery permission shows it, but it may be refused):
+                        // not a download error, just skip it.
+                        log("download ${file.name} skipped: ${e.message}")
+                        skipped++
                     } catch (e: Exception) {
                         log("download ${file.name} failed: ${e.message}")
                         failed++
                     }
                 }
-                lastResult = tr("Скачано: $ok", "Downloaded: $ok") + (if (failed > 0) tr(", ошибок: $failed", ", errors: $failed") else "") +
-                    (if (ok + failed < queue.size) tr(", прервано", ", interrupted") else "")
+                lastResult = tr("Скачано: $ok", "Downloaded: $ok") +
+                    (if (skipped > 0) tr(", уже в галерее: $skipped", ", already in the gallery: $skipped") else "") +
+                    (if (failed > 0) tr(", ошибок: $failed", ", errors: $failed") else "") +
+                    (if (ok + failed + skipped < queue.size) tr(", прервано", ", interrupted") else "")
             } catch (e: CancellationException) {
                 lastResult = tr(
                     "Остановлено, скачано: $ok (недокачанное продолжится в следующий раз)",
@@ -3030,6 +3085,15 @@ class CameraController(private val app: Application) {
                 val source = withContext(Dispatchers.IO) {
                     exportSource(file.size) { ex -> if (camera != null) ex.setDataSource(camera) else ex.setDataSource(app, android.net.Uri.parse(local!!), null) }
                 }
+                // The original's key-frame interval (seconds): a longer one on the copy leaves more bitrate for the
+                // picture. Only when it is clearly longer than the 1 s media3 uses by default.
+                val gopSeconds = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val keys = if (camera != null) Mp4Index.keyFrames(camera.getSize()) { at, n -> camera.bytes(at, n) }
+                        else readLocal(android.net.Uri.parse(local!!)) { size, read -> Mp4Index.keyFrames(size, read) }
+                        keys?.ms?.takeIf { it.size >= 2 }?.let { t -> ((t.last() - t.first()) / 1000.0 / (t.size - 1)).toFloat() }
+                    }.getOrNull()
+                }?.takeIf { it >= 1.5f }?.coerceAtMost(30f)
                 if (camera != null) CameraService.start(app)
                 val uri = local ?: previewUrlOf(file)
                 val table = if (iLog && look.lut && look.strength > 0f) lut() else null
@@ -3041,7 +3105,7 @@ class CameraController(private val app: Application) {
                 }
                 tmp.delete()
                 // Pieces with sound: the picture first (90 %), then the sound with crossfades and the two together.
-                transform(uri, camera != null, parts, tmp, effects, source, sound) { export = ExportProgress(name, if (parts != null && sound) it * 9 / 10 else it) }
+                transform(uri, camera != null, parts, tmp, effects, source, gopSeconds, sound) { export = ExportProgress(name, if (parts != null && sound) it * 9 / 10 else it) }
                 val takenAt = file.created?.atZone(java.time.ZoneId.systemDefault())?.toInstant()?.toEpochMilli()
                 withContext(Dispatchers.IO) {
                     if (parts == null || !sound) {
@@ -3086,12 +3150,13 @@ class CameraController(private val app: Application) {
                         }
                     }.getOrNull()
                 }
-                val outRate = gotMs?.takeIf { it > 0 }?.let { tmp.length() * 8 / it / 1000 }
+                val outRate = gotMs?.takeIf { it > 0 }?.let { tmp.length() * 8 / it / 1000 } // Мбит/с
                 log("с цветом $name: кадров/с ${inFps?.let { "%.2f".format(it) } ?: "?"} → ${outFps?.let { "%.2f".format(it) } ?: "?"}, " +
-                    "битрейт: просили ${source.bitrate / 1_000_000} Мбит/с, вышло ${outRate?.let { it / 1000 } ?: "?"} Мбит/с")
+                    "битрейт: просили ${bitrateText(source.bitrate)}, вышло ${outRate ?: "?"} Мбит/с")
                 log(
-                    "с цветом $name: ${source.mime}, ${source.bitrate / 1_000_000} Мбит/с, ${source.lines} строк, " +
-                        "${effects.size} эффектов, " + (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
+                    "с цветом $name: ${source.mime}, ${bitrateText(source.bitrate)}, ${source.lines} строк, " +
+                        "GOP ${gopSeconds?.let { "%.1f".format(it) } ?: "1.0"}с, ${effects.size} эффектов, " +
+                        (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
                         (if (camera != null) "с камеры, " else "") + "$sec с",
                 )
                 lastResult = tr("Сохранено: $name", "Saved: $name")
@@ -3190,8 +3255,12 @@ class CameraController(private val app: Application) {
         downloadJob?.cancel()
     }
 
-    /** What the copy keeps from the original: the video codec, its bitrate, the short side (px). */
-    private class ExportSource(val mime: String, val bitrate: Int, val lines: Int, val durationMs: Long)
+    /** What the copy keeps from the original: the video codec, its bitrate (0 = the track has none), the short side
+     * (px), its codec profile / level (0 = unknown). */
+    private class ExportSource(
+        val mime: String, val bitrate: Int, val lines: Int, val durationMs: Long,
+        val profile: Int = 0, val level: Int = 0,
+    )
 
     private fun exportSource(fileBytes: Long?, open: (android.media.MediaExtractor) -> Unit): ExportSource {
         val ex = android.media.MediaExtractor()
@@ -3207,18 +3276,46 @@ class CameraController(private val app: Application) {
                 // Without it in the track: the whole file's rate (size over length), a little over the video's.
                 val durationUs = if (f.containsKey(android.media.MediaFormat.KEY_DURATION)) f.getLong(android.media.MediaFormat.KEY_DURATION) else 0L
                 val rate = trackRate.takeIf { it > 0 } ?: fileBytes?.takeIf { durationUs > 0 }?.let { (it * 8_000_000L / durationUs).toInt() } ?: 0
-                // The original's own codec when it is one of the two every phone encodes; at its bitrate and a third
-                // more (no less than 20 Mbit/s, no more than 200).
+                // The original's own codec when it is one of the two every phone encodes; at its bitrate and half
+                // more (no less than 20 Mbit/s, no more than 200). No bitrate in the track and no file size: 0 — the
+                // encoder then targets high quality itself (media3 refuses a set bitrate together with that).
                 val out = if (mime == androidx.media3.common.MimeTypes.VIDEO_H265) mime else androidx.media3.common.MimeTypes.VIDEO_H264
-                // A second compression of an already compressed picture loses more at the same rate: 30 % above it.
-                val target = (if (rate > 0) rate.toLong() * 13 / 10 else 60_000_000L).coerceIn(20_000_000L, 200_000_000L).toInt()
-                return ExportSource(out, target, minOf(w, h), durationUs / 1000)
+                val target = if (rate > 0) (rate.toLong() * 15 / 10).coerceIn(20_000_000L, 200_000_000L).toInt() else 0
+                val profile = if (f.containsKey(android.media.MediaFormat.KEY_PROFILE)) f.getInteger(android.media.MediaFormat.KEY_PROFILE) else 0
+                val level = if (f.containsKey(android.media.MediaFormat.KEY_LEVEL)) f.getInteger(android.media.MediaFormat.KEY_LEVEL) else 0
+                return ExportSource(out, target, minOf(w, h), durationUs / 1000, profile, level)
             }
             error(tr("в файле нет видео", "no video in the file"))
         } finally {
             ex.release()
         }
     }
+
+    /**
+     * The video encoder settings for a save with colour, as close to the original as this install can ask for:
+     * the original's codec profile / level (H.264 only — for H.265 the encoder picks its own 8-bit profile, since the
+     * 10 bits of an I-Log file aren't kept), a longer key-frame interval when the original had one (fewer key frames
+     * leave more bitrate for the picture), and the bitrate — the original's +50 %. A track without a bitrate and no
+     * file size leaves it to the encoder's own high-quality targeting: media3 refuses a set bitrate together with it.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    private fun encoderSettings(source: ExportSource, gopSeconds: Float?): androidx.media3.transformer.VideoEncoderSettings {
+        val b = androidx.media3.transformer.VideoEncoderSettings.Builder()
+        if (source.bitrate > 0) {
+            b.setBitrate(source.bitrate)
+        } else {
+            b.experimentalSetEnableHighQualityTargeting(true)
+        }
+        if (source.mime == androidx.media3.common.MimeTypes.VIDEO_H264 && source.profile != 0) {
+            b.setEncodingProfileLevel(source.profile, source.level.takeIf { it != 0 } ?: androidx.media3.transformer.EncoderUtil.LEVEL_UNSET)
+        }
+        gopSeconds?.let { b.setiFrameIntervalSeconds(it) }
+        return b.build()
+    }
+
+    /** How the copy's bitrate is described in the log: asked for, or left to the encoder's high-quality targeting. */
+    private fun bitrateText(bitrate: Int) =
+        if (bitrate > 0) "${bitrate / 1_000_000} Мбит/с" else tr("высокое качество (кодировщик сам)", "high quality (encoder's own)")
 
     /**
      * Runs the transformer on the main thread until it is done; [onPercent] twice a second. [uri]: the phone's copy, or
@@ -3234,12 +3331,13 @@ class CameraController(private val app: Application) {
         out: java.io.File,
         effects: List<androidx.media3.common.Effect>,
         source: ExportSource,
+        gopSeconds: Float?,
         sound: Boolean,
         onPercent: (Int) -> Unit,
     ) = kotlinx.coroutines.coroutineScope {
         val done = kotlinx.coroutines.CompletableDeferred<Unit>()
         val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
-            .setRequestedVideoEncoderSettings(androidx.media3.transformer.VideoEncoderSettings.Builder().setBitrate(source.bitrate).build())
+            .setRequestedVideoEncoderSettings(encoderSettings(source, gopSeconds))
             .setEnableFallback(true)
             .build()
         val builder = androidx.media3.transformer.Transformer.Builder(app)

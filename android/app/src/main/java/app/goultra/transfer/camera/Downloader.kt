@@ -24,6 +24,14 @@ import java.util.UUID
 import kotlin.coroutines.coroutineContext
 
 /**
+ * A gallery file with the wanted name already exists, but it belongs to another install of this app (a different UID,
+ * e.g. after a reinstall): MediaStore gives our new item a "(1)" name and the app can neither see nor replace it.
+ * This is «уже в галерее» — skipped, not a download error.
+ */
+class AlreadyInGalleryException(name: String) : IOException("файл уже в галерее (с прошлой установки): $name")
+
+
+/**
  * Downloads http://192.168.42.1/<uri> straight into the shared gallery: DCIM/Camera, next to the phone's own shots,
  * with DATE_TAKEN set from the camera so files land at the right place in the timeline.
  * An unfinished file stays a pending MediaStore item and is resumed with an HTTP Range request
@@ -274,31 +282,39 @@ object Downloader {
                 delay(1_500L * attempt)
             }
         }
-        if (live != null && live.preview != null) {
-            return@withContext completeLiveDownload(
-                context, item, targetName, mime, takenAtMillis, old, oldName, live.head, live.size, live.previewSize,
-            )
-        }
-        if (old != null) {
-            publishReplacement(resolver, item, targetName, old, oldName)
-        } else {
-            val changed = resolver.update(
-                item,
-                ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, targetName)
-                    takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
-                },
-                null,
-                null,
-            )
-            if (changed != 1) throw IOException("не опубликовать скачанный файл $name")
-            val stored = resolver.query(item, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
-                if (it.moveToFirst()) it.getString(0) else null
+        val created = partial == null
+        try {
+            if (live != null && live.preview != null) {
+                return@withContext completeLiveDownload(
+                    context, item, targetName, mime, takenAtMillis, old, oldName, live.head, live.size, live.previewSize,
+                )
             }
-            if (stored != targetName) throw IOException("MediaStore сохранил файл как $stored вместо $targetName")
+            if (old != null) {
+                publishReplacement(resolver, item, targetName, old, oldName)
+            } else {
+                val changed = resolver.update(
+                    item,
+                    ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, targetName)
+                        takenAtMillis?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+                    },
+                    null,
+                    null,
+                )
+                if (changed != 1) throw IOException("не опубликовать скачанный файл $name")
+                val stored = resolver.query(item, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
+                    if (it.moveToFirst()) it.getString(0) else null
+                }
+                if (stored != targetName) throw AlreadyInGalleryException(targetName)
+            }
+            item
+        } catch (e: AlreadyInGalleryException) {
+            // The name is taken by a file this install can't see (a different UID): drop the item we made — there is
+            // nothing to resume, the name will never come free — and let the caller skip the file.
+            if (created) runCatching { resolver.delete(item, null, null) }
+            throw e
         }
-        item
     }
 
     internal fun completeLiveDownload(
@@ -418,7 +434,7 @@ object Downloader {
             val actual = resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
                 if (it.moveToFirst()) it.getString(0) else null
             }
-            if (actual != target) throw IOException("MediaStore сохранил $uri как $actual вместо $target")
+            if (actual != target) throw AlreadyInGalleryException(target)
         }
         try {
             ReplacementTransaction.commit(
@@ -573,7 +589,6 @@ object Downloader {
     }
 
     private class Existing(val uri: Uri, val pending: Boolean)
-
     /** Our item with this name, pending (partial) ones included. */
     private fun findExisting(resolver: ContentResolver, collection: Uri, name: String): Existing? {
         val projection = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.IS_PENDING)

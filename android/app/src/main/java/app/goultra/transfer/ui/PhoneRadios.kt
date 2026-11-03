@@ -103,7 +103,7 @@ fun PhoneRadiosBanner(vm: CameraController) {
             if (runCatching { context.startActivity(intent) }.isSuccess) return
         }
     }
-    val hints = radioHints(vm.radios, vm.waitingForRadios, vm.radioHintsHidden, vm.vpnHintHidden)
+    val hints = radioHints(vm.radios, vm.waitingForRadios, vm.radioHintsHidden, vm.vpnHintHidden, vm.conn == ConnState.Idle || vm.conn is ConnState.Failed)
     if (!hints.bluetooth && !hints.wifi && !hints.vpn) return
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (hints.bluetooth) {

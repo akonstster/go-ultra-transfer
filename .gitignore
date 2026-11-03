@@ -16,6 +16,10 @@ android/captures/
 CLAUDE.md
 .claude/
 
+# Cline's own notes: its rules and the memory bank — kept out of the public repo
+.clinerules/
+memory-bank/
+
 # Python
 __pycache__/
 *.pyc

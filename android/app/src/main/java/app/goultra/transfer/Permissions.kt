@@ -21,6 +21,19 @@ fun requestedPermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= 33) requiredPermissions() + Manifest.permission.POST_NOTIFICATIONS
     else requiredPermissions()
 
+/**
+ * Reading the gallery. A file can be saved by an earlier install of this app (a different UID) and then belong to
+ * someone else: without this the app can't see it, so it can neither spot an existing copy nor drop it when the user
+ * deletes it from the gallery. Asked once, apart from [requiredPermissions] — the app works without it.
+ */
+fun galleryPermissions(): Array<String> =
+    if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+    else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+
+fun Context.hasGalleryAccess(): Boolean = galleryPermissions().all {
+    ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+}
+
 fun Context.hasPermissions(): Boolean = requiredPermissions().all {
     ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
 }

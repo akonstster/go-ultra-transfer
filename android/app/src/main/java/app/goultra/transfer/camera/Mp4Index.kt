@@ -33,21 +33,29 @@ class KeyFrames(val ms: List<Long>, val bFrames: Boolean) {
  */
 object Mp4Index {
     /**
-     * The video track's average frame rate: its frames over their total duration (stts), as players and ffprobe
-     * give it — from the index alone, right whatever the order the frames are stored in (B-frames). Null without an
-     * index or a video track.
+     * The video track's frame rate: the rate its frames are actually stored at — the duration most frames have in
+     * stts (ffprobe's `r_frame_rate`), so a stretched last frame or a few dropped ones don't pull it down. From the
+     * index alone, right whatever the order the frames are stored in (B-frames). Null without an index or a video track.
      */
     fun frameRate(size: Long, read: (Long, Int) -> ByteArray): Double? {
         val (timescale, stbl) = videoTrack(size, read) ?: return null
         val stts = child(stbl, "stts") ?: return null
-        var frames = 0L
-        var duration = 0L
+        // The duration shared by the most frames (a tie: the shorter duration).
+        val byDuration = HashMap<Long, Long>()
         for (e in 0 until be32(stts, 4).toInt()) {
             val count = be32(stts, 8 + e * 8)
-            frames += count
-            duration += count * be32(stts, 12 + e * 8)
+            val duration = be32(stts, 12 + e * 8)
+            if (duration > 0) byDuration[duration] = (byDuration[duration] ?: 0L) + count
         }
-        return if (frames > 0 && duration > 0) frames * timescale.toDouble() / duration else null
+        var bestDuration = 0L
+        var bestCount = 0L
+        for ((duration, count) in byDuration) {
+            if (count > bestCount || (count == bestCount && bestDuration != 0L && duration < bestDuration)) {
+                bestCount = count
+                bestDuration = duration
+            }
+        }
+        return if (bestDuration > 0) timescale.toDouble() / bestDuration else null
     }
 
     /** The video track's timescale and sample table (with its trak), from the index; null without one. */

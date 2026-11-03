@@ -188,10 +188,15 @@ the player's. The still is no longer turned twice (the retriever turns frames by
 Added files: name, size, length fixed once when added (prefs file `added`), so the list comes up without reading the
 files; a file drops off only if it is gone or its permission was taken away; changes run one at a time. A batch
 counts only saves that got into the gallery.
-Frame rate: «i» and the export log take it from the mp4 index (`Mp4Index.frameRate`: frames over their stts
-duration, as ffprobe) — counting a second of frames in stored order gave 24.9 for a 30 fps re-encode with B-frames.
-The transformer keeps every frame's time (no rate change). Export bitrate: the original's +30 % (a second
-compression), 20…200 Mbit/s; the log prints fps in → out and the bitrate asked → got.
+Frame rate: «i» and the export log take it from the mp4 index (`Mp4Index.frameRate`: the frame duration most frames
+have in stts — ffprobe's `r_frame_rate` — so a stretched last frame (media3 holds one for ~160 ms) or a few dropped
+ones don't show as 24.74 for 25; counting frames over a second in stored order gave 24.9 for 30 with B-frames).
+The transformer keeps every frame's time (no rate change). Export bitrate: the original's +50 % (a second
+compression), 20…200 Mbit/s — or, when the track has none and the file size is unknown, the encoder's own
+high-quality targeting (`experimentalSetEnableHighQualityTargeting`, media3 refuses it together with a set bitrate);
+the encoder settings also ask for the original's H.264 profile and level and its key-frame interval (`setiFrameIntervalSeconds`,
+kept when the original's GOP is over 1.5 s — the default 1 s would add key frames), the codec does its own for H.265
+(8-bit only: an I-Log file's 10 bits aren't kept); the log prints fps in → out, GOP, and the bitrate asked → got.
 Release builds: `assembleRelease` (R8, signed with the debug key as before) → `app/build/outputs/apk/release/`,
 published as `GoUltraTransfer-<version>.apk`.
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
@@ -297,6 +302,23 @@ Suggested design (agree with the user first — they review UI decisions; see th
 
 ## How to build / test
 
+
+## Full-screen viewer (03.11.2026)
+
+`ui/FileViewer.kt` `FilePage` gained a full-screen mode (a round button bottom-left; Back leaves it first). The top
+bar, the chips and the ♥ column hide and the system bars go (as `LandscapeLive` does). Since the app is locked to
+portrait (`AndroidManifest.xml`), a **landscape** file is turned 90° there — a portrait one is left as it is
+(`isLandscape(file.width, file.height)`, `FullScreenRotationTest`). Photos turn with `graphicsLayer` in a box laid
+out as if landscape; **videos turn via a player effect** (`androidx.media3.effect.ScaleAndRotateTransformation`,
+appended last in `colorEffects`), so the `SurfaceView`, its layers, the zoom and the paused `StillFrame` stay as
+they are — this was the point of the earlier TextureView attempts (`a4a6853` → `cc4b8bb` → reverted `68a41fe`),
+which needed an opaque dialog window, broke the zoom (`videoSurfaceView` is null) and put the still behind the
+video. A photo drawn by `StillFrame` (a `GLSurfaceView`, also used for a photo with a colour of its own) turns
+inside its GL view (`SCREEN_VERTEX_ROT90`), since the layout can't turn a `SurfaceView`; the clip of a live photo
+doesn't turn, but it no longer plays in full screen (autoplay is stopped there), so the still photo shows turned.
+`clampShift` takes the turn into account while zoomed. All three turn the same way, anti-clockwise (as the video does):
+the photo's `graphicsLayer` uses −90°, `SCREEN_VERTEX_ROT90` mirrors it, and media3's `setRotationDegrees(90f)` happens
+to come out anti-clockwise too.
 See `CLAUDE.md` → "Сборка Android" (JDK 17 path, `gradlew.bat assembleDebug`, adb install). `CLAUDE.md` lives only on
 the user's PC (gitignored), so cloud sessions don't see it: the steps to give the user (PowerShell, repo root
 `C:\Users\nonroot\myprojects\go-ultra-transfer`; adb is **not** on PATH):

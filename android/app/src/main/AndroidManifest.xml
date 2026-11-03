@@ -19,6 +19,12 @@
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="tiramisu" />
 
+    <!-- Reading the gallery: to spot a copy saved by an earlier install (a different UID) and to drop a file the user
+         deleted from the gallery (before Android 13 this is READ_EXTERNAL_STORAGE). -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
     <!-- Camera Wi-Fi: TCP 6666 + HTTP downloads -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
