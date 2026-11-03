@@ -1071,11 +1071,23 @@ class CameraController(private val app: Application) {
     }
 
     fun finishOnboarding() {
-        prefs.edit().putBoolean("onboarded", true).apply()
+        prefs.edit().putBoolean("onboarded", true).putBoolean("no_camera", false).apply()
         onboarded = true
         setup = ConnState.Idle
         autoConnected = true
         connect()
+    }
+
+    /**
+     * «Пропустить» on the first-run wizard: open the app without a camera (phone files only). No automatic connection
+     * on later starts until a camera is set up (menu ⋮ → «Настроить камеру заново»); «Подключиться» still works.
+     */
+    fun skipOnboarding() {
+        if (setup is ConnState.Working) return
+        prefs.edit().putBoolean("onboarded", true).putBoolean("no_camera", true).apply()
+        onboarded = true
+        setup = ConnState.Idle
+        autoConnected = true
     }
 
     fun restartOnboarding() {
@@ -1091,6 +1103,8 @@ class CameraController(private val app: Application) {
     fun autoConnect() {
         if (autoConnected) return
         autoConnected = true
+        // The wizard was skipped: there is no camera to look for.
+        if (prefs.getBoolean("no_camera", false)) return
         connect()
     }
 
@@ -1128,6 +1142,8 @@ class CameraController(private val app: Application) {
                 return@launch
             }
             conn = ConnState.Connected
+            // A camera turned up after «Пропустить»: connect by itself on later starts again.
+            prefs.edit().putBoolean("no_camera", false).apply()
             wifiUpAt = SystemClock.elapsedRealtime()
             touch()
             resumeLive()

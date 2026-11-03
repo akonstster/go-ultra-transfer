@@ -48,9 +48,10 @@ fun OnboardingScreen(
     Surface(Modifier.fillMaxSize()) {
         Column(
             Modifier.safeDrawingPadding().padding(24.dp).fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // The wizard stays centred in the space above «Пропустить», which sits at the bottom.
+            Spacer(Modifier.weight(1f))
             CameraArt(Modifier.fillMaxWidth(0.55f).widthIn(max = 300.dp), withPod = true, blinking = controller.setup is ConnState.Working)
             Spacer(Modifier.height(24.dp))
             Text(tr("Подключение камеры", "Connect the camera"), style = MaterialTheme.typography.headlineSmall)
@@ -124,6 +125,11 @@ fun OnboardingScreen(
                         TextButton(onShareLog) { Text(tr("Отправить журнал", "Send log")) }
                     }
                 }
+            }
+            Spacer(Modifier.weight(1f))
+            // No camera (yet): use the app with the phone's files; the camera can be set up later from menu ⋮.
+            if (controller.setup !is ConnState.Working && controller.setup != ConnState.Connected) {
+                TextButton(controller::skipOnboarding) { Text(tr("Пропустить", "Skip")) }
             }
         }
     }

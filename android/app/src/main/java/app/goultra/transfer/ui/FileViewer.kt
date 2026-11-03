@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -183,6 +184,7 @@ fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostSta
 }
 
 /** One file in the viewer: video, photo or live photo, with its top bar. [active]: the page on screen (plays). */
+@kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class) // FlowRow
 @Composable
 private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, onClose: () -> Unit, onLock: (Boolean) -> Unit) {
     val context = LocalContext.current
@@ -251,6 +253,23 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         var info by remember(file.uri) { mutableStateOf(false) }
         // Setting the colour: only the video and the panel — the top bar and the ♥ / «i» / share column hide.
         var colouring by remember(file.uri) { mutableStateOf(false) }
+        // The top bar's real height (a large system font makes it taller): the chips under it start below it.
+        val density = LocalDensity.current
+        var topBar by remember { mutableStateOf(52.dp) }
+        // «Сохранить» / «Скачать» sit in the row of chips under the top bar, not in the bar: there it squeezed the
+        // file name and its caption.
+        val busy = vm.isDownloading || vm.export != null
+        val saveButton: (@Composable () -> Unit)? = when {
+            // A video: one «Сохранить» for every way (whole / marked, as shot / with colour).
+            isVideo && (!file.isOnPhone || pieces.isNotEmpty() || vm.look(file) != null) ->
+                { { SaveAction(tr("Сохранить", "Save"), icon = true, enabled = !busy) { choose = true } } }
+            // A photo with its colour: as shot (a download) or a copy with the colour, as with videos.
+            !isVideo && photoReady && vm.photoLook(file) != null ->
+                { { SaveAction(tr("Сохранить", "Save"), icon = true, enabled = !busy) { choosePhoto = true } } }
+            !isVideo && !file.isOnPhone && file.name !in vm.downloaded ->
+                { { SaveAction(tr("Скачать", "Download"), icon = false, enabled = !busy) { vm.downloadOne(file); onClose() } } }
+            else -> null
+        }
         if (info && photoReady) FileInfo(vm, if (file.isLivePhoto || localLive != null) photo else file) { info = false }
         when {
             file.isAdded && addedFileAvailable == false -> MissingAddedFile(
@@ -262,7 +281,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                 color = Color.White,
                 modifier = Modifier.align(Alignment.Center),
             )
-            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }) { ms ->
+            isVideo -> VideoPreview(vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }, topBar, saveButton) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
                 exactMs = if (file.isOnPhone) ms else maxOf(ms, (file.durationSec ?: 0) * 1000L)
@@ -323,7 +342,8 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         }
         if (!colouring && !photoColouring) Row(
             Modifier.fillMaxWidth().background(Color(0x99000000)).safeDrawingPadding()
-                .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+                .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)
+                .onSizeChanged { topBar = with(density) { it.height.toDp() } },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClose) { Icon(Icons.Filled.Close, tr("Закрыть", "Close"), tint = Color.White) }
@@ -339,38 +359,23 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                     },
                     color = Color(0xCCFFFFFF),
                     fontSize = 12.sp,
+                    // One line: a wrapped caption makes the bar taller, and it then covers the chips below it.
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            Spacer(Modifier.width(8.dp))
-            val busy = vm.isDownloading || vm.export != null
-            if (isVideo && (!file.isOnPhone || pieces.isNotEmpty() || vm.look(file) != null)) {
-                // A video: one «Сохранить» for every way (whole / marked, as shot / with colour).
-                Button({ choose = true }, enabled = !busy) {
-                    Icon(Icons.Filled.SaveAlt, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(tr("Сохранить", "Save"))
-                }
-            } else if (!isVideo && photoReady && vm.photoLook(file) != null) {
-                // A photo with its colour: as shot (a download) or a copy with the colour, as with videos.
-                Button({ choosePhoto = true }, enabled = !busy) {
-                    Icon(Icons.Filled.SaveAlt, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(tr("Сохранить", "Save"))
-                }
-            } else if (!isVideo && !file.isOnPhone && file.name !in vm.downloaded) {
-                Button({ vm.downloadOne(file); onClose() }, enabled = !busy) { Text(tr("Скачать", "Download")) }
-            }
         }
-        // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
-        if (!colouring && !photoColouring) Row(
-            Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
+        // A photo's chips and its «Сохранить» / «Скачать» (a video has its own row, with the same button).
+        if (!colouring && !photoColouring && !isVideo) FlowRow(
+            Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = topBar + 8.dp, start = 12.dp, end = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             val chipColors = FilterChipDefaults.filterChipColors(
                 containerColor = Color(0x99000000), labelColor = Color.White,
                 selectedContainerColor = Color(0xCC000000), selectedLabelColor = MARK_COLOR,
             )
-            if (!isVideo && photoReady && vm.canColourPhoto(file)) {
+            if (photoReady && vm.canColourPhoto(file)) {
                 val own = vm.photoLook(file) != null
                 FilterChip(
                     selected = own,
@@ -380,7 +385,9 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
                     colors = chipColors,
                 )
             }
+            saveButton?.invoke()
         }
+        // ♥, «i», share: a column at the right edge, mid-height — the top bar keeps room for the name.
         if (!colouring && !photoColouring) Column(
             Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -408,6 +415,18 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         }
         if (choose) SaveDialog(vm, file, pieces, onDismiss = { choose = false }, onStarted = { choose = false; onClose() })
         if (choosePhoto) PhotoSaveDialog(vm, file, photo, onDismiss = { choosePhoto = false }, onStarted = { choosePhoto = false; onClose() })
+    }
+}
+
+/** «Сохранить» / «Скачать» in the row of chips under the viewer's top bar. */
+@Composable
+private fun SaveAction(label: String, icon: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Button(onClick, enabled = enabled, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)) {
+        if (icon) {
+            Icon(Icons.Filled.SaveAlt, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(label)
     }
 }
 
@@ -655,6 +674,7 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
 }
 
 @OptIn(UnstableApi::class)
+@kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class) // FlowRow
 @Composable
 private fun VideoPreview(
     vm: CameraController,
@@ -665,6 +685,8 @@ private fun VideoPreview(
     active: Boolean,
     onLock: (Boolean) -> Unit,
     onColouring: (Boolean) -> Unit,
+    topBar: androidx.compose.ui.unit.Dp,
+    saveButton: (@Composable () -> Unit)?,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -1066,9 +1088,10 @@ private fun VideoPreview(
                 onDone = { colorPanel = false },
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp),
             )
-            if (!colouring) Row(
-                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = 60.dp, start = 12.dp),
+            if (!colouring) FlowRow(
+                Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(top = topBar + 8.dp, start = 12.dp, end = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 val chipColors = FilterChipDefaults.filterChipColors(
                     containerColor = Color(0x99000000), labelColor = Color.White,
@@ -1102,6 +1125,7 @@ private fun VideoPreview(
                         colors = chipColors,
                     )
                 }
+                saveButton?.invoke()
             }
         }
         if (colouring) {
