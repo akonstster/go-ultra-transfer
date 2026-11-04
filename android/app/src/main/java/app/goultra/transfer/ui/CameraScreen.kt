@@ -450,7 +450,7 @@ fun CameraTab(vm: CameraController, onConnect: () -> Unit, onRecord: () -> Unit)
             }
             if (conn is ConnState.Failed) {
                 Spacer(Modifier.height(16.dp))
-                Text(conn.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                Text(conn.message.text, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
             }
             if (!linked && conn !is ConnState.Working) {
                 Spacer(Modifier.height(16.dp))
@@ -542,7 +542,7 @@ private fun PreviewBox(
             is ConnState.Working -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Color.White)
                 Spacer(Modifier.height(12.dp))
-                Text(conn.step, color = Color.White, textAlign = TextAlign.Center, modifier = Modifier.padding(8.dp))
+                Text(conn.step.text, color = Color.White, textAlign = TextAlign.Center, modifier = Modifier.padding(8.dp))
             }
             ConnState.Remote -> if (vm.ecoRecording) {
                 Text(

@@ -78,7 +78,7 @@ fun OnboardingScreen(
                     CircularProgressIndicator()
                     Spacer(Modifier.height(24.dp))
                     Text(
-                        state.step,
+                        state.step.text,
                         style = MaterialTheme.typography.titleMedium,
                         textAlign = TextAlign.Center,
                     )
@@ -109,7 +109,7 @@ fun OnboardingScreen(
                     }
                     if (state is ConnState.Failed) {
                         Spacer(Modifier.height(16.dp))
-                        Text(state.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                        Text(state.message.text, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
                     }
                     Spacer(Modifier.height(24.dp))
                     Button(onStart) {

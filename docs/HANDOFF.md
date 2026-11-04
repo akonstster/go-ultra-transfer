@@ -353,6 +353,11 @@ commands; the camera closes TCP when the user opens playback on the camera itsel
   `SettingGroup(ru, en, …)`, `add(ru, en, …)` in `CameraController.fileInfo`) and the mode names through
   `modeLabel`, so `TextTablesMatchSourcesTest` scans those calls too (`argumentLiterals`). Before that a missing key
   there fell back to English silently — that is how the camera menu and the details dialog stayed English.
+- A message that lives **in state** — a connection step, a disconnect reason — is kept as its two literals in
+  `ui/AppPrefs.Phrase(ru, en)` and read through `.text` exactly where it is drawn, so a later language switch
+  re-translates it; a ready-made `tr(...)` result put into state does not (the «камера отключена, чтобы не
+  разряжаться» message kept its old language). `TextTablesMatchSourcesTest` scans `Phrase(` along with `tr(`, so
+  these strings stay in the tables, and `PhraseTest` pins the behaviour.
 - Debug builds only: «Diagnostics» and «Settings self-test» are translated like everything else; the self-test's
   status line carries `%s` placeholders. The log itself stays Russian.
 - Buttons that share a row with chips (the colour panel's «Reset», the timeline's «+ Piece / Delete / As on camera»)

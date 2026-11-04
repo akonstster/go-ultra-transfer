@@ -289,7 +289,7 @@ private fun ConnectPanel(state: ConnState, onConnect: () -> Unit, onRecord: () -
             is ConnState.Working -> {
                 LinearProgressIndicator(Modifier.widthIn(max = 200.dp).fillMaxWidth())
                 Spacer(Modifier.height(16.dp))
-                Text(state.step, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+                Text(state.step.text, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
             }
             else -> {
                 Text(
@@ -300,7 +300,7 @@ private fun ConnectPanel(state: ConnState, onConnect: () -> Unit, onRecord: () -
                 Spacer(Modifier.height(12.dp))
                 if (state is ConnState.Failed) {
                     Text(
-                        state.message,
+                        state.message.text,
                         color = MaterialTheme.colorScheme.error,
                         textAlign = TextAlign.Center,
                     )
@@ -338,14 +338,14 @@ private fun ConnectBar(state: ConnState, onConnect: () -> Unit, onHide: () -> Un
             Column(Modifier.weight(1f)) {
                 Text(
                     when (state) {
-                        is ConnState.Working -> state.step
+                        is ConnState.Working -> state.step.text
                         ConnState.Remote -> tr("Подключено только по Bluetooth", "Connected over Bluetooth only")
                         else -> tr("Камера не подключена", "Camera not connected")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    if (state is ConnState.Failed) state.message else tr("Показаны файлы на телефоне", "Showing the files on the phone"),
+                    if (state is ConnState.Failed) state.message.text else tr("Показаны файлы на телефоне", "Showing the files on the phone"),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (state is ConnState.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )

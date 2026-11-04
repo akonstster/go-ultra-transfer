@@ -169,3 +169,24 @@ fun tr(ru: String, en: String): String = when (AppPrefs.languageTag) {
     "en" -> en
     else -> AppPrefs.text(en)
 }
+
+/**
+ * An interface phrase kept as its two source literals: [text] is read **where the phrase is shown**, so a phrase put
+ * into state (a connection step, an error message) follows a language change. A ready-made `tr(...)` result kept in
+ * state does not — that is how the camera's idle-disconnect message stayed Russian after the language was switched.
+ *
+ * [format] and [plus] are for values that need no translation (`%s` placeholders, an exception's own text).
+ */
+class Phrase(val ru: String, val en: String, private val args: Array<out Any?>? = null) {
+    /** The phrase in the current language, with [args] filled into its `%s` placeholders. */
+    val text: String get() = if (args == null) tr(ru, en) else tr(ru, en).format(*args)
+
+    /** The phrase with the values for its `%s` placeholders, read later, in whatever language is current then. */
+    fun format(vararg values: Any?): Phrase = Phrase(ru, en, values)
+
+    /** The phrase with an untranslatable tail (an exception message, a number with a unit). */
+    operator fun plus(suffix: String?): Phrase = Phrase(ru + suffix.orEmpty(), en + suffix.orEmpty())
+
+    override fun toString(): String = text
+}
+

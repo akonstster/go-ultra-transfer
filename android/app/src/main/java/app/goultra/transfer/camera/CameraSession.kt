@@ -1,5 +1,6 @@
 package app.goultra.transfer.camera
 
+import app.goultra.transfer.ui.Phrase
 import app.goultra.transfer.ui.tr
 import android.content.Context
 import android.graphics.Bitmap
@@ -27,20 +28,18 @@ class CameraSession(private val context: Context, private val log: (String) -> U
                     .also { prefs.edit().putString("auth_id", it).apply() }
         }
 
-        val PAIRING_HINT
-            get() = tr(
-                "Откройте шторку уведомлений и нажмите\n«Запрос на сопряжение» от камеры (30 с)",
-                "Open the notification shade and tap\nthe camera's «Pairing request» (30 s)",
-            )
+        val PAIRING_HINT = Phrase(
+            "Откройте шторку уведомлений и нажмите\n«Запрос на сопряжение» от камеры (30 с)",
+            "Open the notification shade and tap\nthe camera's «Pairing request» (30 s)",
+        )
 
         /** A camera woken over BLE keeps its screen off, so the request is invisible until the user turns it on. */
-        val AUTH_HINT
-            get() = tr(
-                "Камера просит разрешить этот телефон.\n" +
-                    "Включите экран камеры (нажмите кнопку на ней) и подтвердите подключение — ждём 60 с",
-                "The camera asks to allow this phone.\n" +
-                    "Wake the camera's screen (press its button) and confirm the connection — waiting 60 s",
-            )
+        val AUTH_HINT = Phrase(
+            "Камера просит разрешить этот телефон.\n" +
+                "Включите экран камеры (нажмите кнопку на ней) и подтвердите подключение — ждём 60 с",
+            "The camera asks to allow this phone.\n" +
+                "Wake the camera's screen (press its button) and confirm the connection — waiting 60 s",
+        )
     }
 
     /** Called when the Wi-Fi or TCP link drops on its own (not after [disconnect]). */
@@ -71,32 +70,32 @@ class CameraSession(private val context: Context, private val log: (String) -> U
      * Several cameras around: [choose] asks the user (their names; null = cancelled).
      * Returns null on success, otherwise a message for the user.
      */
-    suspend fun setup(step: (String) -> Unit, choose: suspend (List<String>) -> String?): String? {
+    suspend fun setup(step: (Phrase) -> Unit, choose: suspend (List<String>) -> String?): Phrase? {
         disconnect()
         closing = false
-        step(tr("Поиск камеры…", "Looking for the camera…"))
+        step(Phrase("Поиск камеры…", "Looking for the camera…"))
         val cameras = ble.scanCameras()
         val found = when (cameras.size) {
             0 -> null
             1 -> cameras.first()
             else -> {
                 val names = cameras.map { ble.advertisedName(it) ?: it.device.address }
-                val picked = choose(names) ?: return tr("Камера не выбрана", "No camera chosen")
+                val picked = choose(names) ?: return Phrase("Камера не выбрана", "No camera chosen")
                 cameras[names.indexOf(picked)]
             }
-        } ?: return tr("Камера не найдена. Включите её кнопкой и положите рядом с телефоном.", "Camera not found. Switch it on with its button and put it next to the phone.")
-        step(tr("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
-        if (!ble.connect(found.device) { step(PAIRING_HINT) }) return tr("Не удалось подключиться по Bluetooth", "Couldn't connect over Bluetooth")
+        } ?: return Phrase("Камера не найдена. Включите её кнопкой и положите рядом с телефоном.", "Camera not found. Switch it on with its button and put it next to the phone.")
+        step(Phrase("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
+        if (!ble.connect(found.device) { step(PAIRING_HINT) }) return Phrase("Не удалось подключиться по Bluetooth", "Couldn't connect over Bluetooth")
         if (!ble.isBonded) {
             ble.disconnect()
-            return tr("Сопряжение не подтверждено. Нажмите «Повторить» и сразу откройте шторку уведомлений.", "Pairing wasn't confirmed. Tap «Try again» and open the notification shade right away.")
+            return Phrase("Сопряжение не подтверждено. Нажмите «Повторить» и сразу откройте шторку уведомлений.", "Pairing wasn't confirmed. Tap «Try again» and open the notification shade right away.")
         }
-        if (!ble.waitSync(2_500) && !ble.wake(authId)) return tr("Камера не отвечает", "The camera doesn't respond")
-        step(tr("Авторизация…", "Authorizing…"))
+        if (!ble.waitSync(2_500) && !ble.wake(authId)) return Phrase("Камера не отвечает", "The camera doesn't respond")
+        step(Phrase("Авторизация…", "Authorizing…"))
         val ok = ble.authorize(authId) { step(AUTH_HINT) }
         ble.disconnect()
         if (ok) cameraName = ble.advertisedName(found)
-        return if (ok) null else tr("Камера не подтвердила подключение", "The camera didn't confirm the connection")
+        return if (ok) null else Phrase("Камера не подтвердила подключение", "The camera didn't confirm the connection")
     }
 
     @Volatile private var authorized = false
@@ -108,20 +107,20 @@ class CameraSession(private val context: Context, private val log: (String) -> U
      * BLE only — find, wake, authorize. Enough to start/stop recording, takes a few seconds, no Wi-Fi.
      * Returns null on success, otherwise a message for the user. [step] reports progress.
      */
-    suspend fun connectControl(step: (String) -> Unit): String? {
+    suspend fun connectControl(step: (Phrase) -> Unit): Phrase? {
         if (hasControl) return null
         // Only the BLE side: a running Wi-Fi link (download, live view) survives a BLE reconnect.
         authorized = false
         ble.disconnect()
-        step(tr("Поиск камеры…", "Looking for the camera…"))
+        step(Phrase("Поиск камеры…", "Looking for the camera…"))
         val name = cameraName
-        val found = ble.scan(name = name) ?: return tr(
+        val found = ble.scan(name = name) ?: return Phrase(
             "Камера%s не найдена. Она рядом и заряжена?",
             "Camera%s not found. Is it nearby and charged?",
         ).format(name?.let { " $it" } ?: "")
-        step(tr("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
+        step(Phrase("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
         if (!ble.connect(found.device) { step(PAIRING_HINT) }) {
-            return tr(
+            return Phrase(
                 "Не удалось подключиться по Bluetooth. Если камера выключена, включите её кнопкой " +
                     "или пройдите настройку заново (меню ⋮).",
                 "Couldn't connect over Bluetooth. If the camera is off, switch it on with its button " +
@@ -129,12 +128,12 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             )
         }
         if (!ble.waitSync(2_500)) {
-            step(tr("Пробуждение камеры…", "Waking the camera…"))
-            if (!ble.wake(authId)) return tr("Камера не проснулась", "The camera didn't wake up")
+            step(Phrase("Пробуждение камеры…", "Waking the camera…"))
+            if (!ble.wake(authId)) return Phrase("Камера не проснулась", "The camera didn't wake up")
         }
-        step(tr("Авторизация…", "Authorizing…"))
+        step(Phrase("Авторизация…", "Authorizing…"))
         if (!ble.authorize(authId) { step(AUTH_HINT) }) {
-            return tr("Камера не подтвердила подключение", "The camera didn't confirm the connection")
+            return Phrase("Камера не подтвердила подключение", "The camera didn't confirm the connection")
         }
         authorized = true
         if (name == null) ble.advertisedName(found)?.let { cameraName = it; log("камера запомнена: «$it»") }
@@ -142,14 +141,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
     }
 
     /** Full connection: BLE control + camera Wi-Fi + TCP 6666 (files, live view). Keeps an existing BLE link. */
-    suspend fun connect(step: (String) -> Unit): String? {
+    suspend fun connect(step: (Phrase) -> Unit): Phrase? {
         connectControl(step)?.let { return it }
         closeWifi()
         closing = false
-        val creds = ble.wifiCredentials() ?: return tr("Не удалось получить пароль Wi-Fi камеры", "Couldn't get the camera's Wi-Fi password")
-        step(tr("Подключение к Wi-Fi камеры…\nподтвердите системный запрос, если появится", "Connecting to the camera's Wi-Fi…\nconfirm the system prompt if it appears"))
-        val net = wifi.connect(creds) ?: return tr("Не удалось подключиться к Wi-Fi камеры", "Couldn't connect to the camera's Wi-Fi")
-        step(tr("Связь с камерой…", "Talking to the camera…"))
+        val creds = ble.wifiCredentials() ?: return Phrase("Не удалось получить пароль Wi-Fi камеры", "Couldn't get the camera's Wi-Fi password")
+        step(Phrase("Подключение к Wi-Fi камеры…\nподтвердите системный запрос, если появится", "Connecting to the camera's Wi-Fi…\nconfirm the system prompt if it appears"))
+        val net = wifi.connect(creds) ?: return Phrase("Не удалось подключиться к Wi-Fi камеры", "Couldn't connect to the camera's Wi-Fi")
+        step(Phrase("Связь с камерой…", "Talking to the camera…"))
         val t = CameraTcp(net, log) { linkLost() }
         val opened = try {
             t.open()
@@ -157,14 +156,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             t.close()
             // A VPN app keeps other apps' traffic out of non-VPN networks: binding fails with EPERM.
             return if (e.message?.contains("EPERM") == true) {
-                tr("Нет доступа к сети камеры. Если включён VPN — отключите его и нажмите «Подключиться».", "No access to the camera's network. If a VPN is on, turn it off and tap «Connect».")
+                Phrase("Нет доступа к сети камеры. Если включён VPN — отключите его и нажмите «Подключиться».", "No access to the camera's network. If a VPN is on, turn it off and tap «Connect».")
             } else {
-                tr("Камера не отвечает по Wi-Fi: ", "The camera doesn't respond over Wi-Fi: ") + e.message
+                Phrase("Камера не отвечает по Wi-Fi: ", "The camera doesn't respond over Wi-Fi: ") + e.message
             }
         }
         if (!opened) {
             t.close()
-            return tr("Камера не отвечает по Wi-Fi", "The camera doesn't respond over Wi-Fi")
+            return Phrase("Камера не отвечает по Wi-Fi", "The camera doesn't respond over Wi-Fi")
         }
         tcp = t
         return null

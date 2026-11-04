@@ -5,7 +5,7 @@ import org.junit.Test
 import java.io.File
 
 /**
- * The tables are keyed by the **English literal** of a `tr(ru, en)` call, so a key that doesn't match the source
+ * The tables are keyed by the **English literal** of a `tr(ru, en)` or `Phrase(ru, en)` call, so a key that doesn't match the source
  * silently falls back to English. This test reads the UI sources and checks both directions: every translatable
  * literal has a line in every table, and no table line is left over after a string is reworded. Strings built at run
  * time (`"… $value"`) can never be a key and are skipped.
@@ -36,14 +36,16 @@ class TextTablesMatchSourcesTest {
         val sources = root.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }
             .sortedBy { it.path }.joinToString("\n") { it.readText() }
         val found = mutableSetOf<String>()
-        var at = sources.indexOf("tr(")
-        while (at >= 0) {
-            val before = sources.getOrNull(at - 1)
-            if (before == null || !(before.isLetterOrDigit() || before == '_')) {
-                val args = argumentsOf(sources, at + 3)
-                if (args.size >= 2) literalOf(args[1])?.let { found += it }
+        for (name in listOf("tr(", "Phrase(")) {
+            var at = sources.indexOf(name)
+            while (at >= 0) {
+                val before = sources.getOrNull(at - 1)
+                if (before == null || !(before.isLetterOrDigit() || before == '_')) {
+                    val args = argumentsOf(sources, at + name.length)
+                    if (args.size >= 2) literalOf(args[1])?.let { found += it }
+                }
+                at = sources.indexOf(name, at + name.length)
             }
-            at = sources.indexOf("tr(", at + 3)
         }
         // The «Стиль» presets reach tr() as enum values (Look.en / Look.aboutEn), so the tr() scan can't see them: they
         // come from Looks.kt instead. Only the English arguments — the Russian ones are the source text, not keys.

@@ -64,11 +64,11 @@ import java.io.File
 
 sealed interface ConnState {
     data object Idle : ConnState
-    data class Working(val step: String) : ConnState
+    data class Working(val step: Phrase) : ConnState
     data object Connected : ConnState
     /** BLE control only (recording works, no files / live view): after «разбудить и записать». */
     data object Remote : ConnState
-    data class Failed(val message: String) : ConnState
+    data class Failed(val message: Phrase) : ConnState
 }
 
 /**
@@ -659,7 +659,7 @@ class CameraController(private val app: Application) {
                         return@launch
                     }
                     // Wi-Fi gone but Bluetooth still there: recording control keeps working.
-                    conn = if (session.hasControl) ConnState.Remote else ConnState.Failed(tr("Связь с камерой потеряна", "Lost the link to the camera"))
+                    conn = if (session.hasControl) ConnState.Remote else ConnState.Failed(Phrase("Связь с камерой потеряна", "Lost the link to the camera"))
                 }
             }
         }
@@ -1071,7 +1071,7 @@ class CameraController(private val app: Application) {
         if (!radiosReady(needWifi = false, retry = ::runSetup)) return
         disconnect()
         linkJob = scope.launch {
-            setup = ConnState.Working(tr("Подготовка…", "Preparing…"))
+            setup = ConnState.Working(Phrase("Подготовка…", "Preparing…"))
             val error = try {
                 session.setup(
                     step = { step -> scope.launch { setup = ConnState.Working(step) } },
@@ -1091,7 +1091,7 @@ class CameraController(private val app: Application) {
                 throw e
             } catch (e: Exception) {
                 log("setup failed: ${e.message}")
-                tr("Ошибка: ", "Error: ") + e.message
+                Phrase("Ошибка: ", "Error: ") + e.message
             }
             setup = if (error == null) ConnState.Connected else ConnState.Failed(error)
         }
@@ -1144,14 +1144,14 @@ class CameraController(private val app: Application) {
         }
         if (!radiosReady(needWifi = true, retry = ::connect)) return
         linkJob = scope.launch {
-            conn = ConnState.Working(tr("Подключение…", "Connecting…"))
+            conn = ConnState.Working(Phrase("Подключение…", "Connecting…"))
             val error = try {
                 session.connect { step -> scope.launch { conn = ConnState.Working(step) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("connect failed: ${e.message}")
-                tr("Ошибка: ", "Error: ") + e.message
+                Phrase("Ошибка: ", "Error: ") + e.message
             }
             if (error != null) {
                 // Only Wi-Fi failed during a recording: keep Bluetooth, the recording stays under control (the camera
@@ -1160,7 +1160,7 @@ class CameraController(private val app: Application) {
                 if (recording) {
                     session.closeWifi()
                     conn = ConnState.Remote
-                    message = error
+                    message = error.text
                     followCapture()
                 } else {
                     session.disconnect()
@@ -1569,7 +1569,7 @@ class CameraController(private val app: Application) {
         if (conn == ConnState.Remote) {
             log("Bluetooth-связь с камерой потеряна")
             disconnect()
-            conn = ConnState.Failed(tr("Связь с камерой потеряна", "Lost the link to the camera"))
+            conn = ConnState.Failed(Phrase("Связь с камерой потеряна", "Lost the link to the camera"))
         } else if (capture != null) {
             capture = null
             recordStartedAt = null
@@ -1736,7 +1736,7 @@ class CameraController(private val app: Application) {
         recordJob = scope.launch {
             try {
                 if (!session.hasControl) {
-                    conn = ConnState.Working(tr("Подключение…", "Connecting…"))
+                    conn = ConnState.Working(Phrase("Подключение…", "Connecting…"))
                     val error = session.connectControl { step -> scope.launch { conn = ConnState.Working(step) } }
                     if (error != null) {
                         session.disconnect()
@@ -2167,14 +2167,14 @@ class CameraController(private val app: Application) {
         if (conn is ConnState.Working) return
         if (!radiosReady(needWifi = false, retry = ::reconnectControl)) return
         linkJob = scope.launch {
-            conn = ConnState.Working(tr("Подключение…", "Connecting…"))
+            conn = ConnState.Working(Phrase("Подключение…", "Connecting…"))
             val error = try {
                 session.connectControl { step -> scope.launch { conn = ConnState.Working(step) } }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log("reconnect failed: ${e.message}")
-                tr("Ошибка: ", "Error: ") + e.message
+                Phrase("Ошибка: ", "Error: ") + e.message
             }
             if (error != null) {
                 session.disconnect()
@@ -2212,7 +2212,7 @@ class CameraController(private val app: Application) {
         log("idle for ${IDLE_VISIBLE_MS / 1000} s: disconnecting")
         disconnect()
         conn = ConnState.Failed(
-            tr(
+            Phrase(
                 "Камера отключена, чтобы не разряжаться без дела.\nНажмите «Подключиться».",
                 "Disconnected to save the camera's battery.\nTap «Connect».",
             ),
