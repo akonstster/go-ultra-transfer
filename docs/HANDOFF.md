@@ -342,6 +342,21 @@ commands; the camera closes TCP when the user opens playback on the camera itsel
 - Camera over USB adb (RT-Thread shell) is **read-only** — see the forbidden list in `CLAUDE.md`.
 - Don't commit personal data (serials, MACs, adb ids, Wi-Fi password): `git grep` before committing.
 - Don't confirm security prompts on the phones yourself; look at the phone screen before tapping.
-- Diagnostics UI/logs: Russian only, debug build only. User UI: RU/EN via `tr()`.
+- Diagnostics screen and its logs: Russian only, debug build only. User UI: 10 languages via `tr(ru, en)`. The 8
+  translated ones sit
+  in `ui/TextXx.kt` keyed by the English string (missing key → English); strings with values carry `%s` and go through
+  `String.format`, so a translation must keep the same placeholders (guarded by `TextTablesTest`).
+- The «Стиль» presets (`camera/Looks.kt`) keep their titles and descriptions in the `Look` enum and reach `tr()` as
+  values, so their English texts must be in the tables as well — `TextTablesMatchSourcesTest` scans `Looks.kt` for them
+  (`lookLiterals`, plain scans rather than regexes: a greedy pattern overflowed the stack on that file).
+- The camera-menu tiles and the «i» file-info rows reach `tr()` as **arguments** (`SettingSpec(param, ru, en, …)`,
+  `SettingGroup(ru, en, …)`, `add(ru, en, …)` in `CameraController.fileInfo`) and the mode names through
+  `modeLabel`, so `TextTablesMatchSourcesTest` scans those calls too (`argumentLiterals`). Before that a missing key
+  there fell back to English silently — that is how the camera menu and the details dialog stayed English.
+- Debug builds only: «Diagnostics» and «Settings self-test» are translated like everything else; the self-test's
+  status line carries `%s` placeholders. The log itself stays Russian.
+- Buttons that share a row with chips (the colour panel's «Reset», the timeline's «+ Piece / Delete / As on camera»)
+  are laid out so the **button** keeps its full width and the chips scroll: in French «Réinitialiser» used to wrap its
+  last letter into a second line.
 - Settings layout stays stable: fixed groups/tiles, grey out instead of hiding.
 - Discuss before changing behaviour; the user tests on the phone and reports back.

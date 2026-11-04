@@ -101,10 +101,16 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private val DAY_FORMAT_RU = DateTimeFormatter.ofPattern("d MMMM yyyy, EEEE", Locale.forLanguageTag("ru"))
-private val DAY_FORMAT_EN = DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy", Locale.ENGLISH)
-
-private fun dayFormat() = if (AppPrefs.russian) DAY_FORMAT_RU else DAY_FORMAT_EN
+/** The day header's date: the month names and the order of the chosen language (Chinese and Japanese write it as 年月日). */
+private fun dayFormat(): DateTimeFormatter {
+    val tag = AppPrefs.languageTag
+    val pattern = when (tag) {
+        "ru" -> "d MMMM yyyy, EEEE"
+        "zh", "ja" -> "yyyy年M月d日"
+        else -> "EEEE, MMMM d, yyyy"
+    }
+    return DateTimeFormatter.ofPattern(pattern, Locale.forLanguageTag(tag))
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -130,7 +136,7 @@ fun GalleryScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (selectionCount > 0) tr("Выбрано: $selectionCount", "Selected: $selectionCount") else "GO Ultra") },
+                title = { Text(if (selectionCount > 0) tr("Выбрано: %s", "Selected: %s").format(selectionCount) else "GO Ultra") },
                 navigationIcon = {
                     if (selectionCount > 0) {
                         IconButton(vm::clearSelection) { Icon(Icons.Filled.Close, tr("Снять выбор", "Clear selection")) }
@@ -159,11 +165,11 @@ fun GalleryScreen(
                                             )
                                         } else {
                                             tr(
-                                                "${countLabel(selectionCount)} будут удалены с карты камеры — восстановить их " +
+                                                "%s будут удалены с карты камеры — восстановить их " +
                                                     "будет нельзя. Уже скачанные копии в галерее телефона останутся.",
-                                                "${countLabel(selectionCount)} will be deleted from the camera's card and can't be " +
+                                                "%s will be deleted from the camera's card and can't be " +
                                                     "recovered. Copies already in the phone's gallery stay.",
-                                            )
+                                            ).format(countLabel(selectionCount))
                                         },
                                     )
                                 },
@@ -208,11 +214,18 @@ fun GalleryScreen(
                         DropdownMenuItem({ Text(tr("О приложении", "About")) }, { menu = false; showAbout = true })
                         DropdownMenuItem({ Text(tr("Настроить камеру заново", "Set up the camera again")) }, { menu = false; vm.restartOnboarding() })
                         DropdownMenuItem({ Text(tr("Отправить журнал", "Send log")) }, { menu = false; onShareLog() })
-                        // Developer tools only in debug builds (and in Russian only).
-                        if (vm.isDebugBuild) DropdownMenuItem({ Text("Диагностика") }, { menu = false; onOpenDiagnostics() })
+                        // Developer tools, in debug builds only.
+                        if (vm.isDebugBuild) {
+                            DropdownMenuItem({ Text(tr("Диагностика", "Diagnostics")) }, { menu = false; onOpenDiagnostics() })
+                        }
                         if (vm.isDebugBuild && vm.isLinked) {
                             DropdownMenuItem(
-                                { Text(if (vm.selfTestRunning) "Самопроверка идёт…" else "Самопроверка настроек") },
+                                {
+                                    Text(
+                                        if (vm.selfTestRunning) tr("Самопроверка идёт…", "Self-test running…")
+                                        else tr("Самопроверка настроек", "Settings self-test"),
+                                    )
+                                },
                                 { menu = false; vm.selfTest() },
                                 enabled = !vm.selfTestRunning,
                             )
@@ -388,12 +401,12 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
             // Counted once per change of the list (vm.filterCounts), not on every tap.
             val counts = vm.filterCounts
             val pick = vm::chooseFilter
-            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все ${counts.all}", "All ${counts.all}")) })
+            FilterChip(vm.filter == Filter.ALL, { pick(Filter.ALL) }, { Text(tr("Все %s", "All %s").format(counts.all)) })
             if (!vm.showsPhone) {
-                FilterChip(vm.filter == Filter.CAMERA, { pick(Filter.CAMERA) }, { Text(tr("Камера ${counts.camera}", "Camera ${counts.camera}")) })
+                FilterChip(vm.filter == Filter.CAMERA, { pick(Filter.CAMERA) }, { Text(tr("Камера %s", "Camera %s").format(counts.camera)) })
             }
-            FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото ${counts.photos}", "Photos ${counts.photos}")) })
-            FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео ${counts.videos}", "Videos ${counts.videos}")) })
+            FilterChip(vm.filter == Filter.PHOTO, { pick(Filter.PHOTO) }, { Text(tr("Фото %s", "Photos %s").format(counts.photos)) })
+            FilterChip(vm.filter == Filter.VIDEO, { pick(Filter.VIDEO) }, { Text(tr("Видео %s", "Videos %s").format(counts.videos)) })
             // The rest only when there is something in them (or picked).
             @Composable
             fun Extra(f: Filter, count: Int, label: String) {
@@ -565,7 +578,7 @@ private fun FileTile(
 }
 
 /** « · пачка 3 из 10» while a batch save runs. */
-private fun batchNote(vm: CameraController): String = vm.batch?.let { tr(" · пачка ${it.index} из ${it.count}", " · batch ${it.index} of ${it.count}") } ?: ""
+private fun batchNote(vm: CameraController): String = vm.batch?.let { tr(" · пачка %s из %s", " · batch %s of %s").format(it.index, it.count) } ?: ""
 
 /** «Сохранить» for the selected videos: one choice for all of them ([BatchSaveDialog]). */
 @Composable
@@ -604,7 +617,7 @@ private fun BatchSaveDialog(vm: CameraController, videos: List<CameraFile>, onDi
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(tr("Сохранить ${videos.size} видео", "Save ${videos.size} videos")) },
+        title = { Text(tr("Сохранить %s видео", "Save %s videos").format(videos.size)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Choice(!marked, { marked = false }, tr("Целиком", "Whole videos"))
@@ -675,7 +688,7 @@ private fun BottomPanel(vm: CameraController) {
             Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(tr("Сохранение с цветом · ${e.name}", "Saving with colour · ${e.name}") + batchNote(vm), fontSize = 14.sp)
+                        Text(tr("Сохранение с цветом · %s", "Saving with colour · %s").format(e.name) + batchNote(vm), fontSize = 14.sp)
                         Text("${e.percent} %", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     TextButton(vm::cancelExport) { Text(tr("Стоп", "Stop")) }
@@ -694,7 +707,7 @@ private fun BottomPanel(vm: CameraController) {
                 Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
+                Text(tr("%s шт.", "%s items").format(selection.size) + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
                 PasteColour(vm, selection)
                 SaveSelected(vm, selection)
                 // Added files: off the list (they stay on the phone).
@@ -719,7 +732,7 @@ private fun BottomPanel(vm: CameraController) {
                 progress != null -> {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(tr("Скачивание ${progress.index} из ${progress.count} · ${progress.name}", "Downloading ${progress.index} of ${progress.count} · ${progress.name}") + batchNote(vm), fontSize = 14.sp)
+                            Text(tr("Скачивание %s из %s · %s", "Downloading %s of %s · %s").format(progress.index, progress.count, progress.name) + batchNote(vm), fontSize = 14.sp)
                             Text(
                                 progress.details(),
                                 fontSize = 12.sp,
@@ -736,7 +749,7 @@ private fun BottomPanel(vm: CameraController) {
                 selection.isNotEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) {
                     var askAlready by remember { mutableStateOf(0) }
                     Text(
-                        tr("${selection.size} шт.", "${selection.size} items") + " · ${formatSize(selection.sumOf { it.size ?: 0L })}",
+                        tr("%s шт.", "%s items").format(selection.size) + " · ${formatSize(selection.sumOf { it.size ?: 0L })}",
                         Modifier.weight(1f),
                     )
                     PasteColour(vm, selection)
@@ -751,7 +764,7 @@ private fun BottomPanel(vm: CameraController) {
                     val newCount = vm.visibleFiles.count { it.name !in vm.downloaded }
                     Column(Modifier.weight(1f)) {
                         Text(
-                            if (newCount > 0) tr("Не скачано: $newCount", "Not downloaded: $newCount") else tr("Всё скачано", "All downloaded"),
+                            if (newCount > 0) tr("Не скачано: %s", "Not downloaded: %s").format(newCount) else tr("Всё скачано", "All downloaded"),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
@@ -773,7 +786,7 @@ private fun AlreadyDownloadedDialog(vm: CameraController, count: Int, onDismiss:
     val total = vm.selected.size
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(tr("Уже в галерее: $count из $total", "Already in the gallery: $count of $total")) },
+        title = { Text(tr("Уже в галерее: %s из %s", "Already in the gallery: %s of %s").format(count, total)) },
         text = { Text(tr("Пропустить их или скачать заново поверх имеющихся? Дубликатов не будет.", "Skip them or download again over the existing ones? No duplicates will be made.")) },
         confirmButton = {
             TextButton({ onDismiss(); vm.downloadSelected(overwrite = false) }) { Text(tr("Пропустить", "Skip")) }

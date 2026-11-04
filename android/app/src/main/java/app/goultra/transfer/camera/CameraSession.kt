@@ -116,9 +116,9 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         step(tr("Поиск камеры…", "Looking for the camera…"))
         val name = cameraName
         val found = ble.scan(name = name) ?: return tr(
-            "Камера${name?.let { " $it" } ?: ""} не найдена. Она рядом и заряжена?",
-            "Camera${name?.let { " $it" } ?: ""} not found. Is it nearby and charged?",
-        )
+            "Камера%s не найдена. Она рядом и заряжена?",
+            "Camera%s not found. Is it nearby and charged?",
+        ).format(name?.let { " $it" } ?: "")
         step(tr("Подключение по Bluetooth…", "Connecting over Bluetooth…"))
         if (!ble.connect(found.device) { step(PAIRING_HINT) }) {
             return tr(

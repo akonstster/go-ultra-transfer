@@ -225,7 +225,7 @@ class CameraController(private val app: Application) {
         val look = copiedLook ?: return 0
         val targets = selectedFiles.filter { it.kind == MediaKind.VIDEO || canColourPhoto(it) }
         targets.forEach { saveLook(it, look) }
-        message = tr("Цвет вставлен: ${targets.size}", "Colour pasted: ${targets.size}")
+        message = tr("Цвет вставлен: %s", "Colour pasted: %s").format(targets.size)
         return targets.size
     }
 
@@ -277,7 +277,7 @@ class CameraController(private val app: Application) {
                     bitmap.recycle()
                 }
                 loadPhoneFiles()
-                tr("Сохранено: $name", "Saved: $name")
+                tr("Сохранено: %s", "Saved: %s").format(name)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -926,8 +926,8 @@ class CameraController(private val app: Application) {
                 }
             }
             addedFiles = storedAdded()
-            message = tr("Добавлено: $added", "Added: $added") +
-                (if (already > 0) tr(", уже в списке: $already", ", already in the list: $already") else "")
+            message = tr("Добавлено: %s", "Added: %s").format(added) +
+                (if (already > 0) tr(", уже в списке: %s", ", already in the list: %s").format(already) else "")
         }
     }
 
@@ -945,7 +945,7 @@ class CameraController(private val app: Application) {
         scope.launch {
             addedLock.withLock { forgetAdded(gone) }
             addedFiles = storedAdded()
-            message = tr("Убрано из списка: ${gone.size} (на телефоне файлы остались)", "Taken off the list: ${gone.size} (the files stay on the phone)")
+            message = tr("Убрано из списка: %s (на телефоне файлы остались)", "Taken off the list: %s (the files stay on the phone)").format(gone.size)
         }
     }
 
@@ -1296,7 +1296,7 @@ class CameraController(private val app: Application) {
             val startMode = settings?.mode ?: runCatching { session.readSettings() }.getOrNull()?.mode
             try {
                 for ((mode, m) in SettingCodes.modes) {
-                    message = "Самопроверка: ${mode.lowercase()}…"
+                    message = tr("Самопроверка: %s…", "Self-test: %s…").format(mode.lowercase())
                     if (!switchMode(m)) {
                         problems += "$mode: режим не включился"
                         continue
@@ -1347,7 +1347,10 @@ class CameraController(private val app: Application) {
                     session.readSettings()?.let(::showSettings)
                 }
                 log("самопроверка: проверок $checks, ошибок ${problems.size}" + problems.joinToString("") { "\n  $it" })
-                message = "Самопроверка: проверок $checks, ошибок ${problems.size} (подробности в журнале)"
+                message = tr(
+                    "Самопроверка: проверок %s, ошибок %s (подробности в журнале)",
+                    "Self-test: %s checks, %s errors (details in the log)",
+                ).format(checks, problems.size)
                 settingBusy = null
                 selfTestRunning = false
             }
@@ -2454,8 +2457,8 @@ class CameraController(private val app: Application) {
             }
             add("Живое фото", "Live photo", when {
                 localBytes == null && file.size != null && liveClip?.size != null ->
-                    tr("фото ${formatSize(file.size!!)} + ролик ${formatSize(liveClip.size!!)}",
-                        "photo ${formatSize(file.size!!)} + clip ${formatSize(liveClip.size!!)}")
+                    tr("фото %s + ролик %s", "photo %s + clip %s")
+                        .format(formatSize(file.size!!), formatSize(liveClip.size!!))
                 file.isLive -> tr("да", "yes")
                 else -> null
             })
@@ -2791,15 +2794,15 @@ class CameraController(private val app: Application) {
                         failed++
                     }
                 }
-                lastResult = tr("Скачано: $ok", "Downloaded: $ok") +
-                    (if (skipped > 0) tr(", уже в галерее: $skipped", ", already in the gallery: $skipped") else "") +
-                    (if (failed > 0) tr(", ошибок: $failed", ", errors: $failed") else "") +
+                lastResult = tr("Скачано: %s", "Downloaded: %s").format(ok) +
+                    (if (skipped > 0) tr(", уже в галерее: %s", ", already in the gallery: %s").format(skipped) else "") +
+                    (if (failed > 0) tr(", ошибок: %s", ", errors: %s").format(failed) else "") +
                     (if (ok + failed + skipped < queue.size) tr(", прервано", ", interrupted") else "")
             } catch (e: CancellationException) {
                 lastResult = tr(
-                    "Остановлено, скачано: $ok (недокачанное продолжится в следующий раз)",
-                    "Stopped, downloaded: $ok (unfinished files resume next time)",
-                )
+                    "Остановлено, скачано: %s (недокачанное продолжится в следующий раз)",
+                    "Stopped, downloaded: %s (unfinished files resume next time)",
+                ).format(ok)
                 throw e
             } finally {
                 download = null
@@ -2977,7 +2980,7 @@ class CameraController(private val app: Application) {
                     }
                 }
                 val seconds = cut.sumOf { it.endMs!! - it.startMs } / 1000.0
-                lastResult = tr("Клип сохранён: $name · ", "Clip saved: $name · ") + "%.1f ".format(seconds) + tr("с", "s")
+                lastResult = tr("Клип сохранён: %s · ", "Clip saved: %s · ").format(name) + "%.1f ".format(seconds) + tr("с", "s")
                 // Asked for vs cut (the starts move back to key frames: shows how far apart they are on this camera).
                 log(
                     "клип $name " + (if (local == null) "(с камеры)" else "(с телефона)") +
@@ -3159,7 +3162,7 @@ class CameraController(private val app: Application) {
                         (parts?.let { "куски ${it.joinToString { p -> "${p.startMs}–${p.endMs}" }}, " } ?: "целиком, ") +
                         (if (camera != null) "с камеры, " else "") + "$sec с",
                 )
-                lastResult = tr("Сохранено: $name", "Saved: $name")
+                lastResult = tr("Сохранено: %s", "Saved: %s").format(name)
                 forgetThumbnail(name)
                 lastSaveOk = true
                 loadPhoneFiles()
@@ -3232,11 +3235,12 @@ class CameraController(private val app: Application) {
                     val ok = if (download) withContext(Dispatchers.IO) { Downloader.galleryUri(app, file.name) != null } else lastSaveOk
                     if (ok) started++ else failed++
                 }
-                lastResult = tr("Пачка готова: сохранено $started из ${videos.size}", "Batch done: $started of ${videos.size} saved") +
-                    (if (failed > 0) tr(", не удалось $failed (см. журнал)", ", $failed failed (see the log)") else "") +
-                    (if (skipped > 0) tr(", пропущено $skipped (нечего сохранять)", ", $skipped skipped (nothing to save)") else "")
+                lastResult = tr("Пачка готова: сохранено %s из %s", "Batch done: %s of %s saved")
+                    .format(started, videos.size) +
+                    (if (failed > 0) tr(", не удалось %s (см. журнал)", ", %s failed (see the log)").format(failed) else "") +
+                    (if (skipped > 0) tr(", пропущено %s (нечего сохранять)", ", %s skipped (nothing to save)").format(skipped) else "")
             } catch (e: CancellationException) {
-                lastResult = tr("Пачка остановлена: сделано $started из ${videos.size}", "Batch stopped: $started of ${videos.size} done")
+                lastResult = tr("Пачка остановлена: сделано %s из %s", "Batch stopped: %s of %s done").format(started, videos.size)
                 throw e
             } finally {
                 batch = null

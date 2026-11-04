@@ -196,17 +196,17 @@ private val GROUPS = listOf(
 
 private fun modeLabel(mode: String): String = when (mode) {
     "VIDEO_NORMAL" -> tr("Видео", "Video")
-    "VIDEO_PURE" -> "PureVideo"
+    "VIDEO_PURE" -> tr("PureVideo", "PureVideo")
     "VIDEO_SLOW_MOTION" -> tr("Замедление", "Slow motion")
-    "VIDEO_TIMESHIFT" -> "TimeShift"
+    "VIDEO_TIMESHIFT" -> tr("TimeShift", "TimeShift")
     "VIDEO_TIMELAPSE" -> tr("Таймлапс", "Timelapse")
     "VIDEO_LOOPRECORDING" -> tr("Петля", "Loop")
-    "VIDEO_SUPER" -> "FreeFrame"
+    "VIDEO_SUPER" -> tr("FreeFrame", "FreeFrame")
     "VIDEO_BABYVIEW" -> tr("Глазами ребёнка", "Toddler Titan")
     "PHOTO_SINGLE" -> tr("Фото", "Photo")
     "PHOTO_BURST" -> tr("Серия", "Burst")
     "PHOTO_INTERVAL" -> tr("Интервал", "Interval")
-    "PHOTO_STARLAPSE" -> "Starlapse"
+    "PHOTO_STARLAPSE" -> tr("Starlapse", "Starlapse")
     else -> mode
 }
 
@@ -299,7 +299,7 @@ private fun valueLabel(param: String, value: String?): String = when {
     param == "video_iso_top_limit" -> if (value == "0") tr("Нет", "None") else value
     param == "lapse_time" -> "$value " + tr("с", "s")
     param == "record_duration" -> durationLabel(value)
-    param == "burst_capture_params" -> value.split('/').let { if (it.size == 2) tr("${it[0]} за ${it[1]} с", "${it[0]} in ${it[1]} s") else value }
+    param == "burst_capture_params" -> value.split('/').let { if (it.size == 2) tr("%s за %s с", "%s in %s s").format(it[0], it[1]) else value }
     value == "true" -> tr("Вкл", "On")
     value == "false" -> tr("Выкл", "Off")
     else -> value

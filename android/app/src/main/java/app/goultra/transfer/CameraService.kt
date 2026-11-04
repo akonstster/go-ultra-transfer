@@ -162,7 +162,7 @@ class CameraService : Service() {
         if (p != null || controller.isDownloading) {
             val percent = if (p != null && p.total > 0) (p.done * 100 / p.total).toInt() else 0
             builder.setSmallIcon(android.R.drawable.stat_sys_download)
-                .setContentTitle(if (p == null) tr("Подготовка к скачиванию…", "Preparing download…") else tr("Скачивание ${p.index} из ${p.count}", "Downloading ${p.index} of ${p.count}"))
+                .setContentTitle(if (p == null) tr("Подготовка к скачиванию…", "Preparing download…") else tr("Скачивание %s из %s", "Downloading %s of %s").format(p.index, p.count))
                 .setContentText(p?.let { "${it.name} · ${it.details()}" })
                 .setProgress(100, percent, p == null || p.total <= 0)
                 .addAction(0, tr("Стоп", "Stop"), serviceIntent(ACTION_CANCEL, 1))
@@ -188,7 +188,7 @@ class CameraService : Service() {
             builder.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .setContentTitle(tr("Камера подключена", "Camera connected"))
                 .setContentText(
-                    if (left != null) tr("Отключится через ${(left + 59) / 60} мин, если не вернуться в приложение", "Disconnects in ${(left + 59) / 60} min unless you return to the app")
+                    if (left != null) tr("Отключится через %s мин, если не вернуться в приложение", "Disconnects in %s min unless you return to the app").format((left + 59) / 60)
                     else "GO Ultra Transfer",
                 )
                 .addAction(0, tr("Отключить", "Disconnect"), serviceIntent(ACTION_DISCONNECT, 2))

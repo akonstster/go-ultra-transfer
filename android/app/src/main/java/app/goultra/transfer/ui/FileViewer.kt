@@ -477,7 +477,7 @@ private fun MissingAddedFile(fileName: String, onRemove: () -> Unit, onClose: ()
         verticalArrangement = Arrangement.Center,
     ) {
         Text(
-            tr("Файл «$fileName» недоступен или удалён.", "File “$fileName” is unavailable or was deleted."),
+            tr("Файл «%s» недоступен или удалён.", "File “%s” is unavailable or was deleted.").format(fileName),
             color = Color.White,
             textAlign = TextAlign.Center,
         )
@@ -559,8 +559,8 @@ private fun PhotoSaveDialog(vm: CameraController, file: CameraFile, photo: Camer
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    if (colour) tr("Копия …_COLOR.jpg, сведения о съёмке сохраняются; большие фото — до $PHOTO_SAVE_SIDE пикселей по длинной стороне.",
-                        "A copy …_COLOR.jpg with the shooting details; big photos at most $PHOTO_SAVE_SIDE px on the long side.")
+                    if (colour) tr("Копия …_COLOR.jpg, сведения о съёмке сохраняются; большие фото — до %s пикселей по длинной стороне.",
+                        "A copy …_COLOR.jpg with the shooting details; big photos at most %s px on the long side.").format(PHOTO_SAVE_SIDE)
                     else tr("Скачивание оригинала.", "Downloads the original."),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -611,7 +611,7 @@ private fun SaveDialog(vm: CameraController, file: CameraFile, pieces: List<High
         AlertDialog(
             onDismissRequest = { taken = null },
             title = { Text(tr("Файл уже есть", "The file already exists")) },
-            text = { Text(tr("В галерее уже есть $takenName. Заменить его или сохранить новый отдельно?", "$takenName is already in the gallery. Replace it, or save the new one separately?")) },
+            text = { Text(tr("В галерее уже есть %s. Заменить его или сохранить новый отдельно?", "%s is already in the gallery. Replace it, or save the new one separately?").format(takenName)) },
             confirmButton = { TextButton({ start(takenName) }) { Text(tr("Заменить", "Replace")) } },
             dismissButton = {
                 TextButton({ scope.launch { start(vm.freeSaveName(file, marked, colour, !sound)) } }) { Text(tr("Сохранить отдельно", "Save separately")) }
@@ -1045,9 +1045,9 @@ private fun VideoPreview(
             text = {
                 Text(
                     tr(
-                        "Уже есть отмеченные куски (${pieces.size}). Заменить их одним куском на всё видео, чтобы обрезать начало и конец? Или оставить куски и править их.",
-                        "There are marked pieces (${pieces.size}). Replace them with one piece over the whole video to trim its start and end? Or keep the pieces and edit them.",
-                    ),
+                        "Уже есть отмеченные куски (%s). Заменить их одним куском на всё видео, чтобы обрезать начало и конец? Или оставить куски и править их.",
+                        "There are marked pieces (%s). Replace them with one piece over the whole video to trim its start and end? Or keep the pieces and edit them.",
+                    ).format(pieces.size),
                 )
             },
             confirmButton = { TextButton({ askTrim = false; trimWhole() }) { Text(tr("Заменить", "Replace")) } },
@@ -1324,19 +1324,24 @@ private fun ColorPanel(
                 selectedContainerColor = Color(0x33FFFFFF),
                 selectedLabelColor = Color.White,
             )
-            FilterChip(!filmTab, { filmTab = false }, { Text(tr("Свет и цвет", "Light & colour")) }, colors = tabColors)
-            Spacer(Modifier.width(8.dp))
-            FilterChip(
-                filmTab, { filmTab = true }, { Text(tr("Стиль", "Look")) },
-                colors = tabColors,
-                leadingIcon = if (look.film > 0f || look.grain > 0f || look.halation > 0f || look.warmth != 0f ||
-                    look.skin > 0f || (look.preset != 0 && look.presetStrength > 0f)
-                ) {
-                    { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
-                } else null,
-            )
-            Spacer(Modifier.weight(1f))
-            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White) }
+            // The chips scroll and the «Сбросить» button keeps its full width: in a long language the label
+            // must not be squeezed into a second line (French «Réinitialiser» used to wrap its last letter).
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(!filmTab, { filmTab = false }, { Text(tr("Свет и цвет", "Light & colour")) }, colors = tabColors)
+                FilterChip(
+                    filmTab, { filmTab = true }, { Text(tr("Стиль", "Look")) },
+                    colors = tabColors,
+                    leadingIcon = if (look.film > 0f || look.grain > 0f || look.halation > 0f || look.warmth != 0f ||
+                        look.skin > 0f || (look.preset != 0 && look.presetStrength > 0f)
+                    ) {
+                        { Box(Modifier.size(8.dp).background(MARK_COLOR, CircleShape)) }
+                    } else null,
+                )
+            }
+            if (changed) TextButton(onReset) { Text(tr("Сбросить", "Reset"), color = Color.White, maxLines = 1) }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (filmTab) {
@@ -1381,7 +1386,7 @@ private fun ColourActions(
         val saving = vm.export
         if (saving != null) {
             Text(
-                tr("Сохранение ${saving.percent} %", "Saving ${saving.percent} %"),
+                tr("Сохранение %s %%", "Saving %s %%").format(saving.percent),
                 color = Color.White,
                 fontSize = 12.sp,
                 modifier = Modifier.background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
@@ -1841,7 +1846,10 @@ private fun TimelineEditor(
                 }
             }
         }
-        Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.padding(horizontal = 8.dp).horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TextButton({ onAdd(pos) }) { Text(tr("+ Кусок", "+ Piece"), color = Color.White) }
             if (current in pieces.indices) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
             if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
