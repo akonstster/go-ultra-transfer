@@ -29,3 +29,8 @@ ble/snapshots/
 *.h265
 *.log
 probe*/
+# Release signing: the keystore and its passwords stay out of the public repo
+android/keystore.properties
+android/keystore/
+*.jks
+*.keystore

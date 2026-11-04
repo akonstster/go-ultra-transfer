@@ -197,8 +197,11 @@ high-quality targeting (`experimentalSetEnableHighQualityTargeting`, media3 refu
 the encoder settings also ask for the original's H.264 profile and level and its key-frame interval (`setiFrameIntervalSeconds`,
 kept when the original's GOP is over 1.5 s — the default 1 s would add key frames), the codec does its own for H.265
 (8-bit only: an I-Log file's 10 bits aren't kept); the log prints fps in → out, GOP, and the bitrate asked → got.
-Release builds: `assembleRelease` (R8, signed with the debug key as before) → `app/build/outputs/apk/release/`,
-published as `GoUltraTransfer-<version>.apk`.
+Release builds: `assembleRelease` (R8, signed with the project's own keystore) → `app/build/outputs/apk/release/`,
+published as `GoUltraTransfer-<version>.apk`. The key lives in `android/keystore/gut-release.jks` (alias `gut`), its
+passwords in `android/keystore.properties` — both gitignored; a machine without that file falls back to the debug
+key. After a signature change the phone has to uninstall the old build first (app data goes with it: the language,
+the camera's authorization id — the camera asks to allow the phone again).
 Poco reboot (logcat -b crash): system_server died in `WifiNetworkFactory$ConnectionTimeoutAlarmListener.onAlarm`
 (NPE on `mUserSelectedNetwork.BSSID`) — an Android 12 bug when an app takes back a `WifiNetworkSpecifier` request while
 the system is still connecting. `CameraWifi` now takes a request back only after its answer (onAvailable /

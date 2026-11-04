@@ -187,7 +187,9 @@ cd android
 The finished APK: `android/app/build/outputs/apk/debug/app-debug.apk`.
 A debug build adds «Diagnostics» and «Settings self-test» to the menu (it walks every mode and value, writes and
 reads them back, then restores the settings).
-The release build (`assembleRelease`) is currently signed with the debug key — use your own for your releases.
+The release build (`assembleRelease`) is signed with the project's own keystore: `android/keystore.properties`
+(gitignored) points at it — keep that file, the `.jks` and the passwords safe; without them the build falls back
+to the debug key.
 The unit tests cover the protocol, the media work and the saving logic; MediaStore, Bluetooth, Wi-Fi and export
 additionally need checking on a real phone and camera.
 
