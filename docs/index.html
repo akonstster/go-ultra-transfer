@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GO Ultra Transfer — Android app for the Insta360 GO Ultra</title>
+<meta name="description" content="Open-source Android app for the Insta360 GO Ultra: wakes the camera over Bluetooth, downloads files, controls shooting, live preview, colour and highlight clips. No account, no ads, no cloud.">
+<meta name="theme-color" content="#2B3A4E">
+<style>
+  :root { --bg:#0f141b; --card:#18202b; --text:#e8edf3; --muted:#9aa7b6; --accent:#f2c94c; --link:#7cc4ff; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f7fa; --card:#ffffff; --text:#18202b; --muted:#566373; --accent:#b8860b; --link:#0b63b6; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  a { color:var(--link); }
+  .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
+  header.hero { position:relative; padding:56px 0 36px; background:#2B3A4E; color:#fff; }
+  header.hero h1 { margin:0 0 8px; font-size:2.2rem; }
+  header.hero p { margin:0 0 20px; max-width:640px; color:#d5deea; font-size:1.1rem; }
+  .buttons { display:flex; flex-wrap:wrap; gap:12px; }
+  .btn { display:inline-block; padding:12px 22px; border-radius:999px; font-weight:600; text-decoration:none; }
+  .btn.primary { background:#f2c94c; color:#18202b; }
+  .btn.ghost { border:1px solid rgba(255,255,255,.55); color:#fff; }
+  .lang { position:absolute; top:14px; right:20px; }
+  .lang button { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.5); border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  .lang button[aria-pressed="true"] { background:rgba(255,255,255,.2); }
+  main { padding:32px 0 8px; }
+  h2 { margin:36px 0 14px; font-size:1.4rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+  .card { background:var(--card); border-radius:12px; padding:16px 18px; box-shadow:0 1px 3px rgba(0,0,0,.25); }
+  .card h3 { margin:0 0 6px; font-size:1.05rem; color:var(--accent); }
+  .card p { margin:0; color:var(--muted); font-size:.95rem; }
+  ol, ul { padding-left:1.2rem; }
+  li { margin:4px 0; }
+  code { background:rgba(127,127,127,.18); padding:1px 5px; border-radius:4px; }
+  footer { margin-top:40px; padding:24px 0 40px; border-top:1px solid rgba(127,127,127,.25); color:var(--muted); font-size:.9rem; }
+  .shots { display:flex; gap:14px; overflow-x:auto; padding:4px 2px 14px; scroll-snap-type:x proximity; }
+  .shots figure { flex:0 0 220px; margin:0; scroll-snap-align:start; }
+  .shots img { display:block; width:220px; height:auto; border-radius:14px; box-shadow:0 2px 8px rgba(0,0,0,.35); background:var(--card); }
+  .shots figcaption { margin-top:8px; font-size:.85rem; color:var(--muted); text-align:center; }
+  [data-l] { display:none; }
+  html[lang="en"] [data-l="en"], html[lang="ru"] [data-l="ru"] { display:revert; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="lang" role="group" aria-label="Language">
+    <button type="button" data-set="en" aria-pressed="true">EN</button>
+    <button type="button" data-set="ru" aria-pressed="false">RU</button>
+  </div>
+  <div class="wrap">
+    <h1>GO Ultra Transfer</h1>
+    <p data-l="en">An open-source Android app for the Insta360 GO Ultra. Your files and the camera's controls — no account, no ads, no cloud.</p>
+    <p data-l="ru">Android-приложение с открытым кодом для Insta360 GO Ultra. Ваши файлы и управление камерой — без аккаунта, рекламы и облака.</p>
+    <div class="buttons">
+      <a class="btn primary" href="https://github.com/akonstster/go-ultra-transfer/releases/latest">
+        <span data-l="en">Download the APK</span><span data-l="ru">Скачать APK</span>
+      </a>
+      <a class="btn ghost" href="https://github.com/akonstster/go-ultra-transfer">
+        <span data-l="en">Source code</span><span data-l="ru">Исходный код</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <h2 data-l="en">What it does</h2>
+  <h2 data-l="ru">Что умеет</h2>
+  <div class="grid">
+    <div class="card">
+      <h3 data-l="en">One-button connection</h3><h3 data-l="ru">Подключение одной кнопкой</h3>
+      <p data-l="en">Wakes the camera over Bluetooth — even a switched-off one — and joins its Wi-Fi by itself.</p>
+      <p data-l="ru">Будит камеру по Bluetooth, даже выключенную, и сам подключается к её Wi-Fi.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Files and downloads</h3><h3 data-l="ru">Файлы и скачивание</h3>
+      <p data-l="en">Previews, view straight from the camera, background download to the gallery with resume, no duplicates.</p>
+      <p data-l="ru">Превью, просмотр прямо с камеры, скачивание в галерею в фоне с докачкой, без дублей.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Live photos</h3><h3 data-l="ru">Живые фото</h3>
+      <p data-l="en">Saved as Android Motion Photo with the original clip kept inside; pick any frame as the cover.</p>
+      <p data-l="ru">Сохраняются как Android Motion Photo с исходным роликом внутри; любой кадр можно сделать обложкой.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Shooting and live view</h3><h3 data-l="ru">Съёмка и трансляция</h3>
+      <p data-l="en">Record and take photos from the phone, live preview, all of the camera's settings for its 12 modes.</p>
+      <p data-l="ru">Запись и фото с телефона, трансляция, все настройки камеры для её 12 режимов.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Highlights and clips</h3><h3 data-l="ru">Отметки и клипы</h3>
+      <p data-l="en">Shows the camera's highlight marks, edits the pieces on a timeline and saves them as one clip without re-encoding.</p>
+      <p data-l="ru">Показывает отметки камеры, правит куски на временной шкале и сохраняет их одним клипом без перекодирования.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Colour</h3><h3 data-l="ru">Цвет</h3>
+      <p data-l="en">I-Log → Rec.709, exposure, saturation, sharpness and film looks for videos, photos and live photos.</p>
+      <p data-l="ru">I-Log → Rec.709, экспозиция, насыщенность, резкость и плёночные стили для видео, фото и живых фото.</p>
+    </div>
+  </div>
+
+  <h2 data-l="en">Screenshots</h2>
+  <h2 data-l="ru">Скриншоты</h2>
+  <div class="shots">
+    <figure>
+      <img src="screenshots/connect.jpg" width="579" height="1280" loading="lazy" alt="Connect screen with the setup steps and the VPN hint">
+      <figcaption data-l="en">Setup: pair and connect</figcaption><figcaption data-l="ru">Настройка: сопряжение и подключение</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/camera-video.jpg" width="579" height="1280" loading="lazy" alt="Camera tab with the live preview and video settings">
+      <figcaption data-l="en">Live view and video settings</figcaption><figcaption data-l="ru">Трансляция и настройки видео</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/camera-photo.jpg" width="579" height="1280" loading="lazy" alt="Camera tab in photo mode with the resolution sheet">
+      <figcaption data-l="en">Photo mode, resolution sheet</figcaption><figcaption data-l="ru">Режим фото, выбор разрешения</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/highlights.jpg" width="579" height="1280" loading="lazy" alt="Viewer with the highlighted pieces as a film strip">
+      <figcaption data-l="en">Highlights as a film strip</figcaption><figcaption data-l="ru">Отметки «плёнкой»</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/film-strip.jpg" width="579" height="1280" loading="lazy" alt="Editing the marked pieces on a timeline">
+      <figcaption data-l="en">Editing pieces on a timeline</figcaption><figcaption data-l="ru">Правка кусков на временной шкале</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/colour.jpg" width="579" height="1280" loading="lazy" alt="Colour panel with film look presets and sliders">
+      <figcaption data-l="en">Colour: film looks</figcaption><figcaption data-l="ru">Цвет: плёночные стили</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/file-info.jpg" width="579" height="1280" loading="lazy" alt="File details dialog with EXIF data">
+      <figcaption data-l="en">File details (EXIF)</figcaption><figcaption data-l="ru">Сведения о файле (EXIF)</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/languages.jpg" width="579" height="1280" loading="lazy" alt="Language choice list with 10 languages">
+      <figcaption data-l="en">10 interface languages</figcaption><figcaption data-l="ru">10 языков интерфейса</figcaption>
+    </figure>
+  </div>
+
+  <h2 data-l="en">Getting started</h2>
+  <h2 data-l="ru">Как начать</h2>
+  <div data-l="en">
+    <ol>
+      <li>Download the APK from <a href="https://github.com/akonstster/go-ultra-transfer/releases/latest">Releases</a> and install it (you may need to allow installs from unknown sources).</li>
+      <li>Switch the camera on with its button and put it next to the phone.</li>
+      <li>Confirm the <strong>pairing</strong> — Android shows the request as a notification in the shade.</li>
+      <li>Confirm the <strong>connection on the camera's screen</strong>.</li>
+    </ol>
+    <p>After that you do not need to switch the camera on — the app wakes it itself.</p>
+  </div>
+  <div data-l="ru">
+    <ol>
+      <li>Скачайте APK из раздела <a href="https://github.com/akonstster/go-ultra-transfer/releases/latest">Releases</a> и установите его (может понадобиться разрешить установку из неизвестных источников).</li>
+      <li>Включите камеру кнопкой и положите рядом с телефоном.</li>
+      <li>Подтвердите <strong>сопряжение</strong> — Android показывает запрос уведомлением в шторке.</li>
+      <li>Подтвердите <strong>подключение на экране камеры</strong>.</li>
+    </ol>
+    <p>Дальше включать камеру не нужно — приложение будит её само.</p>
+  </div>
+
+  <h2 data-l="en">Requirements</h2>
+  <h2 data-l="ru">Требования</h2>
+  <ul data-l="en">
+    <li>Android 10 or newer; no Google Play Services needed.</li>
+    <li>Insta360 GO Ultra, tested with firmware v1.9.29.</li>
+    <li>A VPN on the phone can block the camera's Wi-Fi — switch it off or exclude the app.</li>
+  </ul>
+  <ul data-l="ru">
+    <li>Android 10 или новее; сервисы Google не нужны.</li>
+    <li>Insta360 GO Ultra, проверено с прошивкой v1.9.29.</li>
+    <li>VPN на телефоне может мешать Wi-Fi камеры — отключите его или добавьте приложение в исключения.</li>
+  </ul>
+
+  <h2 data-l="en">Languages</h2>
+  <h2 data-l="ru">Языки интерфейса</h2>
+  <p>Русский · English · Français · Italiano · Español · Deutsch · Português · Türkçe · 中文（简体）· 日本語</p>
+
+  <h2 data-l="en">For developers</h2>
+  <h2 data-l="ru">Разработчикам</h2>
+  <p data-l="en">The camera's protocol (Bluetooth, TCP 6666, HTTP) was reverse-engineered; the notes are in
+    <a href="https://github.com/akonstster/go-ultra-transfer/blob/main/docs/PROTOCOL.md"><code>docs/PROTOCOL.md</code></a>.
+    The app is MIT-licensed.</p>
+  <p data-l="ru">Протокол камеры (Bluetooth, TCP 6666, HTTP) восстановлен обратной разработкой; заметки —
+    в <a href="https://github.com/akonstster/go-ultra-transfer/blob/main/docs/PROTOCOL.md"><code>docs/PROTOCOL.md</code></a>.
+    Лицензия приложения — MIT.</p>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span data-l="en">Not affiliated with Insta360. “Insta360” and “GO Ultra” belong to their owners.</span>
+    <span data-l="ru">Не связано с Insta360. «Insta360» и «GO Ultra» принадлежат их владельцам.</span>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var buttons = document.querySelectorAll('.lang button');
+    function set(lang) {
+      root.lang = lang;
+      buttons.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.set === lang)); });
+      try { localStorage.setItem('lang', lang); } catch (e) {}
+    }
+    buttons.forEach(function (b) { b.addEventListener('click', function () { set(b.dataset.set); }); });
+    var saved = null;
+    try { saved = localStorage.getItem('lang'); } catch (e) {}
+    set(saved || ((navigator.language || '').toLowerCase().indexOf('ru') === 0 ? 'ru' : 'en'));
+  })();
+</script>
+</body>
+</html>
