@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GO Ultra Transfer — Android app for the Insta360 GO Ultra</title>
-<meta name="description" content="Open-source Android app for the Insta360 GO Ultra: wakes the camera over Bluetooth, downloads files, controls shooting, live preview, colour and highlight clips. No account, no ads, no cloud.">
+<meta name="description" content="Open-source Android app for the Insta360 GO Ultra: wakes the camera over Bluetooth, downloads files, cuts clips without downloading them whole, film-look colour on the fly. Under 5 MB — no account, no ads, no cloud.">
 <meta name="theme-color" content="#2B3A4E">
 <style>
   :root { --bg:#0f141b; --card:#18202b; --text:#e8edf3; --muted:#9aa7b6; --accent:#f2c94c; --link:#7cc4ff; }
@@ -31,6 +31,7 @@
   .card { background:var(--card); border-radius:12px; padding:16px 18px; box-shadow:0 1px 3px rgba(0,0,0,.25); }
   .card h3 { margin:0 0 6px; font-size:1.05rem; color:var(--accent); }
   .card p { margin:0; color:var(--muted); font-size:.95rem; }
+  .grid.adv .card { border-left:3px solid var(--accent); }
   ol, ul { padding-left:1.2rem; }
   li { margin:4px 0; }
   code { background:rgba(127,127,127,.18); padding:1px 5px; border-radius:4px; }
@@ -66,6 +67,26 @@
 </header>
 
 <main class="wrap">
+
+  <h2 data-l="en">Why it stands out</h2>
+  <h2 data-l="ru">Чем выделяется</h2>
+  <div class="grid adv">
+    <div class="card">
+      <h3 data-l="en">Editing without downloading the whole clip</h3><h3 data-l="ru">Монтаж без перекачивания всего файла</h3>
+      <p data-l="en">Cut 20 seconds out of the middle of a 30 GB clip: the app reads only those bytes from the camera over Wi-Fi and saves the piece straight to the gallery — the whole file never lands on the phone. Several pieces can be joined into one clip, saved as shot without re-encoding.</p>
+      <p data-l="ru">Вырезать 20 секунд из середины 30-гигабайтного ролика: приложение читает с камеры только нужные байты и сразу сохраняет кусок в галерею — целиком файл в телефон не попадает. Несколько кусков склеиваются в один клип и сохраняются без перекодирования.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Colour like in the movies</h3><h3 data-l="ru">Цвет «как в кино»</h3>
+      <p data-l="en">Film-look presets, I-Log → Rec.709 applied on the fly in the viewer, exposure, saturation and sharpness — graded live and baked into the saved copy.</p>
+      <p data-l="ru">Плёночные пресеты, I-Log → Rec.709 на лету в просмотре, экспозиция, насыщенность и резкость — цветокор в реальном времени, при сохранении запекается в файл.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Tiny next to the official app</h3><h3 data-l="ru">Крошечный рядом с официальным</h3>
+      <p data-l="en">The whole app is under 5 MB — the official one is about 1.5 GB (sizes approximate). No account, no ads, no cloud; Google Play Services not required.</p>
+      <p data-l="ru">Всё приложение — меньше 5 МБ, у официального — примерно 1,5 ГБ (цифры примерные). Без аккаунта, рекламы и облака; сервисы Google не нужны.</p>
+    </div>
+  </div>
 
   <h2 data-l="en">What it does</h2>
   <h2 data-l="ru">Что умеет</h2>
