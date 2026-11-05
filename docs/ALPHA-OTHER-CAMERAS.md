@@ -1,6 +1,6 @@
 # Альфа: другие камеры Insta360 (скачивание файлов)
 
-> Ветка `multi-camera`, сборка `v0.17-alpha1`. Цель — **забрать файлы** с камер Insta360, вокруг которых
+> Ветка `universal`, сборка `v0.17-alpha1`. Цель — **забрать файлы** с камер Insta360, вокруг которых
 > приложение не строилось. Управление, трансляция и настройки для них **не поддерживаются** (пока).
 
 ## Что уже должно работать
@@ -45,7 +45,7 @@
 
 ## English
 
-> Branch `multi-camera`, build `v0.17-alpha1`. The goal is to **get the files off** Insta360 cameras this app was
+> Branch `universal`, build `v0.17-alpha1`. The goal is to **get the files off** Insta360 cameras this app was
 > not built around. Control, live view and settings are **not supported** for them (yet).
 
 ### What should work
