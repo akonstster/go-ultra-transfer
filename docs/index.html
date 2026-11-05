@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GO Ultra Transfer — Android app for the Insta360 GO Ultra</title>
-<meta name="description" content="Open-source Android app for the Insta360 GO Ultra: wakes the camera over Bluetooth, downloads files, cuts clips without downloading them whole, film-look colour on the fly. Under 5 MB — no account, no ads, no cloud.">
+<meta name="description" content="Open-source Android app for the Insta360 GO Ultra: wakes the camera over Bluetooth, downloads files, cuts clips without downloading them whole, film-look colour on the fly. Under 5 MB — no account, no ads, no cloud. An experimental alpha can also pull files off other Insta360 cameras (X3/X4/X5, ONE, Ace).">
 <meta name="theme-color" content="#2B3A4E">
 <style>
   :root { --bg:#0f141b; --card:#18202b; --text:#e8edf3; --muted:#9aa7b6; --accent:#f2c94c; --link:#7cc4ff; }
@@ -32,6 +32,7 @@
   .card h3 { margin:0 0 6px; font-size:1.05rem; color:var(--accent); }
   .card p { margin:0; color:var(--muted); font-size:.95rem; }
   .grid.adv .card { border-left:3px solid var(--accent); }
+  .card.alpha { border-left:3px solid var(--accent); }
   ol, ul { padding-left:1.2rem; }
   li { margin:4px 0; }
   code { background:rgba(127,127,127,.18); padding:1px 5px; border-radius:4px; }
@@ -121,6 +122,49 @@
       <p data-l="en">I-Log → Rec.709, exposure, saturation, sharpness and film looks for videos, photos and live photos.</p>
       <p data-l="ru">I-Log → Rec.709, экспозиция, насыщенность, резкость и плёночные стили для видео, фото и живых фото.</p>
     </div>
+  </div>
+
+  <h2 data-l="en">Alpha: other Insta360 cameras</h2>
+  <h2 data-l="ru">Альфа: другие камеры Insta360</h2>
+  <div class="card alpha">
+    <p data-l="en"><strong>Experimental.</strong> The <code>universal</code> build can also pull files off other
+      Insta360 cameras — the ones this app was not built around. The camera's Wi-Fi is joined by hand: switch the camera
+      on, connect to its <code>…OSC</code> access point in the phone's Wi-Fi settings (the password is usually
+      <code>88888888</code>) and open menu <strong>⋮ → “Another camera (alpha)…”</strong>. The app finds the camera,
+      shows its files and downloads them into <code>DCIM/Camera</code>.</p>
+    <p data-l="ru"><strong>Экспериментально.</strong> Сборка <code>universal</code> умеет забирать файлы и с других
+      камер Insta360 — тех, вокруг которых приложение не строилось. Wi-Fi камеры подключается вручную: включите
+      камеру, подключитесь к её точке доступа <code>…OSC</code> в настройках Wi-Fi телефона (пароль обычно
+      <code>88888888</code>) и откройте меню <strong>⋮ → «Другая камера (альфа)…»</strong>. Приложение найдёт
+      камеру, покажет её файлы и скачает их в <code>DCIM/Camera</code>.</p>
+    <ul data-l="en">
+      <li>Models with the OSC API: <strong>X3, X4, X5, ONE X2/X3, ONE RS, Ace, Ace Pro</strong> and other X/ONE-series
+        cameras — not tried on real X-series hardware yet, so a camera-profile report from owners is what confirms and
+        adds a model.</li>
+      <li><strong>GO 2 / GO 3 / GO 3S</strong>: a separate experimental entry in the setup wizard — join the camera's
+        Wi-Fi and tap “Connect”; the app picks up that network and continues as with the GO Ultra. A tester with such a
+        camera would help.</li>
+      <li>Read-only: the alpha never changes camera settings and <strong>never deletes files</strong>;
+        <code>.insv</code> (360) is saved as it is — open it in Insta360 Studio.</li>
+      <li>How it works and how to send a camera profile:
+        <a href="https://github.com/akonstster/go-ultra-transfer/blob/main/docs/ALPHA-OTHER-CAMERAS.md"><code>docs/ALPHA-OTHER-CAMERAS.md</code></a>.
+        The alpha APK: <a href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.17-alpha1">v0.17-alpha1</a>
+        (a pre-release — the big “Download the APK” button above points to the stable build).</li>
+    </ul>
+    <ul data-l="ru">
+      <li>Модели с API OSC: <strong>X3, X4, X5, ONE X2/X3, ONE RS, Ace, Ace Pro</strong> и другие камеры X/ONE-серий —
+        на живом железе X-серии ещё не проверялось, поэтому модель подтверждает и добавляет отчёт «профиль камеры» от
+        владельца.</li>
+      <li><strong>GO 2 / GO 3 / GO 3S</strong>: отдельный экспериментальный пункт в мастере первого запуска —
+        подключитесь к Wi-Fi камеры и нажмите «Подключиться»: приложение подхватит эту сеть и дальше работает как с
+        GO Ultra. Нужен тестер с такой камерой.</li>
+      <li>Только чтение: альфа ничего не настраивает в камере и <strong>никогда не удаляет файлы</strong>;
+        <code>.insv</code> (360) сохраняется как есть — откройте его в Insta360 Studio.</li>
+      <li>Как это работает и как прислать профиль:
+        <a href="https://github.com/akonstster/go-ultra-transfer/blob/main/docs/ALPHA-OTHER-CAMERAS.md"><code>docs/ALPHA-OTHER-CAMERAS.md</code></a>.
+        APK альфы: <a href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.17-alpha1">v0.17-alpha1</a>
+        (pre-release — большая кнопка «Скачать APK» выше ведёт на стабильную сборку).</li>
+    </ul>
   </div>
 
   <h2 data-l="en">Screenshots</h2>
