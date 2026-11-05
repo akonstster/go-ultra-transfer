@@ -1,6 +1,7 @@
 package app.goultra.transfer.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,14 +12,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -44,6 +52,8 @@ fun OnboardingScreen(
     hasPermissions: Boolean,
     onStart: () -> Unit,
     onShareLog: () -> Unit,
+    /** Opens the «other cameras» (alpha) instructions for the picked series. */
+    onOtherCameras: (OtherSeries?) -> Unit,
 ) {
     Surface(Modifier.fillMaxSize()) {
         Column(
@@ -131,6 +141,70 @@ fun OnboardingScreen(
             if (controller.setup !is ConnState.Working && controller.setup != ConnState.Connected) {
                 TextButton(controller::skipOnboarding) { Text(tr("Пропустить", "Skip")) }
             }
+            OtherCamerasPicker(controller, onOtherCameras)
         }
     }
+}
+
+/**
+ * The alpha corner of the wizard: pick another Insta360 series (or «another model») and open the download
+ * instructions. The GO family speaks its own protocol, so picking it shows what to do instead.
+ */
+@Composable
+private fun OtherCamerasPicker(controller: CameraController, onPick: (OtherSeries?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    var goInfo by remember { mutableStateOf(false) }
+    if (goInfo) {
+        GoFamilyDialog(
+            onDismiss = { goInfo = false },
+            onConnect = {
+                goInfo = false
+                // Leave the wizard and connect at once: the app picks up the Wi-Fi the user joined by hand.
+                controller.skipOnboarding()
+                controller.connect()
+            },
+        )
+    }
+    Spacer(Modifier.height(10.dp))
+    Text(
+        tr("Экспериментально — поддержка других камер", "Experimental — support for other cameras"),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(6.dp))
+    Box {
+        OutlinedButton({ open = true }, Modifier.widthIn(max = 360.dp)) {
+            Text(tr("Выбрать серию камеры", "Choose the camera series"))
+        }
+        DropdownMenu(open, { open = false }) {
+            OtherSeries.entries.forEach { series ->
+                DropdownMenuItem(
+                    text = { Text(seriesLabel(series)) },
+                    // The OSC instructions are for X/ONE/Ace; a GO 2/3/3S works over the network joined by hand.
+                    onClick = { open = false; if (series == OtherSeries.GO) goInfo = true else onPick(series) },
+                )
+            }
+        }
+    }
+}
+
+/** What to do when the user picks GO 2/3/3S: the app picks up the camera's Wi-Fi joined by hand. */
+@Composable
+private fun GoFamilyDialog(onDismiss: () -> Unit, onConnect: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(seriesLabel(OtherSeries.GO)) },
+        text = {
+            Text(
+                tr(
+                    "Включите камеру и подключитесь к её Wi-Fi (пароль — на экране камеры, обычно 88888888), " +
+                        "затем нажмите «Подключиться».",
+                    "Switch the camera on and join its Wi-Fi (the password is on the camera's screen, usually " +
+                        "88888888), then tap «Connect».",
+                ),
+            )
+        },
+        dismissButton = { TextButton(onDismiss) { Text(tr("Закрыть", "Close")) } },
+        confirmButton = { TextButton(onConnect) { Text(tr("Подключиться", "Connect")) } },
+    )
 }

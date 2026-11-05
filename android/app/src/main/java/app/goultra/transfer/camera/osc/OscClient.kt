@@ -76,7 +76,7 @@ class OscClient(
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.use { String(it.readBytes(), Charsets.UTF_8) }.orEmpty()
-            if (code !in 200..299) throw IOException("HTTP $code для $path: ${text.take(200)}")
+            if (code !in 200..299) throw IOException("HTTP $code on $path: ${text.take(200)}")
             return JSONObject(text)
         } finally {
             conn.disconnect()

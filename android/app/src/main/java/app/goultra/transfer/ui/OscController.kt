@@ -17,6 +17,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
+ * The camera series offered by the onboarding «experimental» picker and by the «other cameras» screen.
+ * X/ONE/Ace speak the OSC HTTP API (downloads should work); the GO family needs its own protocol (not wired yet).
+ */
+enum class OtherSeries { X, ONE, ACE, GO, OTHER }
+
+/**
  * The «other cameras» (alpha) screen's state: find the camera on the phone's Wi-Fi, list its shots, download them and
  * collect a profile for the feedback. Read-only by design — nothing is written to a camera this app doesn't know.
  */
@@ -49,10 +55,19 @@ class OscController(private val app: Context) {
     var currentTotal by mutableStateOf(0L)
         private set
 
+    /** The series picked on the onboarding screen (a hint shown above the instructions), or null. */
+    var series by mutableStateOf<OtherSeries?>(null)
+        private set
+
+    /** Remembers the picked series (called when the screen is opened from the onboarding picker). */
+    fun chooseModel(picked: OtherSeries?) {
+        series = picked
+    }
+
     /** The last lines of what the OSC layer did — shown on the screen (the app's own log also has them). */
     val logLines = mutableStateListOf<String>()
 
-    private val session = OscSession(app.applicationContext) { line -> log(line) }
+    private val session = OscSession(app.applicationContext, { line -> log(line) }, { ru, en -> tr(ru, en) })
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var listJob: kotlinx.coroutines.Job? = null
 
@@ -83,13 +98,19 @@ class OscController(private val app: Context) {
             info = found
             state = session.state()
             stage = Stage.READY
+            // The flag is released before the list is read — otherwise refreshList() would see busy and bail out.
+            busy = false
             refreshList()
         }
     }
 
-    /** Re-reads the file list of the found camera. */
+    /** Re-reads the file list of the found camera; without a camera it looks for one (the button stays useful). */
     fun refreshList() {
-        if (session.link == null || busy) return
+        if (busy) return
+        if (session.link == null) {
+            search()
+            return
+        }
         listJob?.cancel()
         busy = true
         message = null
@@ -160,7 +181,7 @@ class OscController(private val app: Context) {
     /** Collects the camera profile; [onReady] runs on the main thread with the text to share. */
     fun collectProfile(onReady: (String) -> Unit) {
         scope.launch {
-            val text = runCatching { session.profile() }
+            val text = runCatching { session.profile(logLines.toList()) }
                 .getOrElse { "profile failed: ${it.message}" }
             onReady(text)
         }

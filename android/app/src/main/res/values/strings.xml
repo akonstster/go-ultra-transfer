@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">GO Ultra Transfer</string>
+    <string name="app_name">insta360 transfer</string>
     <string name="diagnostics">Диагностика</string>
     <string name="shortcut_record">Начать запись</string>
     <string name="shortcut_record_long">Разбудить камеру и начать запись</string>

@@ -155,6 +155,7 @@ class CameraController(private val app: Application) {
         private set
     var conn by mutableStateOf<ConnState>(ConnState.Idle)
         private set
+
     var files by mutableStateOf<List<CameraFile>>(emptyList())
         private set
     var filter by mutableStateOf(Filter.ALL)
@@ -432,7 +433,7 @@ class CameraController(private val app: Application) {
     }
 
     fun logText(): String = buildString {
-        appendLine("GO Ultra Transfer ${app.packageManager.getPackageInfo(app.packageName, 0).versionName}")
+        appendLine("insta360 transfer ${app.packageManager.getPackageInfo(app.packageName, 0).versionName}")
         appendLine("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
         synchronized(logLines) { logLines.forEach { appendLine(it) } }
     }
@@ -1146,7 +1147,8 @@ class CameraController(private val app: Application) {
         linkJob = scope.launch {
             conn = ConnState.Working(Phrase("Подключение…", "Connecting…"))
             val error = try {
-                session.connect { step -> scope.launch { conn = ConnState.Working(step) } }
+                val step: (Phrase) -> Unit = { step -> scope.launch { conn = ConnState.Working(step) } }
+                session.connect(step)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

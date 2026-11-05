@@ -2,14 +2,12 @@ package app.goultra.transfer.camera.osc
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.net.LinkProperties
 import android.net.Network
-import android.net.NetworkCapabilities
 import app.goultra.transfer.BuildConfig
 import app.goultra.transfer.camera.CameraLink
+import app.goultra.transfer.camera.CameraNetworks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.net.DatagramSocket
 
 /**
  * Other-camera (alpha) session. It works when the user has joined the camera's Wi-Fi by hand: the camera's network is
@@ -20,10 +18,10 @@ import java.net.DatagramSocket
 class OscSession(
     context: Context,
     private val log: (String) -> Unit,
+    /** Translation of the journal lines — they are shown on the screen, so they follow the interface language. */
+    private val t: (String, String) -> String,
 ) {
     companion object {
-        /** The subnet of every Insta360 access point (the camera itself is `192.168.42.1`). */
-        const val CAMERA_SUBNET = "192.168.42."
         private const val PAGE = 200
         private const val MAX_PAGES = 50
     }
@@ -37,16 +35,7 @@ class OscSession(
     private var processBound = false
 
     /** The phone's network that looks like a camera access point, or null. */
-    private fun findCameraNetwork(): Network? {
-        val all = runCatching { cm.allNetworks.toList() }.getOrDefault(emptyList())
-        val wifi = all.filter { n ->
-            cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        }
-        return wifi.firstOrNull { isCameraSubnet(cm.getLinkProperties(it)) }
-    }
-
-    private fun isCameraSubnet(lp: LinkProperties?): Boolean =
-        lp?.linkAddresses?.any { it.address.hostAddress?.startsWith(CAMERA_SUBNET) == true } == true
+    private fun findCameraNetwork(): Network? = CameraNetworks.find(cm)
 
     /**
      * Finds the camera's network and probes `/osc/info`. Null when the phone isn't on a camera's Wi-Fi or the camera
@@ -55,29 +44,61 @@ class OscSession(
     suspend fun connect(): OscInfo? = withContext(Dispatchers.IO) {
         release()
         val network = findCameraNetwork() ?: run {
-            log("другая камера: телефон не в сети камеры (нет адреса ${CAMERA_SUBNET}x)")
+            log(
+                t(
+                    "другая камера: телефон не в сети камеры (нет адреса ${CameraNetworks.CAMERA_SUBNET}x)",
+                    "other camera: the phone is not on a camera network (no ${CameraNetworks.CAMERA_SUBNET}x address)",
+                ),
+            )
             return@withContext null
         }
-        val bindable = runCatching { DatagramSocket().use { network.bindSocket(it) } }.isSuccess
-        processBound = if (bindable) false else cm.bindProcessToNetwork(network)
-        if (!bindable) log("другая камера: сокеты к сети не привязываются — привязан весь процесс: $processBound")
-        val l = CameraLink(network, processBound = !bindable)
+        val adoption = CameraNetworks.adopt(cm, network)
+        processBound = adoption.boundProcess
+        if (!adoption.socketsBindable) {
+            log(
+                t(
+                    "другая камера: сокеты к сети не привязываются — привязан весь процесс: $processBound",
+                    "other camera: sockets can't be bound to the network — the whole process is bound: $processBound",
+                ),
+            )
+        }
+        val l = adoption.link
         link = l
-        val info = runCatching { OscParsing.info(OscClient(l, log).info()) }
-            .onFailure { log("другая камера: /osc/info не ответил: ${it.message}") }
-            .getOrNull()
+        val info = probe(l)
         if (info == null) {
             release()
             return@withContext null
         }
-        log("другая камера: ${info.model} ${info.firmware}")
+        log(t("другая камера: ${info.model} ${info.firmware}", "other camera: ${info.model} ${info.firmware}"))
         info
     }
+
+    /** `/osc/info`, with a journal line explaining a refusal (a GO-family camera answers HTTP 400 here). */
+    private fun probe(l: CameraLink): OscInfo? =
+        runCatching { OscParsing.info(OscClient(l, log).info()) }
+            .onFailure {
+                log(
+                    t(
+                        "другая камера: /osc/info не ответил (${it.message}) — похоже, это не OSC-модель (GO-серия?) " +
+                            "или камера занята",
+                        "other camera: /osc/info didn't answer (${it.message}) — looks like a non-OSC model " +
+                            "(GO series?) or the camera is busy",
+                    ),
+                )
+            }
+            .getOrNull()
 
     suspend fun state(): OscState? = withContext(Dispatchers.IO) {
         val l = link ?: return@withContext null
         runCatching { OscParsing.state(OscClient(l, log).state()) }
-            .onFailure { log("другая камера: /osc/state не ответил: ${it.message}") }
+            .onFailure {
+                log(
+                    t(
+                        "другая камера: /osc/state не ответил: ${it.message}",
+                        "other camera: /osc/state didn't answer: ${it.message}",
+                    ),
+                )
+            }
             .getOrNull()
     }
 
@@ -99,21 +120,44 @@ class OscSession(
             if (total != null && start >= total) break
             if (got.size < PAGE) break
         }
-        log("другая камера: файлов получено ${files.size} (страниц $pages)")
+        log(
+            t(
+                "другая камера: файлов получено ${files.size} (страниц $pages)",
+                "other camera: received ${files.size} files (${pages} pages)",
+            ),
+        )
         OscParsing.groupIntoShots(files)
     }
 
-    /** A text report about this camera for the alpha feedback (no secrets: the serial is masked). */
-    suspend fun profile(): String = withContext(Dispatchers.IO) {
+    /**
+     * A text report for the alpha feedback (no secrets: the serial is masked). When nothing is connected yet it looks
+     * for the camera's network itself, so the report always says whether a camera network was seen and what
+     * `/osc/info` answered. [journal] — the screen's journal lines, appended as the connection history.
+     */
+    suspend fun profile(journal: List<String>): String = withContext(Dispatchers.IO) {
         val sb = StringBuilder()
-        sb.append("GO Ultra Transfer ").append(BuildConfig.VERSION_NAME).append(" — camera profile (alpha)\n")
+        sb.append("insta360 transfer ").append(BuildConfig.VERSION_NAME).append(" — camera profile (alpha)\n")
         sb.append("phone: ").append(android.os.Build.MANUFACTURER).append(' ')
             .append(android.os.Build.MODEL).append(", Android SDK ").append(android.os.Build.VERSION.SDK_INT)
             .append('\n')
         val l = link
         if (l == null) {
-            sb.append("camera: not connected (no ${CAMERA_SUBNET}x network)\n")
-            return@withContext sb.toString()
+            val network = findCameraNetwork()
+            sb.append(
+                if (network == null) {
+                    "network ${CameraNetworks.CAMERA_SUBNET}x: not found (the phone is not on a camera's Wi-Fi)\n"
+                } else {
+                    "network ${CameraNetworks.CAMERA_SUBNET}x: found, not connected yet — probing\n"
+                },
+            )
+            if (network != null) {
+                val adoption = CameraNetworks.adopt(cm, network)
+                val probeClient = OscClient(adoption.link, log)
+                sb.append("probe /osc/info: ").append(raw { probeClient.info() }).append('\n')
+                sb.append("probe /osc/state: ").append(raw { probeClient.state() }).append('\n')
+                if (adoption.boundProcess) CameraNetworks.unbind(cm)
+            }
+            return@withContext finish(sb, journal)
         }
         val client = OscClient(l, log)
         val info = runCatching { OscParsing.info(client.info()) }.getOrNull()
@@ -127,8 +171,15 @@ class OscSession(
         sb.append("\n--- camera.getOptions ---\n")
             .append(raw { client.getOptions(listOf("captureMode", "batteryStatus", "remainingSpace", "totalSpace")) })
         sb.append("\n--- camera.listFiles (first 20) ---\n").append(raw { client.listFiles(entryCount = 20) })
-        sb.append('\n')
-        sb.toString()
+        finish(sb, journal)
+    }
+
+    private fun finish(sb: StringBuilder, journal: List<String>): String {
+        if (journal.isNotEmpty()) {
+            sb.append("\n--- journal (screen) ---\n")
+            journal.forEach { sb.append(it).append('\n') }
+        }
+        return sb.toString()
     }
 
     private inline fun raw(block: () -> Any?): String =

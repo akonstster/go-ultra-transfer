@@ -40,8 +40,8 @@ private val LetterGrey = Color(0xFFD3D4D4)
 private val Ease = CubicBezierEasing(0.2f, 0f, 0.1f, 1f)
 
 /**
- * Cold-start splash: the camera flies in from the depth while the viewer drifts backwards between huge «GO» and
- * «Ultra», which shrink into place beside it. Real perspective: an element at depth z is drawn scaled by 1/z and at
+ * Cold-start splash: the camera flies in from the depth while the viewer drifts backwards between huge «insta360» and
+ * «Cameras», which shrink into place beside it. Real perspective: an element at depth z is drawn scaled by 1/z and at
  * its position / z, so the letters start beside the eye (off-screen, giant) and settle at z = 1. Tap skips it.
  */
 @Composable
@@ -61,10 +61,10 @@ fun Splash(onDone: () -> Unit) {
         val w = maxWidth
         val t = Ease.transform(progress.value)
         val cameraSize = w * 0.30f
-        val letterSize = with(LocalDensity.current) { (w * 0.115f).toSp() }
+        val letterSize = with(LocalDensity.current) { (w * 0.048f).toSp() }
         // Final layout (offsets of element centres from the screen centre): letters level with the lens.
         val lineY = -cameraSize * 0.18f
-        val goX = -w * 0.335f
+        val goX = -w * 0.33f
         val ultraX = w * 0.32f
 
         // Letters: from z = 0.16 (right next to the eye) back to 1. Camera: from z = 3.5 (far away) to 1.
@@ -73,8 +73,8 @@ fun Splash(onDone: () -> Unit) {
         val letterAlpha = min(1f, progress.value / 0.12f)
 
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            ProjectedLetters("GO", goX, lineY, letterZ, letterAlpha, letterSize)
-            ProjectedLetters("Ultra", ultraX, lineY, letterZ, letterAlpha, letterSize)
+            ProjectedLetters("insta360", goX, lineY, letterZ, letterAlpha, letterSize)
+            ProjectedLetters("Cameras", ultraX, lineY, letterZ, letterAlpha, letterSize)
             Box(
                 Modifier.size(cameraSize).graphicsLayer {
                     val s = 1f / cameraZ
@@ -100,7 +100,7 @@ private fun ProjectedLetters(text: String, x: Dp, y: Dp, z: Float, alpha: Float,
         text,
         color = LetterGrey,
         fontSize = size,
-        fontWeight = FontWeight.Medium,
+        fontWeight = FontWeight.Black,
         textAlign = TextAlign.Center,
         softWrap = false,
         modifier = Modifier.graphicsLayer {

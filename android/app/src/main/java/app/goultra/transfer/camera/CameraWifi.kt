@@ -37,6 +37,11 @@ class CameraWifi(
     @Volatile var link: CameraLink? = null
         private set
 
+    /** Uses a network the user joined by hand (the manual fallback of a connection): no WifiNetworkSpecifier is made. */
+    fun adopt(link: CameraLink) {
+        this.link = link
+    }
+
     private val prefs = context.getSharedPreferences("camera", 0)
 
     /**

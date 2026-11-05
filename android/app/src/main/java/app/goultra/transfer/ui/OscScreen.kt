@@ -51,6 +51,15 @@ fun OscScreen(osc: OscController, onClose: () -> Unit, onShareProfile: (String) 
             )
         }
 
+        osc.series?.let { picked ->
+            Text(
+                tr("Вы выбрали: %s", "You picked: %s").format(seriesLabel(picked)),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+            )
+        }
+
         LazyColumn(Modifier.weight(1f)) {
             item { Instructions() }
 
@@ -59,12 +68,12 @@ fun OscScreen(osc: OscController, onClose: () -> Unit, onShareProfile: (String) 
                     Button(onClick = { osc.search() }, enabled = !osc.busy) {
                         Text(tr("Найти камеру", "Find the camera"))
                     }
-                    OutlinedButton(onClick = { osc.refreshList() }, enabled = !osc.busy && osc.info != null) {
+                    OutlinedButton(onClick = { osc.refreshList() }, enabled = !osc.busy) {
                         Text(tr("Обновить список", "Refresh"))
                     }
-                    TextButton(onClick = { osc.collectProfile(onShareProfile) }) {
-                        Text(tr("Отправить профиль камеры", "Send camera profile"))
-                    }
+                }
+                TextButton(onClick = { osc.collectProfile(onShareProfile) }, modifier = Modifier.padding(top = 4.dp)) {
+                    Text(tr("Отправить профиль камеры", "Send camera profile"))
                 }
             }
 
@@ -198,6 +207,18 @@ fun OscScreen(osc: OscController, onClose: () -> Unit, onShareProfile: (String) 
             }
         }
     }
+}
+
+/** The label of a series for the onboarding picker and the hint on this screen. */
+fun seriesLabel(series: OtherSeries): String = when (series) {
+    OtherSeries.X -> tr("X-серия — X3, X4, X5", "X series — X3, X4, X5")
+    OtherSeries.ONE -> tr("ONE-серия — ONE X, ONE X2, ONE R, ONE RS", "ONE series — ONE X, ONE X2, ONE R, ONE RS")
+    OtherSeries.ACE -> tr("Ace — Ace, Ace Pro (проверяется)", "Ace — Ace, Ace Pro (being tested)")
+    OtherSeries.GO -> tr(
+        "GO 2 · GO 3 · GO 3S — экспериментально (нужен тестер)",
+        "GO 2 · GO 3 · GO 3S — experimental (a tester needed)",
+    )
+    OtherSeries.OTHER -> tr("Другая модель — прислать профиль", "Another model — send the profile")
 }
 
 @Composable

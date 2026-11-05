@@ -137,7 +137,7 @@ fun GalleryScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (selectionCount > 0) tr("Выбрано: %s", "Selected: %s").format(selectionCount) else "GO Ultra") },
+                title = { Text(if (selectionCount > 0) tr("Выбрано: %s", "Selected: %s").format(selectionCount) else "insta360 transfer") },
                 navigationIcon = {
                     if (selectionCount > 0) {
                         IconButton(vm::clearSelection) { Icon(Icons.Filled.Close, tr("Снять выбор", "Clear selection")) }

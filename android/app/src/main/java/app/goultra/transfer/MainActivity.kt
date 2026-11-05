@@ -116,7 +116,7 @@ class MainActivity : ComponentActivity() {
                 val shareLog = {
                     val send = Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, tr("GO Ultra Transfer — журнал", "GO Ultra Transfer — log"))
+                        .putExtra(Intent.EXTRA_SUBJECT, tr("insta360 transfer — журнал", "insta360 transfer — log"))
                         .putExtra(Intent.EXTRA_TEXT, controller.logText())
                     startActivity(Intent.createChooser(send, tr("Отправить журнал", "Send log")))
                 }
@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
                         hasPermissions = hasPermissions,
                         onStart = { controller.showLinkHints(); withPermissions(controller::runSetup) },
                         onShareLog = shareLog,
+                        onOtherCameras = { series -> osc.chooseModel(series); oscOpen = true },
                     )
                 } else {
                     LaunchedEffect(recordRequested) {
@@ -161,7 +162,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onShareLog = shareLog,
                         onRecord = { withPermissions(controller::startRecording) },
-                        onOpenOsc = { controller.disconnect(); oscOpen = true },
+                        onOpenOsc = { controller.disconnect(); osc.chooseModel(null); oscOpen = true },
                     )
                 }
                 if (showSplash) Splash { showSplash = false }
