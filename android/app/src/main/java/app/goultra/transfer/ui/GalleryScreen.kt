@@ -120,6 +120,7 @@ fun GalleryScreen(
     onOpenDiagnostics: () -> Unit,
     onShareLog: () -> Unit,
     onRecord: () -> Unit,
+    onOpenOsc: () -> Unit,
 ) {
     val vm = controller
     // Asking for the camera brings back the link hints put away with ×.
@@ -213,6 +214,7 @@ fun GalleryScreen(
                         DropdownMenuItem({ Text(tr("Настройки", "Settings")) }, { menu = false; showSettings = true })
                         DropdownMenuItem({ Text(tr("О приложении", "About")) }, { menu = false; showAbout = true })
                         DropdownMenuItem({ Text(tr("Настроить камеру заново", "Set up the camera again")) }, { menu = false; vm.restartOnboarding() })
+                        DropdownMenuItem({ Text(tr("Другая камера (альфа)…", "Another camera (alpha)…")) }, { menu = false; onOpenOsc() })
                         DropdownMenuItem({ Text(tr("Отправить журнал", "Send log")) }, { menu = false; onShareLog() })
                         // Developer tools, in debug builds only.
                         if (vm.isDebugBuild) {

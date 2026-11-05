@@ -36,8 +36,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.16"
+        versionCode = 17
+        versionName = "0.17-alpha1"
     }
 
     signingConfigs {
@@ -109,4 +109,6 @@ dependencies {
     implementation("androidx.media3:media3-transformer:1.4.1")
 
     testImplementation("junit:junit:4.13.2")
+    // Real org.json in JVM unit tests: the android.jar stub throws on every method.
+    testImplementation("org.json:json:20240303")
 }
