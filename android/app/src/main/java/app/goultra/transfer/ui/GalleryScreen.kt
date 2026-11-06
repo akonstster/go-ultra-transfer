@@ -44,6 +44,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.RadioButton
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistRemove
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -245,11 +246,13 @@ fun GalleryScreen(
             TabRow(selectedTabIndex = vm.tab.ordinal) {
                 Tab(vm.tab == Tab.FILES, { vm.tab = Tab.FILES; vm.touch() }, text = { Text(tr("Файлы", "Files")) })
                 Tab(vm.tab == Tab.CAMERA, { vm.tab = Tab.CAMERA; vm.touch() }, text = { Text(tr("Камера", "Camera")) })
+                Tab(vm.tab == Tab.PROJECTS, { vm.tab = Tab.PROJECTS; vm.touch() }, text = { Text(tr("Проекты", "Projects")) })
             }
             PhoneRadiosBanner(vm)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     vm.tab == Tab.CAMERA -> CameraTab(vm, connect, onRecord)
+                    vm.tab == Tab.PROJECTS -> ProjectsTab(vm)
                     vm.conn == ConnState.Connected -> FileGrid(vm, snackbar)
                     // No camera: what is already on the phone, with the way to connect above it.
                     vm.listedFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
@@ -685,6 +688,49 @@ private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
     }
 }
 
+/**
+ * «В проект»: the selected files into a montage project — each video with the pieces it has today (edited on the
+ * phone or the camera's marks), each photo as a still. See `memory-bank/projects-plan.md`; the pieces are only
+ * referenced, the files themselves are not touched.
+ */
+@Composable
+private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
+    var picking by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf(false) }
+    IconButton({ vm.reloadProjects(); picking = true }) {
+        Icon(Icons.Filled.PlaylistAdd, tr("В проект", "Add to project"), tint = MaterialTheme.colorScheme.primary)
+    }
+    if (picking) {
+        AlertDialog(
+            onDismissRequest = { picking = false },
+            title = { Text(tr("В проект", "Add to project")) },
+            text = {
+                Column {
+                    vm.projects.forEach { p ->
+                        TextButton({ vm.addToProject(p, selection); vm.clearSelection(); picking = false }) { Text(p.name) }
+                    }
+                    TextButton({ picking = false; creating = true }) { Text(tr("Новый проект", "New project")) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ picking = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
+    }
+    if (creating) {
+        NameDialog(
+            title = tr("Новый проект", "New project"),
+            confirm = tr("Создать", "Create"),
+            initial = "",
+            onDismiss = { creating = false },
+            onDone = { name ->
+                vm.addToProject(vm.createProject(name), selection)
+                vm.clearSelection()
+                creating = false
+            },
+        )
+    }
+}
+
 private fun Modifier.matchParentSizeOverlay(): Modifier = fillMaxSize().background(Color(0x33000000))
 
 @Composable
@@ -777,6 +823,7 @@ private fun BottomPanel(vm: CameraController) {
                     )
                     PasteColour(vm, selection)
                     SaveSelected(vm, selection)
+                    AddToProject(vm, selection)
                     Button({
                         val already = vm.selectedAlreadyDownloaded
                         if (already > 0) askAlready = already else vm.downloadSelected(overwrite = false)

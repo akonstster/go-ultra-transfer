@@ -40,6 +40,9 @@ import app.goultra.transfer.camera.CardInfo
 import app.goultra.transfer.camera.CardState
 import app.goultra.transfer.camera.StorageEvent
 import app.goultra.transfer.camera.PbWriter
+import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.ProjectClip
+import app.goultra.transfer.camera.Projects
 import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
@@ -128,7 +131,7 @@ data class ColorLook(
     }
 }
 
-enum class Tab { FILES, CAMERA }
+enum class Tab { FILES, CAMERA, PROJECTS }
 
 data class DownloadProgress(
     val name: String,
@@ -147,6 +150,9 @@ class CameraController(private val app: Application) {
     companion object {
         private const val IDLE_VISIBLE_MS = 5 * 60_000L
         private const val BACKGROUND_GRACE_MS = 3 * 60_000L
+
+        /** A photo put into a project: this long until the montage decides otherwise. */
+        private const val STILL_MS = 3_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -3112,6 +3118,68 @@ class CameraController(private val app: Application) {
     }
 
     fun clipName(file: CameraFile, n: Int = 1): String = file.stem + "_HL" + (if (n > 1) "$n" else "") + ".mp4"
+
+    // ---------- projects: a montage of references to the camera's files ----------
+
+    /** The projects of this phone: small JSONs of references in the app's own storage (the media stays on the camera). */
+    private val projectStore = Projects(File(app.filesDir, "projects"))
+
+    /** The projects as last read; the tab refreshes them when it opens and after every change. */
+    var projects by mutableStateOf<List<Project>>(emptyList())
+        private set
+
+    fun reloadProjects() {
+        projects = projectStore.list()
+    }
+
+    /** A new, empty project (see `memory-bank/projects-plan.md`); the tab calls [reloadProjects] before showing it. */
+    fun createProject(name: String): Project = projectStore.create(name.trim()).also { reloadProjects() }
+
+    fun saveProject(p: Project) {
+        projectStore.save(p)
+        reloadProjects()
+    }
+
+    fun renameProject(p: Project, name: String) {
+        projectStore.rename(p, name.trim())
+        reloadProjects()
+    }
+
+    fun deleteProject(p: Project) {
+        projectStore.delete(p)
+        reloadProjects()
+    }
+
+    /**
+     * Adds the selected files to [p]: each video's pieces as they stand (edited on the phone, or the camera's marks; a
+     * video without marks goes in whole), each photo as a still — see `memory-bank/projects-plan.md`. The camera's
+     * files are only read: nothing is copied, cut or changed here.
+     */
+    fun addToProject(p: Project, files: List<CameraFile>) {
+        scope.launch {
+            var skipped = 0
+            val added = files.flatMap { file ->
+                if (file.kind == MediaKind.PHOTO) {
+                    listOf(ProjectClip(file.name, 0L, STILL_MS, role = ProjectClip.Role.STILL))
+                } else {
+                    val limit = file.durationSec?.let { (it + 1) * 1000L }
+                    val pieces = Highlights.clip(editedPieces(file) ?: Highlights.pieces(highlights(file), limit), limit)
+                        .filter { it.endMs != null }
+                    when {
+                        pieces.isNotEmpty() -> pieces.map { ProjectClip(file.name, it.startMs, it.endMs!!, role = ProjectClip.Role.INSERT) }
+                        file.durationSec != null -> listOf(ProjectClip(file.name, 0L, file.durationSec!! * 1000L))
+                        else -> {
+                            skipped++
+                            emptyList()
+                        }
+                    }
+                }
+            }
+            if (added.isNotEmpty()) saveProject(p.copy(clips = p.clips + added))
+            message = tr("В «%s»: +%s кусков", "Into «%s»: +%s clips").format(p.name, added.size) +
+                if (skipped > 0) tr(", %s без длины пропущено", ", %s without a duration skipped").format(skipped) else ""
+        }
+    }
 
     // ---------- the editor's timeline: frames along the whole video ----------
 

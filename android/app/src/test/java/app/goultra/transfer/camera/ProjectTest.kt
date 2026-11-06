@@ -1,0 +1,106 @@
+package app.goultra.transfer.camera
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.nio.file.Files
+
+/**
+ * The project JSON and its store: the montage state must survive restarts, a broken file must not be fatal, and an
+ * unknown value written by a newer build must not crash an older one.
+ */
+class ProjectTest {
+    private fun sample() = Project(
+        id = "1762400000000-00ab",
+        name = "Тест",
+        createdMs = 1_762_400_000_000L,
+        scenario = Scenario.MUSIC,
+        dynamics = Dynamics.DYNAMIC,
+        clips = listOf(
+            ProjectClip(
+                file = "VID_20261105_211421_165.mp4", fromMs = 1_000, toMs = 4_000,
+                auto = true, role = ProjectClip.Role.INSERT, energy = 0.5,
+            ),
+            ProjectClip(file = "VID_20261105_193759_162.mp4", fromMs = 0, toMs = 12_000),
+        ),
+        music = ProjectMusic(
+            uri = "content://media/external/audio/media/1", name = "track.mp3",
+            offsetMs = 3_000, volume = 0.8, duck = false, beats = listOf(0L, 500L, 1_000L), dropMs = 32_000,
+        ),
+        previous = listOf(ProjectClip(file = "VID_20261105_211421_165.mp4", fromMs = 1_200, toMs = 4_000)),
+    )
+
+    @Test
+    fun `a project survives a round trip`() {
+        val back = Project.decode(Project.encode(sample()))
+        assertNotNull(back)
+        assertEquals(sample(), back)
+    }
+
+    @Test
+    fun `a partial file comes back with the defaults`() {
+        val p = Project.decode("""{"id":"1-0001","name":"Пусто"}""")
+        assertNotNull(p)
+        assertEquals(Scenario.CUSTOM, p!!.scenario)
+        assertEquals(Dynamics.EVEN, p.dynamics)
+        assertTrue(p.clips.isEmpty())
+        assertNull(p.music)
+        assertNull(p.previous)
+    }
+
+    @Test
+    fun `garbage is null, a broken clip is skipped`() {
+        assertNull(Project.decode("не json"))
+        assertNull(Project.decode("{}"))
+        val p = Project.decode(
+            """{"id":"1-0001","name":"Тест","clips":[{"file":"a.mp4","from":0,"to":100},{"file":"","from":0,"to":100},{"file":"b.mp4","to":100}]}""",
+        )
+        assertNotNull(p)
+        assertEquals(listOf("a.mp4"), p!!.clips.map { it.file })
+    }
+
+    @Test
+    fun `an unknown enum or role written by a newer build falls back`() {
+        val p = Project.decode("""{"id":"1-0001","name":"Тест","scenario":"NEXT_BIG_THING","dynamics":"WARP","clips":[{"file":"a.mp4","from":0,"to":100,"role":"HOLOGRAM"}]}""")
+        assertNotNull(p)
+        assertEquals(Scenario.CUSTOM, p!!.scenario)
+        assertEquals(Dynamics.EVEN, p.dynamics)
+        assertEquals(ProjectClip.Role.TAKE, p.clips.single().role)
+    }
+
+    @Test
+    fun `a clip whose file was re-edited shows as stale`() {
+        val p = sample()
+        // The first file's piece was cut back on the phone: its clip no longer fits; the second file is untouched.
+        val pieces = mapOf(
+            "VID_20261105_211421_165.mp4" to listOf(Highlight(0, 1_500)),
+            "VID_20261105_193759_162.mp4" to listOf(Highlight(0, 12_000)),
+        )
+        assertEquals(listOf("VID_20261105_211421_165.mp4"), p.staleClips(pieces).map { it.file })
+        // A file nothing is known about (not on the card any more, say): not stale, just unknown.
+        assertTrue(p.staleClips(emptyMap()).isEmpty())
+    }
+
+    @Test
+    fun `the store saves, lists newest first, renames and deletes`() {
+        val dir = Files.createTempDirectory("projects").toFile()
+        val store = Projects(dir)
+        assertTrue(store.list().isEmpty())
+
+        val older = store.create("Первая", createdMs = 1_000_000)
+        val newer = store.create("Вторая", createdMs = 2_000_000)
+        assertEquals(listOf("Вторая", "Первая"), store.list().map { it.name })
+
+        store.save(newer.copy(clips = listOf(ProjectClip("a.mp4", 0, 500))))
+        assertEquals(500L, store.list().first().clips.single().toMs)
+
+        val renamed = store.rename(older, "Переименована")
+        assertEquals("Переименована", store.list().last().name)
+        assertEquals(renamed.id, store.list().last().id)
+
+        store.delete(newer)
+        assertEquals(listOf("Переименована"), store.list().map { it.name })
+    }
+}
