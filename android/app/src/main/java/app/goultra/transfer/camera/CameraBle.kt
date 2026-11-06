@@ -55,6 +55,9 @@ class CameraBle(private val context: Context, private val log: (String) -> Unit)
     private val frameLock = Mutex()
     private val pending = ConcurrentHashMap<Int, CompletableDeferred<CamMessage>>()
 
+    /** Every notification (code 8xxx) from the camera, on the BLE thread — the session routes the storage ones. */
+    @Volatile var onNotify: ((CamMessage) -> Unit)? = null
+
     @Volatile private var gatt: BluetoothGatt? = null
     @Volatile private var writeChar: BluetoothGattCharacteristic? = null
     @Volatile private var pendingOp: CompletableDeferred<Int>? = null
@@ -548,6 +551,9 @@ class CameraBle(private val context: Context, private val log: (String) -> Unit)
             return
         }
         log("<< уведомление ${msg.code}: ${msg.body.hex(24)}")
+        // Storage (8198/8201/8290) and the rest of the camera's talk go to the session: the card's state must be
+        // followed even while the live view is off (a card pulled mid-recording only shows up as an 8198).
+        runCatching { onNotify?.invoke(msg) }
         if (msg.code == Proto.NOTIFY_AUTHORIZATION_RESULT) {
             authResult.complete(msg.body.pbFields().field(1)?.varint?.toInt() ?: 0)
         }

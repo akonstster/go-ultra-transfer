@@ -490,5 +490,17 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "You picked: %s" to "Seçiminiz: %s",
     "Couldn't read the camera's Wi-Fi password. Join the camera's Wi-Fi by hand (the password is on the camera's screen) and tap «Connect» again." to "Kameranın Wi-Fi şifresi okunamadı. Telefondan kameranın Wi-Fi'sine elle bağlanın (şifre kameranın ekranında) ve «Bağlan»a tekrar dokunun.",
     "Switch the camera on and join its Wi-Fi (the password is on the camera's screen, usually 88888888), then tap «Connect»." to "Kamerayı aç ve Wi-Fi'sine bağlan (parola kamera ekranında yazar, genelde 88888888), sonra «Bağlan»a dokun.",
+    "no card" to "kart yok",
+    "card unreadable" to "kart okunamıyor",
+    "card error" to "kart hatası",
+    "card full" to "kart dolu",
+    "No SD card — insert one into the camera." to "SD kart yok — kameraya bir tane takın.",
+    "The camera can't use this card — check it or format it in the camera." to "Kamera bu kartı kullanamıyor — kontrol edin veya kamerada biçimlendirin.",
+    "A card write error — check the card." to "Karta yazma hatası — kartı kontrol edin.",
+    "The card is full — recording isn't possible." to "Kart dolu — kayıt mümkün değil.",
+    "The camera couldn't write — check the card." to "Kamera yazamadı — kartı kontrol edin.",
+    " (camera reserve " to " (kamera rezervi ",
+    "not on the card" to "kartta yok",
+    "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "Kamera bu dosyayı listeliyor ama kartta yok — kart değiştirilmiş olabilir. Listeyi yenileyin veya o kartı takın.",
 )
 

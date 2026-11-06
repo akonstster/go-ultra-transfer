@@ -794,7 +794,8 @@ private fun VideoPreview(
         effectsFailed = true
         android.widget.Toast.makeText(context, tr("Цвет на этом телефоне не показывается", "Colour can't be shown on this phone"), android.widget.Toast.LENGTH_LONG).show()
     }
-    val player = remember(file.uri, effects) {
+    // Re-created when the preview URL changes: a video whose .lrv is missing plays the file itself from then on.
+    val player = remember(file.uri, effects, vm.previewUrl(file)) {
         ExoPlayer.Builder(context).build().apply {
             if (effects) setVideoEffects(colorEffects(liveLut, matrix, sharpen, filmLook, stripes, previewLines, 0))
             addListener(object : Player.Listener {
@@ -811,7 +812,15 @@ private fun VideoPreview(
                     }
                 }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                    vm.log("плеер ${file.name}: ${error.errorCodeName} ${error.message ?: ""} ${error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: ""}")
+                    val text = (error.message ?: "") + " " + (error.cause?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "")
+                    vm.log("плеер ${file.name}: ${error.errorCodeName} $text")
+                    // HTTP 404: either the file isn't on the card (its index keeps another card's entries) or only the
+                    // low-res .lrv preview is gone. The controller asks the camera and then either marks the file
+                    // «нет на карте» or switches the playback to the file itself — never «can't show the colour».
+                    if (text.contains("HTTP 404")) {
+                        vm.checkMissing(file)
+                        return
+                    }
                     // Too heavy while playing: a lighter preview first (the effects are set again and the player
                     // restarted below); with nothing lighter left, no colour.
                     if (effects && !(playWhenReady && stepDown("ошибка плеера"))) dropEffects("ошибка плеера")

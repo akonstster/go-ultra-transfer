@@ -490,5 +490,17 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "You picked: %s" to "選択中: %s",
     "Couldn't read the camera's Wi-Fi password. Join the camera's Wi-Fi by hand (the password is on the camera's screen) and tap «Connect» again." to "カメラの Wi-Fi パスワードを読み取れませんでした。手動でカメラの Wi-Fi に接続し（パスワードはカメラの画面に表示）、もう一度「接続」をタップしてください。",
     "Switch the camera on and join its Wi-Fi (the password is on the camera's screen, usually 88888888), then tap «Connect»." to "カメラの電源を入れ、その Wi-Fi に接続します（パスワードはカメラの画面に表示、通常は 88888888）。その後「接続」をタップします。",
+    "no card" to "カードなし",
+    "card unreadable" to "カード読み取り不可",
+    "card error" to "カードエラー",
+    "card full" to "カード満杯",
+    "No SD card — insert one into the camera." to "SD カードがありません — カメラに挿入してください。",
+    "The camera can't use this card — check it or format it in the camera." to "カメラがこのカードを使えません — 確認するかカメラで初期化してください。",
+    "A card write error — check the card." to "カード書き込みエラー — カードを確認してください。",
+    "The card is full — recording isn't possible." to "カードが満杯です — 録画できません。",
+    "The camera couldn't write — check the card." to "カメラが書き込めませんでした — カードを確認してください。",
+    " (camera reserve " to "（カメラ予約 ",
+    "not on the card" to "カードにありません",
+    "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "カメラはこのファイルを一覧に表示していますが、カード上にありません — カードを入れ替えた可能性があります。リストを更新するか、そのカードを挿入してください。",
 )
 

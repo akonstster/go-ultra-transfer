@@ -50,6 +50,19 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     private val ble = CameraBle(context, log)
     private val wifi = CameraWifi(context, log) { linkLost() }
+
+    /** Card state and sizes the camera reports by itself (8198 / 8201 / 8290): the UI warns instead of a bare «0». */
+    @Volatile var onStorage: ((StorageEvent) -> Unit)? = null
+
+    init {
+        // Storage events arrive on both links; the card's state must be followed even while the live view is off
+        // (a card pulled out mid-recording shows up only as an 8198 — its 8201 is lost with the Wi-Fi link).
+        ble.onNotify = { m -> publishStorage(m) }
+    }
+
+    private fun publishStorage(m: CamMessage) {
+        StorageEvent.parse(m.code, m.body)?.let { event -> runCatching { onStorage?.invoke(event) } }
+    }
     private val tcpLock = Mutex()
     @Volatile private var tcp: CameraTcp? = null
     @Volatile private var closing = false
@@ -241,7 +254,25 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             return Phrase("Камера не отвечает по Wi-Fi", "The camera doesn't respond over Wi-Fi")
         }
         tcp = t
+        wireNotifications(t)
         return null
+    }
+
+    /**
+     * Routes the camera's notifications (over TCP) to the callbacks above and to the storage events. Set once the
+     * link is up: a card pulled out mid-recording reaches the app only this way (its 8201 dies with the Wi-Fi link).
+     */
+    private fun wireNotifications(t: CameraTcp) {
+        t.onNotification = { m ->
+            when (m.code) {
+                Proto.NOTIFY_LIVE_STREAM_PARAMS -> onLiveParams?.invoke()
+                Proto.NOTIFY_SUB_MODE -> onModeChanged?.invoke()
+                // CAPTURE_STATUS {1 state, 2 seconds, 7 phase: 0 running, 1 paused, 2 stopping, 3 finishing}.
+                Proto.NOTIFY_CAPTURE_STATUS -> m.body.pbFields().field(7)?.varint?.let { onCapturePhase?.invoke(it.toInt()) }
+                in Proto.NOTIFY_POWER -> onPowerChanged?.invoke()
+            }
+            publishStorage(m)
+        }
     }
 
     private fun linkLost() {
@@ -273,6 +304,13 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     /** Size of a file the listing reported without one (HEAD request over Wi-Fi). */
     suspend fun fileSize(file: CameraFile): Long? = Downloader.contentLength(link, file.uri)
+
+    /**
+     * True when the file really is on the card (a HEAD request). The camera's listing keeps entries of another card
+     * after a swap — such a file stays in the list and answers HTTP 404 (measured 06.11.2026).
+     */
+    suspend fun fileAvailable(uri: String): Boolean =
+        runCatching { Downloader.contentLength(link, uri) }.getOrNull() != null
 
     /** Every uri of the last listing, LRV previews included (they are deleted along with their video). */
     @Volatile private var allUris: List<String> = emptyList()
@@ -507,8 +545,17 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return ble.request(Proto.CMD_SET_TIMELAPSE_OPTIONS, body)?.code == 200
     }
 
-    /** Photo / burst shutter: TAKE_PICTURE (3) with an empty body (the camera shoots in its current photo mode). */
-    suspend fun takePicture(): Boolean = ble.request(Proto.CMD_TAKE_PICTURE, timeoutMs = 15_000)?.code == 200
+    /**
+     * Photo / burst shutter: TAKE_PICTURE (3) with an empty body (the camera shoots in its current photo mode).
+     * Null when the shot was taken, otherwise the camera's own refusal words — empty when it gave none (a non-200
+     * code, silence). Code 200 alone means nothing: with an unusable card the camera even answers with a file uri
+     * while writing nothing, so the caller must also look at the storage state ([onStorage]).
+     */
+    suspend fun takePicture(): String? {
+        val r = ble.request(Proto.CMD_TAKE_PICTURE, timeoutMs = 15_000) ?: return ""
+        if (r.code != 200) return ""
+        return replyRefusal(r.body)
+    }
 
     /**
      * Read-only dump of every Options / PhotographyOptions field (of the camera's current mode), flattened to
@@ -652,15 +699,6 @@ class CameraSession(private val context: Context, private val log: (String) -> U
     suspend fun startLive(onPacket: (ByteArray) -> Unit): Boolean {
         val t = tcp ?: return false
         t.onStream = onPacket
-        t.onNotification = { m ->
-            when (m.code) {
-                Proto.NOTIFY_LIVE_STREAM_PARAMS -> onLiveParams?.invoke()
-                Proto.NOTIFY_SUB_MODE -> onModeChanged?.invoke()
-                // CAPTURE_STATUS {1 state, 2 seconds, 7 phase: 0 running, 1 paused, 2 stopping, 3 finishing}.
-                Proto.NOTIFY_CAPTURE_STATUS -> m.body.pbFields().field(7)?.varint?.let { onCapturePhase?.invoke(it.toInt()) }
-                in Proto.NOTIFY_POWER -> onPowerChanged?.invoke()
-            }
-        }
         val r = t.request(Proto.CMD_START_LIVE_STREAM, ByteArray(0))
         log("StartLiveStream: ${r?.code}")
         if (r?.code == 200) t.request(Proto.CMD_IFRAME_REQUEST, ByteArray(0), 3_000)

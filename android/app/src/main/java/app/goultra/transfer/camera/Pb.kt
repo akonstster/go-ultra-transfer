@@ -57,30 +57,42 @@ class PbField(val number: Int, val wireType: Int, val varint: Long, val data: By
 fun ByteArray.pbFields(): List<PbField> {
     val res = mutableListOf<PbField>()
     var pos = 0
-    fun readVarint(): Long {
+    fun readVarint(): Long? {
         var v = 0L
         var shift = 0
-        while (true) {
+        while (pos < size) {
             val b = this[pos++].toInt() and 0xFF
             v = v or ((b and 0x7F).toLong() shl shift)
             if (b and 0x80 == 0) return v
             shift += 7
-            require(shift < 64) { "varint too long" }
+            if (shift >= 64) return null // a broken varint: the rest can't be read
         }
+        return null // the body ended inside a varint
     }
     while (pos < size) {
-        val tag = readVarint()
+        val tag = readVarint() ?: break
         val number = (tag ushr 3).toInt()
         when (val wire = (tag and 7).toInt()) {
-            0 -> res += PbField(number, wire, readVarint(), null)
-            1 -> { res += PbField(number, wire, 0, copyOfRange(pos, pos + 8)); pos += 8 }
+            0 -> res += PbField(number, wire, readVarint() ?: break, null)
+            1 -> {
+                if (pos + 8 > size) break
+                res += PbField(number, wire, 0, copyOfRange(pos, pos + 8))
+                pos += 8
+            }
             2 -> {
-                val n = readVarint().toInt()
+                val n = (readVarint() ?: break).toInt()
+                // The camera sometimes cuts the tail of a large page: a field claiming more bytes than are left.
+                // Keep what was parsed and stop — a throw here used to lose the whole file list (06.11.2026).
+                if (n < 0 || pos + n > size) break
                 res += PbField(number, wire, 0, copyOfRange(pos, pos + n))
                 pos += n
             }
-            5 -> { res += PbField(number, wire, 0, copyOfRange(pos, pos + 4)); pos += 4 }
-            else -> throw IllegalArgumentException("unsupported wire type $wire")
+            5 -> {
+                if (pos + 4 > size) break
+                res += PbField(number, wire, 0, copyOfRange(pos, pos + 4))
+                pos += 4
+            }
+            else -> break // an unsupported wire type: the rest is unreadable
         }
     }
     return res

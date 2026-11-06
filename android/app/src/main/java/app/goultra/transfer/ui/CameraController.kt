@@ -36,6 +36,9 @@ import app.goultra.transfer.camera.RemoteFrames
 import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
+import app.goultra.transfer.camera.CardInfo
+import app.goultra.transfer.camera.CardState
+import app.goultra.transfer.camera.StorageEvent
 import app.goultra.transfer.camera.PbWriter
 import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
@@ -393,6 +396,18 @@ class CameraController(private val app: Application) {
         private set
     var message by mutableStateOf<String?>(null)
 
+    /** The camera's own verdict on its card (notifications 8198/8201) — the screens warn instead of a bare «0». */
+    var cardState by mutableStateOf(CardState.OK)
+        private set
+
+    /**
+     * Files the camera lists but that are not on its card: they answer HTTP 404 (after a card swap its index keeps
+     * the old card's entries — measured 06.11.2026). Tiles show «нет на карте»; every new listing clears the marks
+     * and the files are asked again, so a card put back heals them by itself.
+     */
+    var missingFiles by mutableStateOf<Set<String>>(emptySet())
+        private set
+
     /** Result of the last download batch. */
     var lastResult: String = ""
         private set
@@ -643,6 +658,8 @@ class CameraController(private val app: Application) {
                 }
             }
         }
+        // The card's state and sizes come by themselves (8198/8290), and a refused capture says why (8201).
+        session.onStorage = { event -> scope.launch { onStorageEvent(event) } }
         session.onLost = {
             scope.launch {
                 if (conn == ConnState.Connected) {
@@ -1434,6 +1451,9 @@ class CameraController(private val app: Application) {
             return
         }
         files = list
+        // The marks of files the camera listed but that weren't on the card: a fresh listing asks again.
+        missingFiles = emptySet()
+        noLrv = emptySet()
         if (reportTimeShift) {
             reportTimeShift = false
             // The new TimeShift file: its real length (sped-up parts are as short as Auto chose to make them).
@@ -1687,7 +1707,17 @@ class CameraController(private val app: Application) {
         photoBusy = true
         scope.launch {
             try {
-                message = if (session.takePicture()) tr("Фото снято", "Photo taken") else tr("Камера не сделала снимок", "The camera didn't take the photo")
+                val refusal = session.takePicture()
+                message = when {
+                    // Code 200 is not a promise: with a card it can't write the camera may still send a file uri —
+                    // the storage state is what tells the truth (measured on an unusable card, 05.11).
+                    refusal == null && cardUnwritable() ->
+                        (cardMessage(cardState) ?: cardMessage(CardState.NO_CARD))?.text
+                            ?: tr("Камера не сделала снимок", "The camera didn't take the photo")
+                    refusal == null -> tr("Фото снято", "Photo taken")
+                    refusal.isNotEmpty() -> cameraRefusal(refusal)
+                    else -> tr("Камера не сделала снимок", "The camera didn't take the photo")
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1758,7 +1788,24 @@ class CameraController(private val app: Application) {
                 }
                 countdown = null
                 val ok = when {
-                    picture -> session.takePicture()
+                    // The camera answers 200 whatever happens: its own words and the storage state tell the truth.
+                    picture -> when (val refusal = session.takePicture()) {
+                        null -> if (cardUnwritable()) {
+                            // The state may still be on its way (another channel): fall back to the no-card wording.
+                            message = (cardMessage(cardState) ?: cardMessage(CardState.NO_CARD))?.text
+                            false
+                        } else {
+                            true
+                        }
+                        "" -> {
+                            message = tr("Камера не сделала снимок", "The camera didn't take the photo")
+                            false
+                        }
+                        else -> {
+                            message = cameraRefusal(refusal)
+                            false
+                        }
+                    }
                     start -> session.startRecording()
                     else -> session.stopRecording()
                 }
@@ -1803,6 +1850,112 @@ class CameraController(private val app: Application) {
         withContext(Dispatchers.IO) { runCatching { confFile.writeText(text) } }
         conf = parsed
         log("CONF: режимов ${parsed.modes.size}")
+    }
+
+    /**
+     * Storage notifications: the card's state (8198), its sizes (8290) and why a capture was refused (8201 —
+     * 2 no card, 11 can't write). The camera's own screen warns the moment the card goes bad; so does the message
+     * here, once per change (the camera keeps repeating the same state while the trouble lasts).
+     */
+    private fun onStorageEvent(event: StorageEvent) {
+        event.state?.let { state ->
+            val changed = state != cardState
+            cardState = state
+            if (changed) cardMessage(state)?.let { message = it.text }
+        }
+        // Sizes straight from the camera (an 8290 follows every recording): no extra request, no stale numbers.
+        event.totalBytes?.let { total ->
+            settings = settings?.let { s ->
+                val c = s.card
+                s.copy(
+                    card = CardInfo(
+                        totalBytes = total,
+                        freeBytes = event.freeBytes ?: c?.freeBytes ?: 0,
+                        reserveBytes = event.reserveBytes ?: c?.reserveBytes ?: 0,
+                        videoSecondsLeft = c?.videoSecondsLeft,
+                        photosLeft = c?.photosLeft,
+                    ),
+                )
+            }
+        }
+        event.stopReason?.let { reason -> stopMessage(reason)?.let { message = it.text } }
+        // The card came in or went out (or its state changed): the camera re-scans it — take the fresh listing.
+        if (event.mediaChanged || event.state != null) scheduleListRefresh()
+    }
+
+    /** A card insertion comes as a burst of signals: wait it out, then re-list. Cancelled by the next signal. */
+    private var cardJob: Job? = null
+
+    private fun scheduleListRefresh() {
+        if (conn != ConnState.Connected) return // the list needs Wi-Fi
+        cardJob?.cancel()
+        cardJob = scope.launch {
+            delay(2_000)
+            if (conn == ConnState.Connected && !recordBusy && settingBusy == null) {
+                log("карта сменилась: перечитываю список файлов")
+                runCatching { loadFiles() }
+            }
+        }
+    }
+
+    /** True when the camera can't write at all — a «full» card still takes photos, so it is not here. */
+    private fun cardUnwritable(): Boolean =
+        cardState == CardState.NO_CARD || cardState == CardState.UNUSABLE || cardState == CardState.WRITE_ERROR ||
+            // A fresh start with a bad card: the state is unknown (the camera sends 8198 only on a change), but
+            // zero sizes mean the card isn't usable — an empty formatted card still reports its size.
+            (cardState == CardState.OK && settings?.card?.totalBytes == 0L)
+
+    /** A file that is listed but not on the card: say so instead of opening a black screen. */
+    fun missingFileMessage() {
+        message = tr(
+            "Камера показывает этот файл, но на карте его нет — возможно, карту меняли. Обновите список или вставьте ту карту.",
+            "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card.",
+        )
+    }
+
+    /**
+     * The camera's files the phone hasn't got yet — without those the camera only *lists* (a stale index after a card
+     * swap): a file that isn't on the card can't be downloaded, so it must not swell the counter or the selection.
+     */
+    val notDownloadedCount: Int by derivedStateOf {
+        visibleFiles.count { it.name !in downloaded && it.name !in missingFiles }
+    }
+
+    /**
+     * Marks a file the camera lists but that answers HTTP 404 (its index keeps entries of another card after a swap).
+     * The tile then says «нет на карте»; called from a failed thumbnail, a failed photo fetch and a player error.
+     */
+    fun markMissing(name: String) {
+        if (name in missingFiles) return
+        missingFiles = missingFiles + name
+        log("файл «$name» есть в списке камеры, но на карте его нет")
+    }
+
+    /** What to tell about a card state (null for OK/UNKNOWN: the chip on the picture speaks for itself). */
+    private fun cardMessage(state: CardState): Phrase? = when (state) {
+        CardState.NO_CARD -> Phrase("Нет SD-карты — вставьте её в камеру.", "No SD card — insert one into the camera.")
+        CardState.UNUSABLE -> Phrase(
+            "Камера не принимает карту — проверьте её или отформатируйте в камере.",
+            "The camera can't use this card — check it or format it in the camera.",
+        )
+        CardState.WRITE_ERROR -> Phrase("Ошибка записи на карту — проверьте её.", "A card write error — check the card.")
+        CardState.FULL -> Phrase("Карта заполнена — запись невозможна.", "The card is full — recording isn't possible.")
+        else -> null
+    }
+
+    /** The 8201 stop reason (2 no card, 11 can't write — a full or an unusable card) as the user sees it. */
+    private fun stopMessage(reason: Int): Phrase? = when (reason) {
+        2 -> cardMessage(CardState.NO_CARD)
+        Proto.STOP_REASON_CANNOT_WRITE -> cardMessage(cardState)
+            ?: Phrase("Камера не смогла записать — проверьте карту.", "The camera couldn't write — check the card.")
+        else -> null
+    }
+
+    /** The camera's own refusal inside a reply («No SD card»): the known ones get our wording, others go as they are. */
+    private fun cameraRefusal(words: String): String = when {
+        words.contains("SD") || words.contains("card", ignoreCase = true) ->
+            (cardMessage(cardState) ?: cardMessage(CardState.NO_CARD))?.text ?: words
+        else -> words
     }
 
     private fun showSettings(s: CamSettings) {
@@ -2239,7 +2392,8 @@ class CameraController(private val app: Application) {
     /** Selects all visible files that are not in the gallery yet. */
     fun selectNew() {
         touch()
-        visibleFiles.filter { it.name !in downloaded }.forEach { selected[it.name] = Unit }
+        // Missing files (a stale index) can't be downloaded: they stay out of «select new» too.
+        visibleFiles.filter { it.name !in downloaded && it.name !in missingFiles }.forEach { selected[it.name] = Unit }
     }
 
     fun clearSelection() = selected.clear()
@@ -2269,7 +2423,38 @@ class CameraController(private val app: Application) {
     fun previewSource(): androidx.media3.datasource.DataSource.Factory? =
         session.wifiLink?.let { CameraHttpDataSource.Factory(it) }
 
-    fun previewUrl(file: CameraFile): String = "http://${CameraTcp.HOST}${session.previewUri(file)}"
+    fun previewUrl(file: CameraFile): String =
+        // The camera's low-res copy is the preview; a video whose .lrv turned out to be gone plays itself.
+        if (file.name in noLrv) "http://${CameraTcp.HOST}${file.uri}"
+        else "http://${CameraTcp.HOST}${session.previewUri(file)}"
+
+    /**
+     * Videos whose low-res `.lrv` answered 404 while the video itself is on the card: play the file itself from then
+     * on (the camera's index can keep an `.lrv` that is no longer there — a stale entry after a card swap).
+     */
+    var noLrv by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /**
+     * The player (or a fetch) hit an HTTP 404: either the whole file is gone — the camera's index keeps entries of
+     * another card after a swap — or only its `.lrv` preview. Ask about the file itself: a missing one gets the
+     * «нет на карте» mark and a message, a present one is then played as it is.
+     */
+    fun checkMissing(file: CameraFile) {
+        scope.launch {
+            val here = runCatching { session.fileAvailable(file.uri) }.getOrDefault(true)
+            when {
+                !here -> {
+                    markMissing(file.name)
+                    missingFileMessage()
+                }
+                file.name !in noLrv -> {
+                    log("превью ${file.name}: .lrv нет на карте — играю сам файл")
+                    noLrv = noLrv + file.name
+                }
+            }
+        }
+    }
 
     /** Film strip frames: one per piece (its middle), small; null where a frame couldn't be read. */
     suspend fun pieceFrames(file: CameraFile, pieces: List<Highlight>): List<ImageBitmap?> {
@@ -2321,7 +2506,14 @@ class CameraController(private val app: Application) {
         // A live photo with a frame as its cover: show that (the gallery file), not the camera's photo.
         val bytes = (if (coverReplaced(file)) LiveCover.video(app, file.name)?.let { LiveCover.photoPart(app, it) } else null)
             ?: runCatching { session.fetchFile(session.previewUri(file)) }
-                .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
+                .onFailure {
+                    log("просмотр ${file.name}: ${it.message}")
+                    // A photo the camera lists but that isn't on the card (its index keeps another card's entries).
+                    if (it.message?.contains("HTTP 404") == true) {
+                        markMissing(file.name)
+                        missingFileMessage()
+                    }
+                }.getOrNull() ?: return@withContext null
         shownPhoto = file.name to bytes.copyOf(minOf(bytes.size, 256 * 1024)) // the EXIF is at the start
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -2591,6 +2783,8 @@ class CameraController(private val app: Application) {
 
     suspend fun thumbnail(file: CameraFile): ImageBitmap? {
         memCache.get(file.name)?.let { return it }
+        // A file the camera lists but that isn't on the card: no requests at all, the tile says so.
+        if (file.name in missingFiles) return null
         val cached = File(thumbDir, file.name + ".jpg")
         val bitmap = withContext(Dispatchers.IO) {
             cached.takeIf { it.exists() }?.let { f ->
@@ -2603,10 +2797,22 @@ class CameraController(private val app: Application) {
                     .getOrNull()
             } else if (conn == ConnState.Connected) {
                 thumbPermits.withPermit {
-                    runCatching { session.thumbnail(file) }
+                    val bmp = runCatching { session.thumbnail(file) }
                         .onFailure { log("thumbnail ${file.name}: ${it.message}") }
                         .getOrNull()
-                        ?.also { bmp -> saveAtomically(cached, bmp) }
+                    when {
+                        bmp != null -> {
+                            saveAtomically(cached, bmp)
+                            bmp
+                        }
+                        // No picture at all: either the camera makes none for this kind of file, or the file isn't
+                        // on the card at all — its index keeps entries of another card (HTTP 404 for the file).
+                        !runCatching { session.fileAvailable(file.uri) }.getOrDefault(true) -> {
+                            markMissing(file.name)
+                            null
+                        }
+                        else -> null
+                    }
                 }
             } else {
                 null
@@ -2750,11 +2956,15 @@ class CameraController(private val app: Application) {
     fun downloadSelected(overwrite: Boolean) {
         if (isDownloading) return
         // A live photo goes with its clip as one gallery file.
-        // Only the card's files (a selection of phone files has nothing to download).
-        val queue = selectedFiles.filter { !it.isOnPhone && (overwrite || it.name !in downloaded) }.sortedBy { it.created }
+        // Only the card's files (a selection of phone files has nothing to download); files the camera merely lists
+        // but doesn't have (a stale index after a card swap) can't be fetched — they are left out and explained.
+        val stale = selectedFiles.any { !it.isOnPhone && it.name in missingFiles }
+        val queue = selectedFiles.filter { !it.isOnPhone && (overwrite || it.name !in downloaded) && it.name !in missingFiles }
+            .sortedBy { it.created }
         if (queue.isEmpty()) {
             selected.clear()
-            message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")
+            if (stale) missingFileMessage()
+            else message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")
             return
         }
         downloadJob = scope.launch {

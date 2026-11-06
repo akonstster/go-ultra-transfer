@@ -442,9 +442,12 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                     DayHeader(day, dayFiles.size)
                 }
                 items(dayFiles, key = { it.uri }) { file ->
+                    // A file the camera lists but that isn't on the card (HTTP 404): shown marked, never opened.
+                    val missing = !file.isOnPhone && file.name in vm.missingFiles
                     FileTile(
                         file = file,
                         selected = file.name in vm.selected,
+                        missing = missing,
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         favorite = file.name in vm.favorites,
@@ -456,15 +459,22 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                         colourKey = if (file.kind == MediaKind.VIDEO || vm.canColourPhoto(file)) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
-                        // delete), so files only on the phone just open.
+                        // delete), so files only on the phone just open. A missing file only says what it is.
                         onClick = {
                             when {
+                                missing -> vm.missingFileMessage()
                                 vm.selected.isEmpty() -> open(file)
                                 selectable(file) -> vm.toggle(file)
                                 else -> notSelectable()
                             }
                         },
-                        onLongClick = { if (selectable(file)) vm.toggle(file) else notSelectable() },
+                        onLongClick = {
+                            when {
+                                missing -> vm.missingFileMessage()
+                                selectable(file) -> vm.toggle(file)
+                                else -> notSelectable()
+                            }
+                        },
                     )
                 }
             }
@@ -486,6 +496,7 @@ private fun DayHeader(day: LocalDate?, count: Int) {
 private fun FileTile(
     file: CameraFile,
     selected: Boolean,
+    missing: Boolean,
     downloaded: Boolean,
     favorite: Boolean,
     coloured: Boolean,
@@ -525,12 +536,19 @@ private fun FileTile(
                 fontSize = 12.sp,
             )
         val label = when {
+            missing -> null // the badge below says «нет на карте»
             file.kind == MediaKind.VIDEO -> "▶ " + (file.durationSec?.let(::formatDuration) ?: "")
             file.name.endsWith(".dng", ignoreCase = true) -> "RAW"
             file.isLive -> "LIVE"
             else -> null
         }
-        label?.let { Badge(it, Modifier.align(Alignment.BottomStart)) }
+        if (missing) {
+            // The camera lists it but answers 404 for the file: dim the tile and name the trouble.
+            Box(Modifier.matchParentSizeOverlay().background(Color(0x8A000000)))
+            Badge(tr("нет на карте", "not on the card"), Modifier.align(Alignment.BottomStart), warn = true)
+        } else {
+            label?.let { Badge(it, Modifier.align(Alignment.BottomStart)) }
+        }
         if (favorite) {
             Icon(
                 Icons.Filled.Favorite, tr("Избранное", "Favorite"),
@@ -667,12 +685,12 @@ private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
 private fun Modifier.matchParentSizeOverlay(): Modifier = fillMaxSize().background(Color(0x33000000))
 
 @Composable
-private fun Badge(text: String, modifier: Modifier) {
+private fun Badge(text: String, modifier: Modifier, warn: Boolean = false) {
     Text(
         text,
         modifier
             .padding(4.dp)
-            .background(Color(0x99000000), RoundedCornerShape(4.dp))
+            .background(if (warn) Color(0xCC7F1D1D) else Color(0x99000000), RoundedCornerShape(4.dp))
             .padding(horizontal = 4.dp, vertical = 1.dp),
         color = Color.White,
         fontSize = 11.sp,
@@ -763,7 +781,8 @@ private fun BottomPanel(vm: CameraController) {
                     if (askAlready > 0) AlreadyDownloadedDialog(vm, askAlready) { askAlready = 0 }
                 }
                 else -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    val newCount = vm.visibleFiles.count { it.name !in vm.downloaded }
+                    // Files the camera only lists (not on the card) don't count: nothing to download.
+                    val newCount = vm.notDownloadedCount
                     Column(Modifier.weight(1f)) {
                         Text(
                             if (newCount > 0) tr("Не скачано: %s", "Not downloaded: %s").format(newCount) else tr("Всё скачано", "All downloaded"),

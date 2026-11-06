@@ -490,5 +490,17 @@ internal val TEXT_IT: Map<String, String> = mapOf(
     "You picked: %s" to "Hai scelto: %s",
     "Couldn't read the camera's Wi-Fi password. Join the camera's Wi-Fi by hand (the password is on the camera's screen) and tap «Connect» again." to "Impossibile leggere la password Wi-Fi della fotocamera. Collegati a mano al suo Wi-Fi (la password è sullo schermo della fotocamera) e tocca di nuovo «Connetti».",
     "Switch the camera on and join its Wi-Fi (the password is on the camera's screen, usually 88888888), then tap «Connect»." to "Accendi la camera e collegati al suo Wi-Fi (la password è sullo schermo della camera, di solito 88888888), poi tocca «Connetti».",
+    "no card" to "nessuna scheda",
+    "card unreadable" to "scheda illeggibile",
+    "card error" to "errore scheda",
+    "card full" to "scheda piena",
+    "No SD card — insert one into the camera." to "Nessuna scheda SD — inseriscine una nella fotocamera.",
+    "The camera can't use this card — check it or format it in the camera." to "La fotocamera non può usare questa scheda — controllala o formatala nella fotocamera.",
+    "A card write error — check the card." to "Errore di scrittura sulla scheda — controlla la scheda.",
+    "The card is full — recording isn't possible." to "La scheda è piena — la registrazione non è possibile.",
+    "The camera couldn't write — check the card." to "La fotocamera non ha potuto scrivere — controlla la scheda.",
+    " (camera reserve " to " (riserva fotocamera ",
+    "not on the card" to "non sulla scheda",
+    "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "La fotocamera elenca questo file, ma non è sulla scheda — forse la scheda è stata cambiata. Aggiorna la lista o inserisci quella scheda.",
 )
 

@@ -490,5 +490,17 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "You picked: %s" to "已选择：%s",
     "Couldn't read the camera's Wi-Fi password. Join the camera's Wi-Fi by hand (the password is on the camera's screen) and tap «Connect» again." to "无法读取相机的 Wi-Fi 密码。请手动连接相机的 Wi-Fi（密码在相机屏幕上），然后再次点击「连接」。",
     "Switch the camera on and join its Wi-Fi (the password is on the camera's screen, usually 88888888), then tap «Connect»." to "打开相机并连接它的 Wi-Fi（密码在相机屏幕上，通常是 88888888），然后点击「连接」。",
+    "no card" to "无卡",
+    "card unreadable" to "卡无法读取",
+    "card error" to "卡错误",
+    "card full" to "卡已满",
+    "No SD card — insert one into the camera." to "没有 SD 卡 — 请插入一张。",
+    "The camera can't use this card — check it or format it in the camera." to "相机无法使用此卡 — 请检查或在相机中格式化。",
+    "A card write error — check the card." to "卡写入错误 — 请检查卡。",
+    "The card is full — recording isn't possible." to "卡已满 — 无法录制。",
+    "The camera couldn't write — check the card." to "相机无法写入 — 请检查卡。",
+    " (camera reserve " to "（相机预留 ",
+    "not on the card" to "不在卡上",
+    "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "相机列出了此文件，但卡上没有 — 可能换过卡。请刷新列表或插入那张卡。",
 )
 
