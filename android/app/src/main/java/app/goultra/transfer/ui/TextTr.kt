@@ -502,5 +502,14 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     " (camera reserve " to " (kamera rezervi ",
     "not on the card" to "kartta yok",
     "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "Kamera bu dosyayı listeliyor ama kartta yok — kart değiştirilmiş olabilir. Listeyi yenileyin veya o kartı takın.",
+    "Check for updates" to "Güncellemeleri denetle",
+    "An update is available" to "Bir güncelleme var",
+    "You have %s, GitHub has %s" to "Sizde %s, GitHub'da %s",
+    "Download the update" to "Güncellemeyi indir",
+    "Skip this version" to "Bu sürümü bir daha bildirme",
+    "Later" to "Daha sonra",
+    "Checking for updates…" to "Güncellemeler denetleniyor…",
+    "Couldn't check for updates — the internet is needed." to "Denetlenemedi — internet gerekli.",
+    "No updates — you're on the latest version." to "Güncelleme yok — en son sürümdesiniz.",
 )
 

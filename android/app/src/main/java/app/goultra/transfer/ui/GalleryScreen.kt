@@ -205,6 +205,8 @@ fun GalleryScreen(
                     if (showSettings) AppSettingsDialog { showSettings = false }
                     if (showCamera) CameraInfoDialog(vm) { showCamera = false }
                     if (showAbout) AboutDialog { showAbout = false }
+                    // A newer build of our own channel: offered by the daily check or ⋮ → «Проверить обновление».
+                    vm.update?.let { UpdateDialog(vm, it) { vm.dismissUpdate() } }
                     IconButton({ menu = true }) { Icon(Icons.Filled.MoreVert, tr("Меню", "Menu")) }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem({ Text(tr("Камера", "Camera")) }, { menu = false; showCamera = true })
@@ -213,6 +215,7 @@ fun GalleryScreen(
                         }
                         DropdownMenuItem({ Text(tr("Настройки", "Settings")) }, { menu = false; showSettings = true })
                         DropdownMenuItem({ Text(tr("О приложении", "About")) }, { menu = false; showAbout = true })
+                        DropdownMenuItem({ Text(tr("Проверить обновление", "Check for updates")) }, { menu = false; vm.checkUpdate(manual = true) })
                         DropdownMenuItem({ Text(tr("Настроить камеру заново", "Set up the camera again")) }, { menu = false; vm.restartOnboarding() })
                         DropdownMenuItem({ Text(tr("Другая камера (альфа)…", "Another camera (alpha)…")) }, { menu = false; onOpenOsc() })
                         DropdownMenuItem({ Text(tr("Отправить журнал", "Send log")) }, { menu = false; onShareLog() })

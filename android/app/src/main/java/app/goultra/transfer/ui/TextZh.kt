@@ -502,5 +502,14 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     " (camera reserve " to "（相机预留 ",
     "not on the card" to "不在卡上",
     "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "相机列出了此文件，但卡上没有 — 可能换过卡。请刷新列表或插入那张卡。",
+    "Check for updates" to "检查更新",
+    "An update is available" to "有可用更新",
+    "You have %s, GitHub has %s" to "您是 %s，GitHub 上是 %s",
+    "Download the update" to "下载更新",
+    "Skip this version" to "不再提示此版本",
+    "Later" to "以后",
+    "Checking for updates…" to "正在检查更新…",
+    "Couldn't check for updates — the internet is needed." to "无法检查更新 — 需要联网。",
+    "No updates — you're on the latest version." to "没有更新 — 您已是最新版本。",
 )
 

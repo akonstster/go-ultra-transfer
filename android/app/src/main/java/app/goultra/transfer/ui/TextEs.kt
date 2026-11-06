@@ -502,5 +502,14 @@ internal val TEXT_ES: Map<String, String> = mapOf(
     " (camera reserve " to " (reserva de la cámara ",
     "not on the card" to "no está en la tarjeta",
     "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "La cámara lista este archivo, pero no está en la tarjeta — puede que se cambiara la tarjeta. Actualiza la lista o inserta esa tarjeta.",
+    "Check for updates" to "Buscar actualizaciones",
+    "An update is available" to "Hay una actualización disponible",
+    "You have %s, GitHub has %s" to "Tienes %s, GitHub tiene %s",
+    "Download the update" to "Descargar la actualización",
+    "Skip this version" to "No avisar de esta versión",
+    "Later" to "Más tarde",
+    "Checking for updates…" to "Buscando actualizaciones…",
+    "Couldn't check for updates — the internet is needed." to "No se pudo comprobar — hace falta internet.",
+    "No updates — you're on the latest version." to "Sin actualizaciones — tienes la última versión.",
 )
 

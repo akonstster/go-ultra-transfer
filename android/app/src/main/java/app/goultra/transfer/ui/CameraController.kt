@@ -408,6 +408,13 @@ class CameraController(private val app: Application) {
     var missingFiles by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    /** A newer build of our own channel on GitHub (see [UpdateCheck]); shown once per version unless skipped. */
+    var update by mutableStateOf<UpdateInfo?>(null)
+        private set
+
+    /** The app's own version («0.17-alpha3») — the About dialog, the log and the update check. */
+    val appVersion: String get() = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+
     /** Result of the last download batch. */
     var lastResult: String = ""
         private set
@@ -660,6 +667,8 @@ class CameraController(private val app: Application) {
         }
         // The card's state and sizes come by themselves (8198/8290), and a refused capture says why (8201).
         session.onStorage = { event -> scope.launch { onStorageEvent(event) } }
+        // A newer build in our own GitHub channel: once a day, silently — the camera's Wi-Fi has no internet.
+        scope.launch { delay(3_000); checkUpdate() }
         session.onLost = {
             scope.launch {
                 if (conn == ConnState.Connected) {
@@ -1929,6 +1938,58 @@ class CameraController(private val app: Application) {
         if (name in missingFiles) return
         missingFiles = missingFiles + name
         log("файл «$name» есть в списке камеры, но на карте его нет")
+    }
+
+    /** True while the GitHub check runs (the menu item must not stack them). */
+    private var updateBusy = false
+
+    /**
+     * Looks for a newer build of this app's own channel on GitHub ([UpdateCheck]): automatically once a day (silent
+     * on failure — the app is often on the camera's Wi-Fi, which has no internet), or by hand from ⋮ → «Проверить
+     * обновление», which always answers: a dialog on a find, a message on «nothing new» or «no internet».
+     */
+    fun checkUpdate(manual: Boolean = false) {
+        if (updateBusy) return
+        val prefs = app.getSharedPreferences("update", 0)
+        if (!manual && System.currentTimeMillis() - prefs.getLong("checked_at", 0L) < 24 * 3_600_000L) return
+        updateBusy = true
+        if (manual) message = tr("Проверяю обновление…", "Checking for updates…")
+        scope.launch {
+            try {
+                val releases = UpdateCheck.fetch()
+                prefs.edit().putLong("checked_at", System.currentTimeMillis()).apply()
+                if (releases == null) {
+                    if (manual) message = tr(
+                        "Не удалось проверить обновление — нужен интернет.",
+                        "Couldn't check for updates — the internet is needed.",
+                    )
+                    return@launch
+                }
+                val found = UpdateCheck.best(releases, appVersion, UpdateCheck.isAlpha(appVersion))
+                when {
+                    found == null -> if (manual) message = tr(
+                        "Обновлений нет — у вас последняя версия.",
+                        "No updates — you're on the latest version.",
+                    )
+                    // «Не напоминать» about this version: only a manual check shows it again.
+                    !manual && found.tag == prefs.getString("skip", null) -> Unit
+                    else -> update = found
+                }
+            } finally {
+                updateBusy = false
+            }
+        }
+    }
+
+    /** «Позже»: hide the dialog (the next daily check may bring it back). */
+    fun dismissUpdate() {
+        update = null
+    }
+
+    /** «Не напоминать»: this version never pops up by itself again. */
+    fun skipUpdate(tag: String) {
+        app.getSharedPreferences("update", 0).edit().putString("skip", tag).apply()
+        update = null
     }
 
     /** What to tell about a card state (null for OK/UNKNOWN: the chip on the picture speaks for itself). */

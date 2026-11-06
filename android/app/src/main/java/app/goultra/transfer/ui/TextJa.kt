@@ -502,5 +502,14 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     " (camera reserve " to "（カメラ予約 ",
     "not on the card" to "カードにありません",
     "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card." to "カメラはこのファイルを一覧に表示していますが、カード上にありません — カードを入れ替えた可能性があります。リストを更新するか、そのカードを挿入してください。",
+    "Check for updates" to "更新を確認",
+    "An update is available" to "更新があります",
+    "You have %s, GitHub has %s" to "現在 %s、GitHub は %s",
+    "Download the update" to "更新をダウンロード",
+    "Skip this version" to "このバージョンは通知しない",
+    "Later" to "あとで",
+    "Checking for updates…" to "更新を確認しています…",
+    "Couldn't check for updates — the internet is needed." to "確認できません — インターネットが必要です。",
+    "No updates — you're on the latest version." to "更新はありません — 最新版です。",
 )
 
