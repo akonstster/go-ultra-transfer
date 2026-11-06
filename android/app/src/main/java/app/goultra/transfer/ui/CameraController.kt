@@ -1957,14 +1957,16 @@ class CameraController(private val app: Application) {
         scope.launch {
             try {
                 val releases = UpdateCheck.fetch()
-                prefs.edit().putLong("checked_at", System.currentTimeMillis()).apply()
                 if (releases == null) {
+                    // Nothing was read (no route to GitHub — the camera's Wi-Fi has no internet): the day is not
+                    // burned, the next start tries again.
                     if (manual) message = tr(
                         "Не удалось проверить обновление — нужен интернет.",
                         "Couldn't check for updates — the internet is needed.",
                     )
                     return@launch
                 }
+                prefs.edit().putLong("checked_at", System.currentTimeMillis()).apply()
                 val found = UpdateCheck.best(releases, appVersion, UpdateCheck.isAlpha(appVersion))
                 when {
                     found == null -> if (manual) message = tr(
