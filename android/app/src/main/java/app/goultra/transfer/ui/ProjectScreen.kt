@@ -116,8 +116,11 @@ fun ProjectScreen(vm: CameraController, p: Project) {
  */
 @Composable
 private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: CameraFile?, stale: Boolean, missing: Boolean) {
-    val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs) {
-        value = file?.let { vm.timelineFrame(it, clip.fromMs) }
+    val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
+        value = file?.let {
+            // A photo is not a video with a frame at a time: it has its own tile picture.
+            if (clip.role == ProjectClip.Role.STILL) vm.thumbnail(it) else vm.timelineFrame(it, clip.fromMs)
+        }
     }
     Column(Modifier.width(150.dp)) {
         Box(
