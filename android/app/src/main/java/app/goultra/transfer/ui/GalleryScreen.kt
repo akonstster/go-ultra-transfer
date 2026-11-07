@@ -784,6 +784,8 @@ private fun BottomPanel(vm: CameraController) {
                 Text(tr("%s шт.", "%s items").format(selection.size) + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
                 PasteColour(vm, selection)
                 SaveSelected(vm, selection)
+                // A project takes the phone's files as readily as the camera's (their marks live in the file itself).
+                AddToProject(vm, selection)
                 // Added files: off the list (they stay on the phone).
                 if (selection.all { it.isAdded }) {
                     IconButton({ vm.removeAdded(selection) }) {
