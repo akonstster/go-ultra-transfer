@@ -126,10 +126,10 @@ private fun HeldCard(vm: CameraController, clip: ProjectClip, file: CameraFile?,
     }
 }
 
-/** The slot nearest the middle of the strip: the card at the eye while the timeline slides under it. */
-private fun centerSlot(state: LazyListState, pitch: Float, padPx: Float, stripW: Float, count: Int): Int {
+/** The slot nearest the middle of the strip (moved a little by [extra]): where a carried card will land. */
+private fun centerSlot(state: LazyListState, pitch: Float, padPx: Float, stripW: Float, count: Int, extra: Float = 0f): Int {
     if (count <= 0 || pitch <= 0f) return 0
-    val atMiddle = state.firstVisibleItemIndex * pitch + state.firstVisibleItemScrollOffset + stripW / 2f
+    val atMiddle = state.firstVisibleItemIndex * pitch + state.firstVisibleItemScrollOffset + stripW / 2f + extra
     return ((atMiddle - padPx) / pitch).roundToInt().coerceIn(0, count - 1)
 }
 
@@ -187,10 +187,12 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var baseTarget by remember(p.id) { mutableIntStateOf(0) }
     var targetArray by remember(p.id) { mutableIntStateOf(-1) }
     var stickPx by remember(p.id) { mutableFloatStateOf(0f) }
+    var stickY by remember(p.id) { mutableFloatStateOf(0f) }
     var heldX by remember(p.id) { mutableFloatStateOf(0f) }
     var stripW by remember(p.id) { mutableIntStateOf(0) }
     var playingNow by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     // The cards are all one width and the strip is padded so any slot can sit under its middle; while a card is
     // carried they lay themselves out smaller, so five or six read at once and the eye keeps the timeline.
     val density = LocalDensity.current
@@ -201,11 +203,15 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     val cardWpx = with(density) { cardWNow.toPx() }
     // The stick's own loop: near the middle nothing happens, further out the timeline slides under the card in the
     // hand; the point of insertion is the slot at the middle of the strip, so it never leaves the eye.
+    // The point of insertion leans the way the finger goes (a little), while the timeline slides the other way — the
+    // eye then reads both: where it goes and how far it has come. The stick's own loop does the moving (16 ms a tick).
+    val markerShift = (stickPx * 0.3f).coerceIn(-stripW * 0.15f, stripW * 0.15f)
     LaunchedEffect(lifted, pitchPx, padPx) {
         while (lifted != null) {
             val speed = stickSpeed(stickPx)
-            if (speed != 0f) listState.scrollBy(-speed * 0.016f)
-            val slot = centerSlot(listState, pitchPx, padPx, stripW.toFloat(), p.clips.size)
+            // The finger to the right sends the timeline left: later pieces come to the point of insertion.
+            if (speed != 0f) listState.scrollBy(speed * 0.016f)
+            val slot = centerSlot(listState, pitchPx, padPx, stripW.toFloat(), p.clips.size, markerShift)
             targetArray = (heldFrom + (slot - baseTarget)).coerceIn(0, p.clips.size - 1)
             delay(16)
         }
@@ -235,7 +241,15 @@ fun ProjectScreen(vm: CameraController, p: Project) {
         }
         // The pieces that can play: a photo is a still, and waits for the slideshow way of showing them (P4).
         val playable = p.clips.filter { vm.projectFile(it.file)?.kind == MediaKind.VIDEO }
-        if (playable.isNotEmpty()) ProjectPreview(vm, playable, play, onPlayed = { play = null }, onPlaying = { playingNow = it })
+        if (playable.isNotEmpty()) {
+            ProjectPreview(
+                vm, playable, play,
+                onPlayed = { play = null },
+                onPlaying = { playingNow = it },
+                // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
+                carrying = lifted != null,
+            )
+        }
         if (p.clips.isEmpty()) {
             Text(
                 tr(
@@ -278,6 +292,9 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                                     lifted = clip
                                     heldFrom = i
                                     stickPx = 0f
+                                    stickY = 0f
+                                    // A follow that is under way must not fight the stick.
+                                    scope.launch { listState.scrollBy(0f) }
                                     // Where the middle of the strip stands now: the landing place is counted from it,
                                     // so letting go without moving the stick leaves the piece where it was.
                                     baseTarget = centerSlot(listState, pitchPx, padPx, stripW.toFloat(), p.clips.size)
@@ -286,10 +303,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                                     heldX = padPx + i * pitchPx + localX - scrolled - cardWpx / 2f
                                 }
                             },
-                            onDrag = { dx ->
+                            onDrag = { dx, dy ->
                                 // The card is a transmitter stick: where the finger is (not how it moves) drives the
-                                // slide — the loop above does the moving.
-                                if (lifted == clip) stickPx += dx
+                                // slide — the loop above does the moving. Up and down it only moves the card itself,
+                                // out of the finger's way: that changes nothing about where it lands.
+                                if (lifted == clip) {
+                                    stickPx += dx
+                                    stickY = (stickY + dy).coerceIn(-320f, 320f)
+                                }
                             },
                             onDragEnd = {
                                 if (lifted == clip) {
@@ -304,12 +325,20 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                     }
                 }
                 if (lifted != null) {
-                    // The point of insertion: the middle of the strip. It stays put; the timeline moves under it.
-                    Box(Modifier.align(Alignment.Center).width(3.dp).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
+                    // The point of insertion: the middle of the strip, leaning a little with the stick. The timeline
+                    // moves under it, so it never leaves the eye.
+                    Box(
+                        Modifier.align(Alignment.Center).offset { IntOffset(markerShift.roundToInt(), 0) }
+                            .width(3.dp).fillMaxHeight().background(MaterialTheme.colorScheme.primary),
+                    )
                 }
                 lifted?.let { clip ->
-                    // The card in the hand, half seen so the moving timeline shows through it.
-                    HeldCard(vm, clip, vm.projectFile(clip.file), Modifier.offset { IntOffset(heldX.roundToInt(), 0) }.zIndex(2f))
+                    // The card in the hand, half seen so the moving timeline shows through it; the finger may carry it
+                    // up or down as well, out of the way.
+                    HeldCard(
+                        vm, clip, vm.projectFile(clip.file),
+                        Modifier.offset { IntOffset(heldX.roundToInt(), stickY.roundToInt()) }.zIndex(2f),
+                    )
                 }
             }
         }
@@ -336,7 +365,7 @@ private fun ClipCard(
     onTap: () -> Unit,
     onEdit: () -> Unit,
     onDragStart: (Float) -> Unit,
-    onDrag: (Float) -> Unit,
+    onDrag: (Float, Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
     var confirming by remember { mutableStateOf(false) }
@@ -369,7 +398,7 @@ private fun ClipCard(
                     // A long press takes the card: the finger then slides the whole timeline (see the strip's callers).
                     detectDragGesturesAfterLongPress(
                         onDragStart = { at -> onDragStart(at.x) },
-                        onDrag = { _, amount -> onDrag(amount.x) },
+                        onDrag = { _, amount -> onDrag(amount.x, amount.y) },
                         onDragEnd = { onDragEnd() },
                         onDragCancel = { onDragEnd() },
                     )
@@ -502,7 +531,8 @@ private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile)
  */
 private fun playerClock(player: Player): Pair<Long, Long> {
     val timeline = player.currentTimeline
-    if (timeline.isEmpty) return player.currentPosition.coerceAtLeast(0L) to 0L
+    // -1 stands for «nothing to say» (a playlist being put together): the pointer then stays where it was.
+    if (timeline.isEmpty) return -1L to 0L
     val window = Timeline.Window()
     var before = 0L
     var total = 0L
@@ -546,6 +576,7 @@ private fun ProjectPreview(
     play: ProjectClip?,
     onPlayed: () -> Unit,
     onPlaying: (ProjectClip?) -> Unit,
+    carrying: Boolean,
 ) {
     val context = LocalContext.current
     // A piece whose file isn't around is left out of the playlist — and out of the numbering the cards seek by.
@@ -578,14 +609,22 @@ private fun ProjectPreview(
             player.release()
         }
     }
+    // A card in the hand: the preview stands still (its own playing got in the way of carrying a piece about).
+    LaunchedEffect(carrying) {
+        if (carrying) player.pause()
+    }
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {
-        // Pieces changing under the preview (an edit in the film strip re-cuts them) must not lose the place.
-        val at = player.currentPosition.coerceAtLeast(0L)
+        // A rebuild keeps the piece and the place: an edit re-cuts it, a drag only moves it along the order — the
+        // absolute time means nothing after a move (it used to drag the clock and the length about with it).
+        val wasClip = items.getOrNull(player.currentMediaItemIndex)?.first
+        val wasAt = player.currentPosition.coerceAtLeast(0L)
         player.setMediaItems(items.map { it.second })
         player.prepare()
-        if (at > 0L) player.seekTo(minOf(at, maxOf(totalMs, 1L)))
+        val at = items.indexOfFirst { it.first == wasClip }
+        if (at >= 0) player.seekTo(at, minOf(wasAt, items[at].first.durationMs))
+        else if (wasAt > 0L) player.seekTo(minOf(wasAt, maxOf(totalMs, 1L)))
     }
     // The clock follows the player whether or not it plays, and it never counts only the item being played: the strip
     // shows the whole timeline (a seek on a pause used to snap back to the old spot too).
@@ -593,8 +632,8 @@ private fun ProjectPreview(
         while (true) {
             if (dragging == null) {
                 val (at, whole) = playerClock(player)
-                shown = at
-                shownTotal = if (whole > 0L) whole else totalMs
+                if (at >= 0L) shown = at
+                if (whole > 0L) shownTotal = whole
             }
             // Told to the screen: its card is marked in the strip and the strip follows it.
             onPlaying(items.getOrNull(player.currentMediaItemIndex)?.first)
