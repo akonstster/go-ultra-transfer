@@ -153,6 +153,8 @@ data class Project(
     }
 
     fun staleClips(pieces: Map<String, List<Highlight>>): List<ProjectClip> = clips.filter { clip ->
+        // A photo is a still, not a range of a file's pieces: it can never be «gone from the file».
+        if (clip.role == ProjectClip.Role.STILL) return@filter false
         pieces[clip.file]?.let { parts ->
             parts.none { part -> part.startMs <= clip.fromMs && clip.toMs <= (part.endMs ?: part.startMs) }
         } ?: false

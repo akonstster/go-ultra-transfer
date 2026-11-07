@@ -124,6 +124,20 @@ class ProjectTest {
     }
 
     @Test
+    fun `a still is never called gone`() {
+        // A photo has no pieces to go from: its card must not wear «кусок убран из файла» (the pool of a photo-less
+        // file is empty, which is not the same as a video whose pieces were all edited away).
+        val p = Project(
+            id = "1", name = "Фото",
+            clips = listOf(
+                ProjectClip("IMG_0001.jpg", 0, 3_000, role = ProjectClip.Role.STILL),
+                ProjectClip("a.mp4", 0, 1_000),
+            ),
+        )
+        assertTrue(p.staleClips(mapOf("IMG_0001.jpg" to emptyList(), "a.mp4" to listOf(Highlight(0, 1_000)))).isEmpty())
+    }
+
+    @Test
     fun `the store saves, lists newest first, renames and deletes`() {
         val dir = Files.createTempDirectory("projects").toFile()
         val store = Projects(dir)

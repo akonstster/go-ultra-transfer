@@ -101,6 +101,19 @@ object Highlights {
         else pieces.map { it.copy(endMs = minOf(it.endMs ?: (it.startMs + AROUND_MS), durationMs)) }
             .filter { it.endMs!! - it.startMs >= MIN_PIECE_MS }
 
+    /**
+     * The pieces a video gives today, for a cut and for a project's live link (the plan §7): the pieces edited on the
+     * phone ([edited], null when it was never edited), or the camera's marks ([marks]). A video nobody marked and
+     * nobody edited is the **whole of itself** — calling a project's clip of it gone would be a lie — and a file edited
+     * down to nothing is empty: that emptiness is an answer, not a missing one. [limitMs] and [durationMs] come from
+     * the file's own length ([CameraFile.durationSec]).
+     */
+    fun inEffect(edited: List<Highlight>?, marks: List<Highlight>, limitMs: Long?, durationMs: Long?): List<Highlight> {
+        val pieces = clip(edited ?: pieces(marks, limitMs), limitMs)
+        if (pieces.isNotEmpty() || edited != null) return pieces
+        return if (durationMs != null && durationMs > 0) listOf(Highlight(0, durationMs)) else emptyList()
+    }
+
     /** Pieces that meet (one ends where the next starts) as one: the clip has no seam there. */
     fun joinTouching(pieces: List<Highlight>): List<Highlight> {
         val out = mutableListOf<Highlight>()

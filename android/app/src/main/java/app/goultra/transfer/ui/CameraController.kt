@@ -3192,14 +3192,19 @@ class CameraController(private val app: Application) {
                     listOf(ProjectClip(file.name, 0L, STILL_MS, role = ProjectClip.Role.STILL))
                 } else {
                     val limit = file.durationSec?.let { (it + 1) * 1000L }
-                    val pieces = Highlights.clip(editedPieces(file) ?: Highlights.pieces(highlights(file), limit), limit)
-                        .filter { it.endMs != null }
-                    when {
-                        pieces.isNotEmpty() -> pieces.map { ProjectClip(file.name, it.startMs, it.endMs!!, role = ProjectClip.Role.INSERT) }
-                        file.durationSec != null -> listOf(ProjectClip(file.name, 0L, file.durationSec!! * 1000L))
-                        else -> {
-                            skipped++
-                            emptyList()
+                    val length = file.durationSec?.let { it * 1000L }
+                    val pieces = Highlights.inEffect(editedPieces(file), highlights(file), limit, length)
+                    // A file nobody marked and nobody edited goes in as one whole take; its marked pieces as inserts.
+                    val whole = length != null && pieces.size == 1 && pieces[0].startMs == 0L && pieces[0].endMs == length
+                    if (pieces.isEmpty()) {
+                        skipped++
+                        emptyList()
+                    } else {
+                        pieces.map {
+                            ProjectClip(
+                                file.name, it.startMs, it.endMs!!,
+                                role = if (whole) ProjectClip.Role.TAKE else ProjectClip.Role.INSERT,
+                            )
                         }
                     }
                 }

@@ -58,7 +58,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
         value = p.clips.map { it.file }.distinct().mapNotNull { name ->
             vm.projectFile(name)?.let { f ->
                 val limit = f.durationSec?.let { (it + 1) * 1000L }
-                name to (vm.editedPieces(f) ?: Highlights.pieces(vm.highlights(f), limit))
+                name to Highlights.inEffect(vm.editedPieces(f), vm.highlights(f), limit, f.durationSec?.let { it * 1000L })
             }
         }.toMap()
     }
@@ -97,7 +97,13 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 itemsIndexed(p.clips, key = { i, c -> "$i-${c.file}-${c.fromMs}" }) { _, clip ->
-                    ClipCard(vm, p, clip, vm.projectFile(clip.file), clip in stale)
+                    // «The file is not on the list any more» is only said when the list is complete: with the camera
+                    // away a file it holds is simply out of reach, not gone.
+                    ClipCard(
+                        vm, p, clip, vm.projectFile(clip.file),
+                        stale = clip in stale,
+                        missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
+                    )
                 }
             }
         }
@@ -109,7 +115,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
  * opens the file — the piece itself is edited in the usual film strip, and the project picks the edit up (§7).
  */
 @Composable
-private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: CameraFile?, stale: Boolean) {
+private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: CameraFile?, stale: Boolean, missing: Boolean) {
     val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs) {
         value = file?.let { vm.timelineFrame(it, clip.fromMs) }
     }
@@ -142,11 +148,11 @@ private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: 
             IconButton({ vm.removeProjectClip(clip) }, Modifier.align(Alignment.TopEnd).size(28.dp)) {
                 Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(16.dp))
             }
-            // The file was edited since (its piece is gone) or is not around any more: say so rather than play it.
-            if (file == null || stale) {
+            // The file was edited since (its piece is gone) or is not on the list any more: say so rather than play it.
+            if (missing || stale) {
                 Box(Modifier.fillMaxSize().background(Color(0xAA7F1D1D)), contentAlignment = Alignment.Center) {
                     Text(
-                        if (file == null) tr("Файла больше нет в списке", "The file is not on the list any more")
+                        if (missing) tr("Файла больше нет в списке", "The file is not on the list any more")
                         else tr("Кусок убран из файла", "The file no longer has this piece"),
                         Modifier.padding(8.dp),
                         color = Color.White,
