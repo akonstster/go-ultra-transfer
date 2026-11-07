@@ -17,6 +17,11 @@ data class ProjectClip(
     val toMs: Long,
     /** Put here by the auto montage: the UI marks it and «отменить авто» restores the previous list. */
     val auto: Boolean = false,
+    /**
+     * A cutaway: while the base's own time is here, the picture is this clip's and the base's sound goes on without a
+     * break (see the plan «Основной файл и перебивки»). null = an ordinary clip, one after another.
+     */
+    val atMs: Long? = null,
     val role: Role = Role.TAKE,
     /** 0…1, how much motion the clip has (measured in the background from the LRV frames; null until then). */
     val energy: Double? = null,
@@ -31,6 +36,7 @@ data class ProjectClip(
         put("from", fromMs)
         put("to", toMs)
         if (auto) put("auto", true)
+        atMs?.let { put("at", it) }
         if (role != Role.TAKE) put("role", role.name)
         energy?.let { put("energy", it) }
     }
@@ -47,6 +53,7 @@ data class ProjectClip(
                 fromMs = from,
                 toMs = to,
                 auto = o.optBoolean("auto", false),
+                atMs = if (o.has("at")) o.optLong("at") else null,
                 role = runCatching { Role.valueOf(o.optString("role", Role.TAKE.name)) }.getOrDefault(Role.TAKE),
                 energy = if (o.has("energy")) o.optDouble("energy").takeIf { !it.isNaN() } else null,
             )
@@ -103,6 +110,12 @@ data class Project(
     val scenario: Scenario = Scenario.CUSTOM,
     val dynamics: Dynamics = Dynamics.EVEN,
     val clips: List<ProjectClip> = emptyList(),
+    /**
+     * The base file (see the plan «Основной файл и перебивки»): its picture and sound are the timeline itself, its
+     * clips are never shifted, and the pieces of other files lie on it as cutaways ([ProjectClip.atMs]).
+     * null = an ordinary montage, one clip after another.
+     */
+    val baseFile: String? = null,
     val music: ProjectMusic? = null,
     /** The clip list before the last auto montage («отменить авто» in the UI); null when there was none. */
     val previous: List<ProjectClip>? = null,
@@ -112,6 +125,12 @@ data class Project(
      * put in): the project screen marks them «кусок убран из файла» and drops them on one tap — see the plan §7.
      * A file [pieces] says nothing about is left alone: not knowing is not a reason to call a clip gone.
      */
+    /** The cutaways: clips pinned to a moment of the base's own time ([ProjectClip.atMs]). */
+    val covers: List<ProjectClip> get() = clips.filter { it.atMs != null }
+
+    /** The clips that run one after another: the timeline of a project without a base. */
+    val sequence: List<ProjectClip> get() = clips.filter { it.atMs == null }
+
     fun staleClips(pieces: Map<String, List<Highlight>>): List<ProjectClip> = clips.filter { clip ->
         pieces[clip.file]?.let { parts ->
             parts.none { part -> part.startMs <= clip.fromMs && clip.toMs <= (part.endMs ?: part.startMs) }
@@ -129,6 +148,7 @@ data class Project(
             put("created", p.createdMs)
             if (p.scenario != Scenario.CUSTOM) put("scenario", p.scenario.name)
             if (p.dynamics != Dynamics.EVEN) put("dynamics", p.dynamics.name)
+            p.baseFile?.let { put("base", it) }
             put("clips", JSONArray().apply { p.clips.forEach { put(it.toJson()) } })
             p.music?.let { put("music", it.toJson()) }
             p.previous?.let { prev -> put("previous", JSONArray().apply { prev.forEach { put(it.toJson()) } }) }
@@ -146,6 +166,7 @@ data class Project(
                 scenario = enumOf(o.optString("scenario"), Scenario.CUSTOM),
                 dynamics = enumOf(o.optString("dynamics"), Dynamics.EVEN),
                 clips = clipsOf(o.optJSONArray("clips")),
+                baseFile = o.optString("base").takeIf { it.isNotEmpty() },
                 music = o.optJSONObject("music")?.let(ProjectMusic::from),
                 previous = o.optJSONArray("previous")?.let(::clipsOf),
             )

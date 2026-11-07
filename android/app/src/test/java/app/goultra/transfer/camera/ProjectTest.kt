@@ -18,12 +18,14 @@ class ProjectTest {
         createdMs = 1_762_400_000_000L,
         scenario = Scenario.MUSIC,
         dynamics = Dynamics.DYNAMIC,
+        baseFile = "VID_20261105_193759_162.mp4",
         clips = listOf(
             ProjectClip(
                 file = "VID_20261105_211421_165.mp4", fromMs = 1_000, toMs = 4_000,
                 auto = true, role = ProjectClip.Role.INSERT, energy = 0.5,
             ),
             ProjectClip(file = "VID_20261105_193759_162.mp4", fromMs = 0, toMs = 12_000),
+            ProjectClip(file = "VID_20261105_201500_180.mp4", fromMs = 10_000, toMs = 12_000, atMs = 45_000),
         ),
         music = ProjectMusic(
             uri = "content://media/external/audio/media/1", name = "track.mp3",
@@ -59,6 +61,17 @@ class ProjectTest {
         )
         assertNotNull(p)
         assertEquals(listOf("a.mp4"), p!!.clips.map { it.file })
+    }
+
+    @Test
+    fun `a file from before the base reads without one, and cutaways stay apart from the sequence`() {
+        val json = "{\"id\":\"1-0001\",\"name\":\"По-старому\",\"clips\":[" +
+            "{\"file\":\"a.mp4\",\"from\":0,\"to\":100},{\"file\":\"b.mp4\",\"from\":0,\"to\":100,\"at\":5000}]}"
+        val p = Project.decode(json)
+        assertNotNull(p)
+        assertNull(p!!.baseFile)
+        assertEquals(listOf("a.mp4"), p.sequence.map { it.file })
+        assertEquals(listOf("b.mp4"), p.covers.map { it.file })
     }
 
     @Test
