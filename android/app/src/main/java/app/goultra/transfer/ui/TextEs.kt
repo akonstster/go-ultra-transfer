@@ -454,6 +454,7 @@ internal val TEXT_ES: Map<String, String> = mapOf(
     "Remove" to "Quitar",
     "In a project" to "En un proyecto",
     "On screen for" to "Duración en pantalla",
+    "The camera seems to have run flat (%s %%) — charge it and save the project again" to "Parece que la cámara se ha quedado sin batería (%s %%): cárguela y guarde el proyecto de nuevo",
     "The camera's link dropped — saving again once it is back" to "Se perdió la conexión con la cámara: se volverá a guardar cuando vuelva",
     "The camera didn't come back — save the project again" to "La cámara no volvió: guarde el proyecto de nuevo",
     "different codecs" to "códecs distintos",

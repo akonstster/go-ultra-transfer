@@ -454,6 +454,7 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Remove" to "外す",
     "In a project" to "プロジェクト内",
     "On screen for" to "写真の表示時間",
+    "The camera seems to have run flat (%s %%) — charge it and save the project again" to "カメラのバッテリーが切れたようです（%s %%）— 充電してからプロジェクトをもう一度保存してください",
     "The camera's link dropped — saving again once it is back" to "カメラとの接続が切れました — 戻りしだい保存し直します",
     "The camera didn't come back — save the project again" to "カメラが戻りませんでした — プロジェクトをもう一度保存してください",
     "different codecs" to "コーデックが異なる",

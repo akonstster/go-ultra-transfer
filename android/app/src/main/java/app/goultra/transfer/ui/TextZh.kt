@@ -454,6 +454,7 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Remove" to "移除",
     "In a project" to "已在项目中",
     "On screen for" to "照片显示时长",
+    "The camera seems to have run flat (%s %%) — charge it and save the project again" to "相机似乎没电了（%s %%）— 请充电后重新保存项目",
     "The camera's link dropped — saving again once it is back" to "与相机的连接中断 — 恢复后将重新保存",
     "The camera didn't come back — save the project again" to "相机没有恢复连接 — 请重新保存项目",
     "different codecs" to "编解码器不同",

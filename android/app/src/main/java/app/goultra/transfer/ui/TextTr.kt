@@ -454,6 +454,7 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Remove" to "Çıkar",
     "In a project" to "Bir projede",
     "On screen for" to "Fotoğrafın ekranda kalma süresi",
+    "The camera seems to have run flat (%s %%) — charge it and save the project again" to "Kameranın şarjı bitmiş görünüyor (%s %%) — şarj edip projeyi yeniden kaydedin",
     "The camera's link dropped — saving again once it is back" to "Kamera bağlantısı koptu — geri gelince yeniden kaydedilecek",
     "The camera didn't come back — save the project again" to "Kamera geri gelmedi — projeyi yeniden kaydedin",
     "different codecs" to "farklı kodekler",

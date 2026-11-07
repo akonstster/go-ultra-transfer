@@ -2033,8 +2033,15 @@ class CameraController(private val app: Application) {
     private fun showSettings(s: CamSettings) {
         if (s != settings) log("настройки: ${s.mode} ${s.values} батарея ${s.batteryPercent}/${s.podBatteryPercent}")
         settings = s
+        s.batteryPercent?.let { lastBattery = it to s.charging }
         restartLiveIfShapeChanged(s)
     }
+
+    /** The camera's battery as last read, and whether it was charging: kept after the link goes (settings are not). */
+    private var lastBattery: Pair<Int, Boolean>? = null
+
+    /** The camera most likely ran out of battery: at 10 % or less and not charging when last read. */
+    private val cameraLikelyFlat: Boolean get() = lastBattery?.let { (percent, charging) -> percent <= 10 && !charging } == true
 
     private var liveRestartAt = 0L
 
@@ -3683,6 +3690,15 @@ class CameraController(private val app: Application) {
      * [precise]: re-encoded, each piece cut exactly, photos held for their length. Every piece's file has to be at
      * hand: a camera file needs the camera.
      */
+    /** Why a project's save failed, in words: a camera that most likely ran flat is said to be so. */
+    private fun projectFailure(e: Exception, fromCamera: Boolean): String =
+        if (fromCamera && cameraLikelyFlat) {
+            tr("Камера, похоже, разрядилась (%s %%) — зарядите её и сохраните проект ещё раз", "The camera seems to have run flat (%s %%) — charge it and save the project again")
+                .format(lastBattery?.first ?: 0)
+        } else {
+            tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+        }
+
     fun exportProject(p: Project, precise: Boolean, sound: Boolean, retried: Boolean = false) {
         if (isDownloading || exportJob?.isActive == true || batchJob?.isActive == true || p.clips.isEmpty()) return
         val away = projectUnreachable(p)
@@ -3691,6 +3707,8 @@ class CameraController(private val app: Application) {
             return
         }
         val files = p.clips.map { it.file }.distinct().associateWith { projectFile(it)!! }
+        // The battery read fresh: if the camera goes during the save, its level tells whether it ran flat.
+        if (files.values.any { !it.isOnPhone }) refreshSettings()
         if (!precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound, retried) else encodeProject(p, files, sound, retried)
     }
 
@@ -3702,6 +3720,11 @@ class CameraController(private val app: Application) {
     private fun retryWhenBack(p: Project, precise: Boolean, sound: Boolean, retried: Boolean, fromCamera: Boolean, error: Exception): Boolean {
         val readFailed = error is java.io.IOException || error.cause is java.io.IOException
         if (!fromCamera || retried || (conn == ConnState.Connected && !readFailed)) return false
+        // Low and not charging when last read: it ran out — nothing to wait for.
+        if (cameraLikelyFlat) {
+            log("проект: связь пропала, заряд камеры был ${lastBattery?.first} % — похоже, разрядилась")
+            return false
+        }
         log("проект: связь с камерой пропала во время сохранения — жду её и начну заново")
         scope.launch {
             // The loss may not have been noticed yet: the link is looked at again only after it had time to show.
@@ -3789,7 +3812,7 @@ class CameraController(private val app: Application) {
                 lastResult = if (retryWhenBack(p, false, sound, retried, fromCamera, e)) {
                     tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
                 } else {
-                    tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+                    projectFailure(e, fromCamera)
                 }
             } finally {
                 download = null
@@ -3884,7 +3907,7 @@ class CameraController(private val app: Application) {
                 lastResult = if (retryWhenBack(p, true, sound, retried, fromCamera, e)) {
                     tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
                 } else {
-                    tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+                    projectFailure(e, fromCamera)
                 }
             } finally {
                 tmp.delete()
