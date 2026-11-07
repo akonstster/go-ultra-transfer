@@ -60,6 +60,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.drop
@@ -3682,7 +3683,7 @@ class CameraController(private val app: Application) {
      * [precise]: re-encoded, each piece cut exactly, photos held for their length. Every piece's file has to be at
      * hand: a camera file needs the camera.
      */
-    fun exportProject(p: Project, precise: Boolean, sound: Boolean) {
+    fun exportProject(p: Project, precise: Boolean, sound: Boolean, retried: Boolean = false) {
         if (isDownloading || exportJob?.isActive == true || batchJob?.isActive == true || p.clips.isEmpty()) return
         val away = projectUnreachable(p)
         if (away > 0) {
@@ -3690,11 +3691,38 @@ class CameraController(private val app: Application) {
             return
         }
         val files = p.clips.map { it.file }.distinct().associateWith { projectFile(it)!! }
-        if (!precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound) else encodeProject(p, files, sound)
+        if (!precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound, retried) else encodeProject(p, files, sound, retried)
+    }
+
+    /**
+     * The camera's Wi-Fi went while a project was being saved (it restarts its access point once, about half a minute
+     * after it wakes): instead of a bare read error, the save waits for the link to come back and starts once more.
+     * True when it took that on — the caller then says so rather than reporting a failure.
+     */
+    private fun retryWhenBack(p: Project, precise: Boolean, sound: Boolean, retried: Boolean, fromCamera: Boolean, error: Exception): Boolean {
+        val readFailed = error is java.io.IOException || error.cause is java.io.IOException
+        if (!fromCamera || retried || (conn == ConnState.Connected && !readFailed)) return false
+        log("проект: связь с камерой пропала во время сохранения — жду её и начну заново")
+        scope.launch {
+            // The loss may not have been noticed yet: the link is looked at again only after it had time to show.
+            delay(5_000)
+            val back = kotlinx.coroutines.withTimeoutOrNull(120_000) {
+                androidx.compose.runtime.snapshotFlow { conn }.first { it == ConnState.Connected }
+            }
+            downloadJob?.join()
+            exportJob?.join()
+            if (back == null) {
+                message = tr("Камера не вернулась — сохраните проект ещё раз", "The camera didn't come back — save the project again")
+                return@launch
+            }
+            delay(2_000)
+            exportProject(seenProject?.takeIf { it.id == p.id } ?: p, precise, sound, retried = true)
+        }
+        return true
     }
 
     /** The project as shot: one extractor per run of pieces ([ProjectExport.runs]), all into one muxer ([ClipMaker.joinAll]). */
-    private fun copyProject(p: Project, files: Map<String, CameraFile>, sound: Boolean) {
+    private fun copyProject(p: Project, files: Map<String, CameraFile>, sound: Boolean, retried: Boolean) {
         val runs = ProjectExport.runs(p.clips)
         val wantedUs = p.clips.sumOf { it.durationMs } * 1000
         // Progress in bytes, as for downloads: each piece's share of its file's size.
@@ -3758,7 +3786,11 @@ class CameraController(private val app: Application) {
                 ).format(detail, (run?.first ?: (e.piece - 1)) + 1)
             } catch (e: Exception) {
                 log("проект как снято: ${e.javaClass.simpleName}: ${e.message}")
-                lastResult = tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+                lastResult = if (retryWhenBack(p, false, sound, retried, fromCamera, e)) {
+                    tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
+                } else {
+                    tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+                }
             } finally {
                 download = null
                 message = lastResult
@@ -3773,7 +3805,7 @@ class CameraController(private val app: Application) {
      * first video's frame size (the others fitted into it) and its codec and bitrate, as a save with colour keeps them.
      */
     @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
-    private fun encodeProject(p: Project, files: Map<String, CameraFile>, sound: Boolean) {
+    private fun encodeProject(p: Project, files: Map<String, CameraFile>, sound: Boolean, retried: Boolean) {
         val fromCamera = files.values.any { !it.isOnPhone }
         exportJob = scope.launch {
             val name = projectSaveName(p)
@@ -3849,7 +3881,11 @@ class CameraController(private val app: Application) {
                 throw e
             } catch (e: Exception) {
                 log("проект точно: ${e.javaClass.simpleName}: ${e.message} ${e.cause?.message ?: ""}")
-                lastResult = tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+                lastResult = if (retryWhenBack(p, true, sound, retried, fromCamera, e)) {
+                    tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
+                } else {
+                    tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+                }
             } finally {
                 tmp.delete()
                 export = null
