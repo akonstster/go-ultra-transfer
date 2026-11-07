@@ -454,6 +454,8 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Remove" to "移除",
     "In a project" to "已在项目中",
     "On screen for" to "照片显示时长",
+    "The file is not on the camera" to "文件不在相机上",
+    "Camera offline — showing a frame" to "相机未连接 — 显示静帧",
     "%s s" to "%s 秒",
     "Rotation" to "旋转",
     "Shutter" to "快门",

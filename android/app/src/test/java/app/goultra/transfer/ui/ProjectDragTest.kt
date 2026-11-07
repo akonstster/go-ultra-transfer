@@ -48,6 +48,16 @@ class ProjectDragTest {
     }
 
     @Test
+    fun `a gathered strip keeps the carried card's slot under it even off its ends`() {
+        // Three small cards fit the screen: held clamped, they would slide to the start and another slot would come
+        // under a card held at 800 px. With slack, the slot stays where it was.
+        val g = StripGeometry(100f, 10f, 20f, 1000f, 3, 0.6f)
+        val s = g.scrollFor(2f, 800f, slack = 1000f)
+        assertEquals(800f, g.center(2f, s), 0.01f)
+        assertEquals(0f, g.scrollFor(2f, 800f), 0f) // without it, the strip goes to its start
+    }
+
+    @Test
     fun `the strip slides only near its ends, easing in, toward that end`() {
         assertEquals(0f, edgeSpeed(500f, 1000f), 0f)
         assertEquals(0f, edgeSpeed(200f, 1000f), 0f) // just outside the band

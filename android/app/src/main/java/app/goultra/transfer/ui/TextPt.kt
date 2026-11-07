@@ -454,6 +454,8 @@ internal val TEXT_PT: Map<String, String> = mapOf(
     "Remove" to "Remover",
     "In a project" to "Num projeto",
     "On screen for" to "Duração no ecrã",
+    "The file is not on the camera" to "O ficheiro não está na câmara",
+    "Camera offline — showing a frame" to "Câmara offline — a mostrar um fotograma",
     "%s s" to "%s s",
     "Rotation" to "Rotação",
     "Shutter" to "Obturador",

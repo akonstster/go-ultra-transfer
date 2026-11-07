@@ -3199,7 +3199,36 @@ class CameraController(private val app: Application) {
 
     /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
     fun projectFile(name: String): CameraFile? =
-        files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name }
+        (files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name })
+            ?.also { if (!it.isOnPhone) seenFiles[name] = it }
+
+    /** The camera's files of projects as last seen: the project goes on showing them while the camera is away. */
+    private val seenFiles = HashMap<String, CameraFile>()
+
+    /**
+     * A project's file that is out of reach (the camera is away, or this file is not on its card now): as last seen, or
+     * known only by its name. Nothing is asked of the camera for it — its pictures come from the phone's caches.
+     */
+    fun offlineFile(name: String): CameraFile =
+        seenFiles[name] ?: CameraFile("/DCIM/Camera01/$name", null, null, null, null, null, null)
+
+    /** Frames of project cards kept on disk, so a project still shows its pieces with the camera away (see [offlineStill]). */
+    private val frameDir = File(app.cacheDir, "frames").apply { mkdirs() }
+
+    private fun frameFile(file: CameraFile, ms: Long) = File(frameDir, "${file.name}@$ms.jpg")
+
+    /**
+     * The picture that stands in the preview for a piece out of reach, as a file URI the player can show: the piece's
+     * own card frame, else its file's tile, else black — the preview always has something to hold for the piece's length.
+     */
+    suspend fun offlineStill(file: CameraFile, ms: Long): String = withContext(Dispatchers.IO) {
+        val frame = frameFile(file, ms).takeIf { it.exists() }
+            ?: File(thumbDir, file.name + ".jpg").takeIf { it.exists() }
+            ?: File(frameDir, "_black.jpg").also { black ->
+                if (!black.exists()) saveAtomically(black, Bitmap.createBitmap(16, 9, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLACK) })
+            }
+        android.net.Uri.fromFile(frame).toString()
+    }
 
     fun renameProject(p: Project, name: String) {
         projectStore.rename(p, name.trim())
@@ -3257,10 +3286,19 @@ class CameraController(private val app: Application) {
     private var timelineReader: Pair<String, FrameReader>? = null
     private val timelineFrames = LruCache<String, ImageBitmap>(600)
 
-    /** A small frame of [file] near [ms] (its key frame), from the phone's copy or the camera's light copy. */
-    suspend fun timelineFrame(file: CameraFile, ms: Long): ImageBitmap? {
+    /**
+     * A small frame of [file] near [ms] (its key frame), from the phone's copy or the camera's light copy. [keep]: the
+     * frame is also kept on disk (a project's card), so it is there with the camera away and after a restart.
+     */
+    suspend fun timelineFrame(file: CameraFile, ms: Long, keep: Boolean = false): ImageBitmap? {
         val key = "${file.name}@$ms"
         timelineFrames.get(key)?.let { return it }
+        frameFile(file, ms).takeIf { it.exists() }?.let { kept ->
+            withContext(Dispatchers.IO) { BitmapFactory.decodeFile(kept.path) }?.asImageBitmap()?.let {
+                timelineFrames.put(key, it)
+                return it
+            }
+        }
         return timelineLock.withLock {
             withContext(Dispatchers.IO) {
                 timelineFrames.get(key) ?: run {
@@ -3268,7 +3306,9 @@ class CameraController(private val app: Application) {
                     val reader = timelineReader?.takeIf { it.first == id }?.second
                         ?: openFrameReader(file)?.also { r -> timelineReader?.second?.close(); timelineReader = id to r }
                         ?: return@withContext null
-                    reader.frame(ms, 192)?.asImageBitmap()?.also { timelineFrames.put(key, it) }
+                    reader.frame(ms, 192)
+                        ?.also { if (keep) saveAtomically(frameFile(file, ms), it) }
+                        ?.asImageBitmap()?.also { timelineFrames.put(key, it) }
                 }
             }
         }

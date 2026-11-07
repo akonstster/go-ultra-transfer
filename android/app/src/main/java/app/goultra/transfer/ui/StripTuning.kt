@@ -23,6 +23,12 @@ internal val LIFT_SHADOW = 12.dp
 internal const val LIFT_FOLLOW_Y = 0.35f
 internal val LIFT_MAX_Y = 28.dp
 
+/**
+ * How fast the carried card must be swept sideways (per second) before the other cards gather smaller: held still or
+ * moved slowly, the strip stays as it is and nothing changes under the card.
+ */
+internal val GATHER_SPEED = 900.dp
+
 /** The band at either end of the strip (a share of its width) that slides it along, and the top speed there, px/s. */
 internal const val EDGE_ZONE = 0.18f
 internal const val EDGE_SPEED = 1400f

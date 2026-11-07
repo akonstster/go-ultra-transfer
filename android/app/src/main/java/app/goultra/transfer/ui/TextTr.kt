@@ -454,6 +454,8 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Remove" to "Çıkar",
     "In a project" to "Bir projede",
     "On screen for" to "Fotoğrafın ekranda kalma süresi",
+    "The file is not on the camera" to "Dosya kamerada yok",
+    "Camera offline — showing a frame" to "Kamera çevrimdışı — bir kare gösteriliyor",
     "%s s" to "%s sn",
     "Rotation" to "Döndürme",
     "Shutter" to "Enstantane",

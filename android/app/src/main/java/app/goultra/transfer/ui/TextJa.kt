@@ -454,6 +454,8 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Remove" to "外す",
     "In a project" to "プロジェクト内",
     "On screen for" to "写真の表示時間",
+    "The file is not on the camera" to "ファイルがカメラにありません",
+    "Camera offline — showing a frame" to "カメラ未接続 — 静止画を表示中",
     "%s s" to "%s 秒",
     "Rotation" to "回転",
     "Shutter" to "シャッター",

@@ -1,5 +1,7 @@
 package app.goultra.transfer.ui
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -49,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -73,7 +76,9 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -85,19 +90,27 @@ import kotlin.math.floor
 import kotlin.math.roundToInt
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.image.BitmapFactoryImageDecoder
+import androidx.media3.exoplayer.image.ImageDecoderException
+import androidx.media3.exoplayer.image.ImageOutput
+import androidx.media3.exoplayer.image.ImageRenderer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.jpeg.JpegExtractor
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
-import app.goultra.transfer.camera.MediaKind
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
 
@@ -132,8 +145,12 @@ internal class StripGeometry(
     /** The slot whose middle is drawn at [x] — fractional, the inverse of [center]. */
     fun slotAt(x: Float, scroll: Float): Float = if (pitch <= 0f) 0f else (x + scroll - edge - w / 2f) / pitch
 
-    /** The scroll that puts the middle of [slot] at [x], kept inside the strip's ends. */
-    fun scrollFor(slot: Float, x: Float): Float = (edge + slot * pitch + w / 2f - x).coerceIn(0f, maxScroll)
+    /**
+     * The scroll that puts the middle of [slot] at [x], kept inside the strip's ends — give or take [slack]: a gathered
+     * strip may stand off its ends, so the cards close in about the carried one instead of sliding under it.
+     */
+    fun scrollFor(slot: Float, x: Float, slack: Float = 0f): Float =
+        (edge + slot * pitch + w / 2f - x).coerceIn(-slack, maxScroll + slack)
 }
 
 /** How fast the strip slides when the carried card is at [x]: nothing in the middle, easing in toward either end. */
@@ -203,14 +220,17 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     val zoom = remember(p.id) { Animatable(0f) }
     val lift = remember(p.id) { Animatable(0f) }
     val project by rememberUpdatedState(p)
-    fun geometry() = StripGeometry(cardWpx, gapPx, edgePx, stripW.toFloat(), count, 1f - (1f - CARRY_SCALE) * zoom.value)
-
     // A card's identity in the strip: the clip and which of its equals it is, so a card keeps its own movement across a
     // reorder instead of taking over its neighbour's.
     val keys = remember(p.clips) {
         val seen = HashMap<ProjectClip, Int>()
         p.clips.map { c -> c to seen.merge(c, 1, Int::plus)!! }
     }
+    // The gesture and the drag's loop outlive a composition: they read the cards as they are now. A list captured once
+    // lifted the card that used to stand there after a reorder, and the real one rode in the empty place instead.
+    val keysNow by rememberUpdatedState(keys)
+    val countNow by rememberUpdatedState(count)
+    fun geometry() = StripGeometry(cardWpx, gapPx, edgePx, stripW.toFloat(), countNow, 1f - (1f - CARRY_SCALE) * zoom.value)
     // Where each card is drawn, in slots: a spring that follows its place, so the cards part and close organically.
     val slots = remember(p.id) { HashMap<Any, Animatable<Float, AnimationVector1D>>() }
 
@@ -232,6 +252,10 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var settling by remember(p.id) { mutableStateOf(false) }
     val landY = remember(p.id) { Animatable(0f) }
     val gapAt = remember(p.id) { Animatable(0f) }
+    // The strip gathers only once the card is swept sideways fast: held still or moved slowly, nothing changes under it.
+    var gathered by remember(p.id) { mutableStateOf(false) }
+    val tracker = remember { VelocityTracker() }
+    val gatherPx = with(density) { GATHER_SPEED.toPx() }
 
     fun scaleOf(lifted: Boolean): Float {
         val k = 1f - (1f - CARRY_SCALE) * zoom.value
@@ -266,11 +290,16 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             val dt = if (last == 0L) 0f else ((now - last) / 1_000_000f).coerceIn(0f, TICK_MAX_MS)
             last = now
             val g = geometry()
-            if (heldKey != null && dt > 0f && g.pitch > 0f) anchorSlot += edgeSpeed(fingerX, g.stripW) * dt / 1000f / g.pitch
-            scroll = g.scrollFor(anchorSlot, anchorX)
+            val last = maxOf(0, countNow - 1).toFloat()
+            if (heldKey != null && dt > 0f && g.pitch > 0f) {
+                anchorSlot = (anchorSlot + edgeSpeed(fingerX, g.stripW) * dt / 1000f / g.pitch).coerceIn(0f, last)
+            }
+            // Gathered, the strip may stand off its ends (as much as it has gathered): the cards close in about the
+            // anchor instead of the whole strip sliding to an end under the card.
+            scroll = g.scrollFor(anchorSlot, anchorX, g.stripW * zoom.value)
             // Held at an end, the anchor is where the end lets it be: the slide does not pile up beyond it.
             anchorSlot = g.slotAt(anchorX, scroll)
-            if (heldKey != null) target = g.slotAt(heldCenter(), scroll).roundToInt().coerceIn(0, maxOf(0, count - 1))
+            if (heldKey != null) target = g.slotAt(heldCenter(), scroll).roundToInt().coerceIn(0, last.toInt())
         }
         settling = false
     }
@@ -292,17 +321,20 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     }
 
     fun take(x: Float, y: Float) {
-        if (heldKey != null || settling || count == 0) return
+        val cards = keysNow
+        if (heldKey != null || settling || cards.isEmpty()) return
         val g = geometry()
         val i = g.slotAt(x, scroll).roundToInt()
-        if (i !in 0 until count || abs(x - g.center(i.toFloat(), scroll)) > g.w / 2f) return
+        if (i !in cards.indices || abs(x - g.center(i.toFloat(), scroll)) > g.w / 2f) return
         // Cutaways are pinned to the base's time (P3): they are not carried along the order.
-        if (project.clips[i].atMs != null) return
+        if (project.clips.getOrNull(i)?.atMs != null) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         heldIdx = i
         target = i
-        heldKey = keys[i]
-        liftKey = keys[i]
+        heldKey = cards[i]
+        liftKey = cards[i]
+        gathered = false
+        tracker.resetTracking()
         fingerX = x
         fingerY = y
         downY = y
@@ -312,8 +344,18 @@ fun ProjectScreen(vm: CameraController, p: Project) {
         settling = true
         scope.launch { scrollState.stopScroll() }
         scope.launch { gapAt.snapTo(i.toFloat()) }
-        scope.launch { zoom.animateTo(1f, ZOOM_SPRING) }
         scope.launch { lift.animateTo(1f, LAND_SPRING) }
+    }
+
+    /** A swift sideways sweep gathers the strip about where the card is now, so the card stays over its own place. */
+    fun sweep(timeMs: Long, at: Offset) {
+        if (heldKey == null || gathered) return
+        tracker.addPosition(timeMs, at)
+        if (abs(tracker.calculateVelocity().x) < gatherPx) return
+        gathered = true
+        anchorX = heldCenter()
+        anchorSlot = geometry().slotAt(anchorX, scroll)
+        scope.launch { zoom.animateTo(1f, ZOOM_SPRING) }
     }
 
     fun drop() {
@@ -362,11 +404,13 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 )
             }
         }
-        // The pieces that can play: a photo is a still, and waits for the slideshow way of showing them (P4).
-        val playable = p.clips.withIndex().filter { vm.projectFile(it.value.file)?.kind == MediaKind.VIDEO }
-        if (playable.isNotEmpty()) {
+        // Every piece, photos included: a still plays as its own picture, held for its length (asked for on the phone,
+        // 07.11); a piece out of reach plays as its card's frame, marked, so the project can be worked on without the
+        // camera and plays for real once it is back.
+        val pieces = p.clips.withIndex().toList()
+        if (pieces.isNotEmpty()) {
             ProjectPreview(
-                vm, playable, play,
+                vm, pieces, play,
                 onPlayed = { play = null },
                 onPlaying = { playingNow = it },
                 // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
@@ -398,6 +442,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                                     change.consume()
                                     fingerX += amount.x
                                     fingerY += amount.y
+                                    sweep(change.uptimeMillis, change.position)
                                 }
                             },
                             onDragEnd = { drop() },
@@ -451,15 +496,15 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                                     }
                                 }
                                 .width(CARD_W)
-                                .clickable(enabled = !settling) {
-                                    val f = vm.projectFile(clip.file)
-                                    if (clip.role == ProjectClip.Role.STILL) vm.viewing = f else play = i
-                                },
+                                // A photo is played like a piece of video: the preview goes to it and plays on from
+                                // there; the pencil is what opens the file (asked for on the phone, 07.11).
+                                .clickable(enabled = !settling) { play = i },
                         ) {
                             // «The file is not on the list any more» is only said when the list is complete: with
                             // the camera away a file it holds is simply out of reach, not gone.
                             ClipCard(
-                                vm, p, clip, vm.projectFile(clip.file),
+                                // Out of reach (the camera away), the card stays as it was: its frame is kept on the phone.
+                                vm, p, clip, vm.projectFile(clip.file) ?: vm.offlineFile(clip.file),
                                 stale = clip in stale,
                                 missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
                                 width = CARD_W,
@@ -496,7 +541,7 @@ private fun ClipCard(
     val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
         value = file?.let {
             // A photo is not a video with a frame at a time: it has its own tile picture.
-            if (clip.role == ProjectClip.Role.STILL) vm.thumbnail(it) else vm.timelineFrame(it, clip.fromMs)
+            if (clip.role == ProjectClip.Role.STILL) vm.thumbnail(it) else vm.timelineFrame(it, clip.fromMs, keep = true)
         }
     }
     Column(Modifier.width(width)) {
@@ -613,12 +658,18 @@ private fun ClipCard(
     }
 }
 
-/** One piece as a media3 item: its file's URI, cut to its range. */
+/**
+ * One piece as a media3 item: its file's URI, cut to its range. A still has no range to cut — it is one picture, and
+ * its length is how long the picture stands: the player holds it that long and moves on to the next piece.
+ */
 @androidx.annotation.OptIn(UnstableApi::class)
 private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile): MediaItem {
     val uri = if (file.isOnPhone) file.localUri ?: clip.file else vm.previewUrl(file)
-    return MediaItem.Builder()
-        .setUri(uri)
+    val builder = MediaItem.Builder().setUri(uri)
+    if (clip.role == ProjectClip.Role.STILL) {
+        return builder.setImageDurationMs(clip.durationMs.coerceAtLeast(1L)).build()
+    }
+    return builder
         .setClippingConfiguration(
             MediaItem.ClippingConfiguration.Builder()
                 .setStartPositionMs(clip.fromMs)
@@ -657,11 +708,66 @@ internal fun seekPoint(lengths: List<Long>, atMs: Long): Pair<Int, Long> {
     return lengths.lastIndex to 0L
 }
 
+/** The long side of a photo as the preview decodes it: more than a phone screen needs, little enough to keep in hand. */
+private const val STILL_SIDE = 1280
+
 /**
- * The project's preview: the pieces in the order they will play, each cut to its own range. They are a media3 playlist
- * ? the pieces one after another for now; the base with its cutaways needs the montage engine (P3). A camera file plays
- * its light copy over Wi-Fi and a phone copy plays itself ? the same sources the viewer uses. A piece is known by its
- * place in the project's clips ([clips] carries it), so the same piece put in twice is still two cards.
+ * How many times a side has to be halved to fit [maxSide] — the same rule the viewer decodes photos by, so a photo is
+ * never taken into memory whole (the phone's camera takes 12–50 MP, a screen asks for one or two).
+ */
+internal fun sampleFor(width: Int, height: Int, maxSide: Int): Int {
+    if (width <= 0 || height <= 0 || maxSide <= 0) return 1
+    var sample = 1
+    while (maxOf(width, height) / (sample * 2) >= maxSide) sample *= 2
+    return sample
+}
+
+/**
+ * A photo of the playlist, decoded small on purpose: media3's own decoder takes the picture whole, which a 50 MP photo
+ * does not survive. Bounds first, then a sampled decode, both straight from the bytes the source has delivered.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun decodePhoto(data: ByteArray, length: Int): Bitmap {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(data, 0, length, bounds)
+    val sample = sampleFor(bounds.outWidth, bounds.outHeight, STILL_SIDE)
+    return BitmapFactory.decodeByteArray(data, 0, length, BitmapFactory.Options().apply { inSampleSize = sample })
+        ?: throw ImageDecoderException("not a picture: $length bytes, ${bounds.outWidth}×${bounds.outHeight}")
+}
+
+/**
+ * Where the player puts the picture of a still. The player waits while it is not here (a still's length starts only
+ * once its picture is ready), and the preview draws it over the black the video surface leaves.
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+private class PhotoSink : ImageOutput {
+    var shown by mutableStateOf<Bitmap?>(null)
+
+    override fun onImageAvailable(presentationTimeUs: Long, bitmap: Bitmap) {
+        shown = bitmap
+    }
+
+    /** Another piece (or the end): the picture goes, so the next still never shows the last one's. */
+    override fun onDisabled() {
+        shown = null
+    }
+}
+
+/**
+ * One piece of the preview's playlist: its card ([at] — its place in the project's clips), its file, and whether that
+ * file is out of reach right now ([offline]: then the piece plays as its card's frame, marked).
+ */
+private class Piece(val at: IndexedValue<ProjectClip>, val file: CameraFile, val offline: Boolean) {
+    val clip: ProjectClip get() = at.value
+}
+
+/**
+ * The project's preview: the pieces in the order they will play, each cut to its own range — a still is not cut, it is
+ * one picture held for its length, and the player shows it (and waits for it, so its length never counts loading). They
+ * are a media3 playlist: the pieces one after another for now; the base with its cutaways needs the montage engine
+ * (P3). A camera file plays its light copy over Wi-Fi and a phone copy plays itself — the same sources the viewer uses.
+ * A piece is known by its place in the project's clips ([clips] carries it), so the same piece put in twice is still
+ * two cards.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -674,33 +780,59 @@ private fun ProjectPreview(
     carrying: Boolean,
 ) {
     val context = LocalContext.current
-    // A piece whose file isn't around is left out of the playlist ? and out of the numbering the cards seek by.
-    val items = clips.mapNotNull { e -> vm.projectFile(e.value.file)?.let { file -> e to mediaItem(vm, e.value, file) } }
-    val signature = items.joinToString("|") { "${it.first.value.file}:${it.first.value.fromMs}-${it.first.value.toMs}" }
+    // Every piece with its file: the real one, or — out of reach — a stand-in played as its card's frame.
+    val items = clips.map { e ->
+        val real = vm.projectFile(e.value.file)
+        Piece(e, real ?: vm.offlineFile(e.value.file), offline = real == null)
+    }
+    val signature = items.joinToString("|") { "${it.clip.file}:${it.clip.fromMs}-${it.clip.toMs}:${it.offline}" }
     // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
     val itemsNow by rememberUpdatedState(items)
     val onPlayingNow by rememberUpdatedState(onPlaying)
     // The camera's own data source (its Wi-Fi is bound to this app) under the stock one: content and file URIs keep
-    // going to the phone's own readers.
+    // going to the phone's own readers. A photo is a plain JPEG by content, and the stock JPEG reader takes a JPEG for
+    // a motion photo — the flag is what makes it a picture the playlist can show.
     val factory = remember(vm.conn) {
+        val extractors = DefaultExtractorsFactory().setJpegExtractorFlags(JpegExtractor.FLAG_READ_IMAGE)
         val camera = vm.previewSource()
-        if (camera == null) DefaultMediaSourceFactory(DefaultDataSource.Factory(context))
-        else DefaultMediaSourceFactory(DefaultDataSource.Factory(context, camera))
+        if (camera == null) DefaultMediaSourceFactory(DefaultDataSource.Factory(context), extractors)
+        else DefaultMediaSourceFactory(DefaultDataSource.Factory(context, camera), extractors)
     }
-    val player = remember(factory) { ExoPlayer.Builder(context, factory).build().apply { playWhenReady = false } }
+    // Where the picture of a still lands.
+    val photo = remember { PhotoSink() }
+    // The stock renderers, and an image renderer after them: a still is shown by the player itself, so the playlist
+    // plays photos and pieces alike and one clock counts them both.
+    val player = remember(factory, photo) {
+        // In place of the stock image renderer, not after it: the track selector gives a picture to the first one
+        // that takes it, so a renderer added at the end never saw a photo (the stock one decoded it whole, to nowhere).
+        val renderers = object : DefaultRenderersFactory(context) {
+            override fun buildImageRenderers(out: java.util.ArrayList<Renderer>) {
+                out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory { data, length -> decodePhoto(data, length) }, photo))
+            }
+        }
+        ExoPlayer.Builder(context, factory)
+            .setRenderersFactory(renderers)
+            .build()
+            .apply { playWhenReady = false }
+    }
     // What the player holds right now: its indices mean this list, not the one just composed.
-    val inPlayer = remember(player) { mutableListOf<IndexedValue<ProjectClip>>() }
+    val inPlayer = remember(player) { mutableListOf<Piece>() }
     // The same pieces in the same order, only their cards' places moved (a photo taken out before them): no rebuild,
     // but the cards they stand for are the new ones.
     SideEffect {
-        if (inPlayer.map { it.value } == items.map { it.first.value }) {
+        if (inPlayer.map { it.clip to it.offline } == items.map { it.clip to it.offline }) {
             inPlayer.clear()
-            inPlayer.addAll(items.map { it.first })
+            inPlayer.addAll(items)
         }
     }
+    // The piece and the place in it, kept across a new player (the camera coming or going makes one): the preview goes
+    // on from there instead of starting over.
+    var resume by remember { mutableStateOf<Pair<ProjectClip, Long>?>(null) }
     var playing by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf<Float?>(null) }
-    val totalMs = items.sumOf { it.first.value.durationMs }
+    // The piece the player is on: its picture is what the preview shows when that piece is a still.
+    var current by remember(player) { mutableIntStateOf(0) }
+    val totalMs = items.sumOf { it.clip.durationMs }
     // The clock of the whole timeline: absolute milliseconds, and its total.
     var shown by remember { mutableLongStateOf(0L) }
     var shownTotal by remember { mutableLongStateOf(totalMs) }
@@ -709,6 +841,21 @@ private fun ProjectPreview(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playing = isPlaying
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                current = player.currentMediaItemIndex
+                photo.shown = null
+            }
+
+            // A picture the phone cannot read must not stop the film: the piece is passed over and the rest plays on.
+            override fun onPlayerError(error: PlaybackException) {
+                val now = inPlayer.getOrNull(player.currentMediaItemIndex) ?: return
+                if (now.clip.role != ProjectClip.Role.STILL && !now.offline) return
+                photo.shown = null
+                if (!player.hasNextMediaItem()) return
+                player.seekToNextMediaItem()
+                player.prepare()
             }
         }
         player.addListener(listener)
@@ -722,34 +869,43 @@ private fun ProjectPreview(
         if (carrying) player.pause()
     }
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
-    // clipping ? a progressive source would play the whole file.
+    // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {
         // A rebuild keeps the piece and the place in it: the piece is looked up in the list the player held (its index
-        // meant that list), then found again in the new order ? a move or an addition must not jump to another piece.
-        val was = inPlayer.getOrNull(player.currentMediaItemIndex)?.value
-        val wasAt = player.currentPosition.coerceAtLeast(0L)
-        player.setMediaItems(items.map { it.second })
+        // meant that list), then found again in the new order — a move or an addition must not jump to another piece.
+        val was = inPlayer.getOrNull(player.currentMediaItemIndex)?.clip?.let { it to player.currentPosition.coerceAtLeast(0L) }
+            ?: resume
+        // A piece out of reach plays as a picture held for its length: the clock and the order stay the project's own.
+        val media = items.map { piece ->
+            if (!piece.offline) mediaItem(vm, piece.clip, piece.file)
+            else MediaItem.Builder()
+                .setUri(vm.offlineStill(piece.file, piece.clip.fromMs))
+                .setImageDurationMs(piece.clip.durationMs.coerceAtLeast(1L))
+                .build()
+        }
+        player.setMediaItems(media)
         inPlayer.clear()
-        inPlayer.addAll(items.map { it.first })
+        inPlayer.addAll(items)
         player.prepare()
-        val at = if (was == null) -1 else items.indexOfFirst { it.first.value == was }
-        if (at >= 0) player.seekTo(at, minOf(wasAt, items[at].first.value.durationMs))
+        val at = if (was == null) -1 else items.indexOfFirst { it.clip == was.first }
+        if (at >= 0) player.seekTo(at, minOf(was!!.second, items[at].clip.durationMs))
     }
     // The clock follows the player whether or not it plays, and it counts the whole timeline, not the item played.
     LaunchedEffect(player) {
         while (true) {
             val now = inPlayer.toList()
-            val lengths = lengthsOf(player, now.map { it.value })
+            val lengths = lengthsOf(player, now.map { it.clip })
             if (dragging == null && now.isNotEmpty()) shown = clockAt(lengths, player.currentMediaItemIndex, player.currentPosition)
-            shownTotal = if (lengths.isEmpty()) itemsNow.sumOf { it.first.value.durationMs } else lengths.sum()
+            shownTotal = if (lengths.isEmpty()) itemsNow.sumOf { it.clip.durationMs } else lengths.sum()
+            now.getOrNull(player.currentMediaItemIndex)?.let { resume = it.clip to player.currentPosition.coerceAtLeast(0L) }
             // Told to the screen: its card is marked in the strip and the strip follows it.
-            onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.index)
+            onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.at?.index)
             delay(250)
         }
     }
-    // A card tapped: the preview jumps to that piece and plays it (a photo never reaches the playlist).
+    // A card tapped: the preview jumps to that piece — video or photo alike — and plays on from it.
     LaunchedEffect(play, signature) {
-        val at = inPlayer.indexOfFirst { it.index == play }
+        val at = inPlayer.indexOfFirst { it.at.index == play }
         if (at >= 0) {
             player.seekTo(at, 0L)
             player.play()
@@ -758,10 +914,43 @@ private fun ProjectPreview(
     }
 
     Column(Modifier.fillMaxWidth()) {
-        AndroidView(
-            factory = { ctx -> PlayerView(ctx).apply { useController = false; this.player = player } },
-            modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black),
-        )
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black)) {
+            AndroidView(
+                factory = { ctx -> PlayerView(ctx).apply { useController = false; this.player = player } },
+                modifier = Modifier.fillMaxSize(),
+            )
+            // A photo is a picture of its own, not a frame of video: it is drawn over the black the video surface
+            // leaves. The player clears it when another piece starts, so what stands here is never the last one's.
+            val decoded = remember(photo.shown) { photo.shown?.asImageBitmap() }
+            val piece = inPlayer.getOrNull(current)
+            if (decoded != null) {
+                Image(decoded, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            } else {
+                // Until it comes, the piece's own card picture stands in (it is already on the phone): a full photo
+                // over the camera's Wi-Fi takes a moment.
+                val now = piece?.takeIf { it.clip.role == ProjectClip.Role.STILL || it.offline }
+                val cached by produceState<ImageBitmap?>(null, now?.clip) {
+                    value = now?.let {
+                        if (it.clip.role == ProjectClip.Role.STILL) vm.thumbnail(it.file)
+                        else vm.timelineFrame(it.file, it.clip.fromMs, keep = true)
+                    }
+                }
+                val stand = cached
+                if (stand != null) Image(stand, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            }
+            // A piece out of reach says so over its frame: the camera is away, or this file is not on its card now.
+            if (piece?.offline == true) {
+                Text(
+                    if (vm.conn == ConnState.Connected) tr("Файла нет на камере", "The file is not on the camera")
+                    else tr("Камера не подключена — показан кадр", "Camera offline — showing a frame"),
+                    Modifier.align(Alignment.TopCenter).padding(8.dp)
+                        .background(Color(0xAA000000), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                )
+            }
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton({ if (playing) player.pause() else player.play() }) {
                 Icon(
@@ -774,7 +963,7 @@ private fun ProjectPreview(
                 onValueChange = { dragging = it },
                 onValueChangeFinished = {
                     dragging?.let { ms ->
-                        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.value }), ms.toLong())
+                        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.clip }), ms.toLong())
                         if (inPlayer.isNotEmpty()) player.seekTo(i, at)
                         shown = ms.toLong()
                     }
