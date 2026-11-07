@@ -118,6 +118,16 @@ found by scanning 41…80); field of view fixed to `SUPER_NEW` = 15 («Titan»),
 
 - `GET /DCIM/Camera01/<name>` — the file, no session needed; `Range` works (`206`, resumable downloads).
   `HEAD` gives the size (useful for `.dng`, which the file list reports without one).
+- **The file list can be stale**: after a card swap the camera keeps listing entries of the *other* card — measured
+  06.11.2026, four photos of the previous card stayed in the listing while `GET` answered **404** for them (the
+  tiles had no preview and nothing opened). Inserting a card makes the camera re-scan, and the list heals itself;
+  until then a 404 is the only sign. The app marks such tiles «нет на карте» (a failed thumbnail plus a HEAD probe),
+  never opens them, and clears the marks on every new listing. A video may also lose only its low-res `.lrv` while
+  the file itself is fine — a 404 in the player is then answered by playing the file itself.
+- **A reply's tail can be cut**: a `GET_FILE_LIST` page once arrived as a 1293-byte body with a field in its tail
+  claiming 1295 bytes, and the schema-less parser threw — losing the *whole* list (the screen showed no files). The
+  parser now keeps every field parsed before the cut (`PbTest`); with that, all 54 entries of that page came through
+  (06.11.2026).
 - `GET /CONF` — the capability JSON (≈935 KB), see below.
 - Directory listings are `403`; any other path answers `400` with body `1000`. There is no OSC API.
 
@@ -231,6 +241,22 @@ in the read-back.
 | photos left | Options 10 (photo modes) |
 
 Ask for each Options type in its own request: a type the camera doesn't answer makes the whole request fail.
+
+### Card states and errors
+*(verified 05.11.2026, fw v1.9.29, three states measured: a full card, no card, a working 128 GB spare)*
+
+| Signal | Body | Meaning |
+|---|---|---|
+| Options 158 / notification **8290** | `{1: total, 2: free, 3: reserve, 4: 0}` | bytes; **field 3 = exactly 10 % of the card** — the camera's own reserve. It stops recording while `free` is still ≈1 GB (on a 62.5 GB card), because `free − reserve` is the real allowance |
+| notification **8198** STORAGE_UPDATE | `{1: state, 2: 0}` | **state 0 = ok, 1 = no card, 2 = full, 3 = unusable card, 5 = write error**. 3 = a foreign filesystem/unformatted: the camera does *not* mount the card (no sizes in Options 158, an empty file list, `GetFileInfoList` → **500**), and a photo reply still carries a URI although nothing is written. 5 = the card was pulled out mid-recording (seen 05.11, fw v1.9.29) |
+| notification **8201** CAPTURE_STOPPED | `{1: reason}` | a capture refused/aborted: **2 = no card, 11 = "can't write"** (a full card *or* an unusable one). A *normal* stop sends no 8201 (8256 `{1: 1}`/`{1: 0}` marks the start/stop instead) |
+| reply to TAKE_PICTURE / START_CAPTURE | code **200**, body `{3: {1: "…"}}` | a **photo**: field 1 carries the file URI — or the message `"No SD card"` when there is no card. With an **unusable card** a URI comes back even though nothing was written (the list stays empty, `GetFileInfoList` → 500). A **video** refusal has an *empty* 200 reply and shows only through 8201. In short: trust the 8198 state, not the reply |
+| Options 9 / PhotographyOptions 41 | seconds left: empty / 0 | with a full card the camera answers nothing to Options 9 and 0 in po 41 — the app's «SD 0 мин» |
+| Options 10 | photos left: `{10: 0}` without a card | photos still fit while ≈1 GB is free (a live photo ≈ 25 MB) |
+| 166 GET_STORAGE | code **400** | not supported by GO Ultra |
+
+«Full» is about **video**: with ≈1 GB free a live photo was taken normally. States 1/2/3/5 were all reproduced on hardware
+(a full card, no card, a foreign filesystem, the card pulled mid-recording); state 4 was not seen.
 
 ### Live photos (LIV)
 

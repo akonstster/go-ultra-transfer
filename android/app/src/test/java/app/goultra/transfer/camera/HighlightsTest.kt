@@ -108,4 +108,17 @@ class HighlightsTest {
         val pieces = listOf(Highlight(1000, 3000), Highlight(8400, 10_400), Highlight(9300, 11_300))
         assertEquals(listOf(Highlight(1000, 3000), Highlight(8400, 9400)), Highlights.clip(pieces, 9_400))
     }
+
+    @Test
+    fun piecesInEffect() {
+        // Nobody marked it and nobody edited it: the whole video is the one piece — a project's clip of it is not gone.
+        assertEquals(listOf(Highlight(0, 12_000)), Highlights.inEffect(null, emptyList(), 13_000, 12_000))
+        // The camera's marks, as the film strip shows them (a recording mark: 1 s either side).
+        assertEquals(listOf(Highlight(500, 2_500)), Highlights.inEffect(null, listOf(Highlight(1_500)), 13_000, 12_000))
+        // Edited on the phone: the edit is the answer — even an empty one (every piece taken away is an answer).
+        assertEquals(listOf(Highlight(1_000, 2_000)), Highlights.inEffect(listOf(Highlight(1_000, 2_000)), emptyList(), 13_000, 12_000))
+        assertEquals(emptyList<Highlight>(), Highlights.inEffect(emptyList(), emptyList(), 13_000, 12_000))
+        // A file whose length is unknown gives nothing rather than something invented.
+        assertEquals(emptyList<Highlight>(), Highlights.inEffect(null, emptyList(), null, null))
+    }
 }

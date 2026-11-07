@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.LruCache
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -36,7 +37,14 @@ import app.goultra.transfer.camera.RemoteFrames
 import app.goultra.transfer.camera.CameraTcp
 import app.goultra.transfer.camera.CameraSession
 import app.goultra.transfer.camera.CaptureStatus
+import app.goultra.transfer.camera.CardInfo
+import app.goultra.transfer.camera.CardState
+import app.goultra.transfer.camera.StorageEvent
 import app.goultra.transfer.camera.PbWriter
+import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.ProjectClip
+import app.goultra.transfer.camera.ProjectExport
+import app.goultra.transfer.camera.Projects
 import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
@@ -52,6 +60,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.drop
@@ -125,7 +134,7 @@ data class ColorLook(
     }
 }
 
-enum class Tab { FILES, CAMERA }
+enum class Tab { FILES, CAMERA, PROJECTS }
 
 data class DownloadProgress(
     val name: String,
@@ -144,6 +153,9 @@ class CameraController(private val app: Application) {
     companion object {
         private const val IDLE_VISIBLE_MS = 5 * 60_000L
         private const val BACKGROUND_GRACE_MS = 3 * 60_000L
+
+        /** A photo put into a project: this long until the montage decides otherwise. */
+        private const val STILL_MS = 3_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -155,6 +167,7 @@ class CameraController(private val app: Application) {
         private set
     var conn by mutableStateOf<ConnState>(ConnState.Idle)
         private set
+
     var files by mutableStateOf<List<CameraFile>>(emptyList())
         private set
     var filter by mutableStateOf(Filter.ALL)
@@ -392,6 +405,25 @@ class CameraController(private val app: Application) {
         private set
     var message by mutableStateOf<String?>(null)
 
+    /** The camera's own verdict on its card (notifications 8198/8201) — the screens warn instead of a bare «0». */
+    var cardState by mutableStateOf(CardState.OK)
+        private set
+
+    /**
+     * Files the camera lists but that are not on its card: they answer HTTP 404 (after a card swap its index keeps
+     * the old card's entries — measured 06.11.2026). Tiles show «нет на карте»; every new listing clears the marks
+     * and the files are asked again, so a card put back heals them by itself.
+     */
+    var missingFiles by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** A newer build of our own channel on GitHub (see [UpdateCheck]); shown once per version unless skipped. */
+    var update by mutableStateOf<UpdateInfo?>(null)
+        private set
+
+    /** The app's own version («0.17-alpha3») — the About dialog, the log and the update check. */
+    val appVersion: String get() = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: ""
+
     /** Result of the last download batch. */
     var lastResult: String = ""
         private set
@@ -432,7 +464,7 @@ class CameraController(private val app: Application) {
     }
 
     fun logText(): String = buildString {
-        appendLine("GO Ultra Transfer ${app.packageManager.getPackageInfo(app.packageName, 0).versionName}")
+        appendLine("insta360 transfer ${app.packageManager.getPackageInfo(app.packageName, 0).versionName}")
         appendLine("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
         synchronized(logLines) { logLines.forEach { appendLine(it) } }
     }
@@ -642,6 +674,10 @@ class CameraController(private val app: Application) {
                 }
             }
         }
+        // The card's state and sizes come by themselves (8198/8290), and a refused capture says why (8201).
+        session.onStorage = { event -> scope.launch { onStorageEvent(event) } }
+        // A newer build in our own GitHub channel: once a day, silently — the camera's Wi-Fi has no internet.
+        scope.launch { delay(3_000); checkUpdate() }
         session.onLost = {
             scope.launch {
                 if (conn == ConnState.Connected) {
@@ -1146,7 +1182,8 @@ class CameraController(private val app: Application) {
         linkJob = scope.launch {
             conn = ConnState.Working(Phrase("Подключение…", "Connecting…"))
             val error = try {
-                session.connect { step -> scope.launch { conn = ConnState.Working(step) } }
+                val step: (Phrase) -> Unit = { step -> scope.launch { conn = ConnState.Working(step) } }
+                session.connect(step)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1432,6 +1469,9 @@ class CameraController(private val app: Application) {
             return
         }
         files = list
+        // The marks of files the camera listed but that weren't on the card: a fresh listing asks again.
+        missingFiles = emptySet()
+        noLrv = emptySet()
         if (reportTimeShift) {
             reportTimeShift = false
             // The new TimeShift file: its real length (sped-up parts are as short as Auto chose to make them).
@@ -1685,7 +1725,17 @@ class CameraController(private val app: Application) {
         photoBusy = true
         scope.launch {
             try {
-                message = if (session.takePicture()) tr("Фото снято", "Photo taken") else tr("Камера не сделала снимок", "The camera didn't take the photo")
+                val refusal = session.takePicture()
+                message = when {
+                    // Code 200 is not a promise: with a card it can't write the camera may still send a file uri —
+                    // the storage state is what tells the truth (measured on an unusable card, 05.11).
+                    refusal == null && cardUnwritable() ->
+                        (cardMessage(cardState) ?: cardMessage(CardState.NO_CARD))?.text
+                            ?: tr("Камера не сделала снимок", "The camera didn't take the photo")
+                    refusal == null -> tr("Фото снято", "Photo taken")
+                    refusal.isNotEmpty() -> cameraRefusal(refusal)
+                    else -> tr("Камера не сделала снимок", "The camera didn't take the photo")
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1756,7 +1806,24 @@ class CameraController(private val app: Application) {
                 }
                 countdown = null
                 val ok = when {
-                    picture -> session.takePicture()
+                    // The camera answers 200 whatever happens: its own words and the storage state tell the truth.
+                    picture -> when (val refusal = session.takePicture()) {
+                        null -> if (cardUnwritable()) {
+                            // The state may still be on its way (another channel): fall back to the no-card wording.
+                            message = (cardMessage(cardState) ?: cardMessage(CardState.NO_CARD))?.text
+                            false
+                        } else {
+                            true
+                        }
+                        "" -> {
+                            message = tr("Камера не сделала снимок", "The camera didn't take the photo")
+                            false
+                        }
+                        else -> {
+                            message = cameraRefusal(refusal)
+                            false
+                        }
+                    }
                     start -> session.startRecording()
                     else -> session.stopRecording()
                 }
@@ -1803,11 +1870,178 @@ class CameraController(private val app: Application) {
         log("CONF: режимов ${parsed.modes.size}")
     }
 
+    /**
+     * Storage notifications: the card's state (8198), its sizes (8290) and why a capture was refused (8201 —
+     * 2 no card, 11 can't write). The camera's own screen warns the moment the card goes bad; so does the message
+     * here, once per change (the camera keeps repeating the same state while the trouble lasts).
+     */
+    private fun onStorageEvent(event: StorageEvent) {
+        event.state?.let { state ->
+            val changed = state != cardState
+            cardState = state
+            if (changed) cardMessage(state)?.let { message = it.text }
+        }
+        // Sizes straight from the camera (an 8290 follows every recording): no extra request, no stale numbers.
+        event.totalBytes?.let { total ->
+            settings = settings?.let { s ->
+                val c = s.card
+                s.copy(
+                    card = CardInfo(
+                        totalBytes = total,
+                        freeBytes = event.freeBytes ?: c?.freeBytes ?: 0,
+                        reserveBytes = event.reserveBytes ?: c?.reserveBytes ?: 0,
+                        videoSecondsLeft = c?.videoSecondsLeft,
+                        photosLeft = c?.photosLeft,
+                    ),
+                )
+            }
+        }
+        event.stopReason?.let { reason -> stopMessage(reason)?.let { message = it.text } }
+        // The card came in or went out (or its state changed): the camera re-scans it — take the fresh listing.
+        if (event.mediaChanged || event.state != null) scheduleListRefresh()
+    }
+
+    /** A card insertion comes as a burst of signals: wait it out, then re-list. Cancelled by the next signal. */
+    private var cardJob: Job? = null
+
+    private fun scheduleListRefresh() {
+        if (conn != ConnState.Connected) return // the list needs Wi-Fi
+        cardJob?.cancel()
+        cardJob = scope.launch {
+            delay(2_000)
+            if (conn == ConnState.Connected && !recordBusy && settingBusy == null) {
+                log("карта сменилась: перечитываю список файлов")
+                runCatching { loadFiles() }
+            }
+        }
+    }
+
+    /** True when the camera can't write at all — a «full» card still takes photos, so it is not here. */
+    private fun cardUnwritable(): Boolean =
+        cardState == CardState.NO_CARD || cardState == CardState.UNUSABLE || cardState == CardState.WRITE_ERROR ||
+            // A fresh start with a bad card: the state is unknown (the camera sends 8198 only on a change), but
+            // zero sizes mean the card isn't usable — an empty formatted card still reports its size.
+            (cardState == CardState.OK && settings?.card?.totalBytes == 0L)
+
+    /** A file that is listed but not on the card: say so instead of opening a black screen. */
+    fun missingFileMessage() {
+        message = tr(
+            "Камера показывает этот файл, но на карте его нет — возможно, карту меняли. Обновите список или вставьте ту карту.",
+            "The camera lists this file, but it isn't on the card — the card may have been changed. Refresh the list or insert that card.",
+        )
+    }
+
+    /**
+     * The camera's files the phone hasn't got yet — without those the camera only *lists* (a stale index after a card
+     * swap): a file that isn't on the card can't be downloaded, so it must not swell the counter or the selection.
+     */
+    val notDownloadedCount: Int by derivedStateOf {
+        visibleFiles.count { it.name !in downloaded && it.name !in missingFiles }
+    }
+
+    /**
+     * Marks a file the camera lists but that answers HTTP 404 (its index keeps entries of another card after a swap).
+     * The tile then says «нет на карте»; called from a failed thumbnail, a failed photo fetch and a player error.
+     */
+    fun markMissing(name: String) {
+        if (name in missingFiles) return
+        missingFiles = missingFiles + name
+        log("файл «$name» есть в списке камеры, но на карте его нет")
+    }
+
+    /** True while the GitHub check runs (the menu item must not stack them). */
+    private var updateBusy = false
+
+    /**
+     * Looks for a newer build of this app's own channel on GitHub ([UpdateCheck]): automatically once a day (silent
+     * on failure — the app is often on the camera's Wi-Fi, which has no internet), or by hand from ⋮ → «Проверить
+     * обновление», which always answers: a dialog on a find, a message on «nothing new» or «no internet».
+     */
+    fun checkUpdate(manual: Boolean = false) {
+        if (updateBusy) return
+        val prefs = app.getSharedPreferences("update", 0)
+        if (!manual && System.currentTimeMillis() - prefs.getLong("checked_at", 0L) < 24 * 3_600_000L) return
+        updateBusy = true
+        if (manual) message = tr("Проверяю обновление…", "Checking for updates…")
+        scope.launch {
+            try {
+                val releases = UpdateCheck.fetch()
+                if (releases == null) {
+                    // Nothing was read (no route to GitHub — the camera's Wi-Fi has no internet): the day is not
+                    // burned, the next start tries again.
+                    if (manual) message = tr(
+                        "Не удалось проверить обновление — нужен интернет.",
+                        "Couldn't check for updates — the internet is needed.",
+                    )
+                    return@launch
+                }
+                prefs.edit().putLong("checked_at", System.currentTimeMillis()).apply()
+                val found = UpdateCheck.best(releases, appVersion, UpdateCheck.isAlpha(appVersion))
+                when {
+                    found == null -> if (manual) message = tr(
+                        "Обновлений нет — у вас последняя версия.",
+                        "No updates — you're on the latest version.",
+                    )
+                    // «Не напоминать» about this version: only a manual check shows it again.
+                    !manual && found.tag == prefs.getString("skip", null) -> Unit
+                    else -> update = found
+                }
+            } finally {
+                updateBusy = false
+            }
+        }
+    }
+
+    /** «Позже»: hide the dialog (the next daily check may bring it back). */
+    fun dismissUpdate() {
+        update = null
+    }
+
+    /** «Не напоминать»: this version never pops up by itself again. */
+    fun skipUpdate(tag: String) {
+        app.getSharedPreferences("update", 0).edit().putString("skip", tag).apply()
+        update = null
+    }
+
+    /** What to tell about a card state (null for OK/UNKNOWN: the chip on the picture speaks for itself). */
+    private fun cardMessage(state: CardState): Phrase? = when (state) {
+        CardState.NO_CARD -> Phrase("Нет SD-карты — вставьте её в камеру.", "No SD card — insert one into the camera.")
+        CardState.UNUSABLE -> Phrase(
+            "Камера не принимает карту — проверьте её или отформатируйте в камере.",
+            "The camera can't use this card — check it or format it in the camera.",
+        )
+        CardState.WRITE_ERROR -> Phrase("Ошибка записи на карту — проверьте её.", "A card write error — check the card.")
+        CardState.FULL -> Phrase("Карта заполнена — запись невозможна.", "The card is full — recording isn't possible.")
+        else -> null
+    }
+
+    /** The 8201 stop reason (2 no card, 11 can't write — a full or an unusable card) as the user sees it. */
+    private fun stopMessage(reason: Int): Phrase? = when (reason) {
+        2 -> cardMessage(CardState.NO_CARD)
+        Proto.STOP_REASON_CANNOT_WRITE -> cardMessage(cardState)
+            ?: Phrase("Камера не смогла записать — проверьте карту.", "The camera couldn't write — check the card.")
+        else -> null
+    }
+
+    /** The camera's own refusal inside a reply («No SD card»): the known ones get our wording, others go as they are. */
+    private fun cameraRefusal(words: String): String = when {
+        words.contains("SD") || words.contains("card", ignoreCase = true) ->
+            (cardMessage(cardState) ?: cardMessage(CardState.NO_CARD))?.text ?: words
+        else -> words
+    }
+
     private fun showSettings(s: CamSettings) {
         if (s != settings) log("настройки: ${s.mode} ${s.values} батарея ${s.batteryPercent}/${s.podBatteryPercent}")
         settings = s
+        s.batteryPercent?.let { lastBattery = it to s.charging }
         restartLiveIfShapeChanged(s)
     }
+
+    /** The camera's battery as last read, and whether it was charging: kept after the link goes (settings are not). */
+    private var lastBattery: Pair<Int, Boolean>? = null
+
+    /** The camera most likely ran out of battery: at 10 % or less and not charging when last read. */
+    private val cameraLikelyFlat: Boolean get() = lastBattery?.let { (percent, charging) -> percent <= 10 && !charging } == true
 
     private var liveRestartAt = 0L
 
@@ -2237,7 +2471,8 @@ class CameraController(private val app: Application) {
     /** Selects all visible files that are not in the gallery yet. */
     fun selectNew() {
         touch()
-        visibleFiles.filter { it.name !in downloaded }.forEach { selected[it.name] = Unit }
+        // Missing files (a stale index) can't be downloaded: they stay out of «select new» too.
+        visibleFiles.filter { it.name !in downloaded && it.name !in missingFiles }.forEach { selected[it.name] = Unit }
     }
 
     fun clearSelection() = selected.clear()
@@ -2267,7 +2502,38 @@ class CameraController(private val app: Application) {
     fun previewSource(): androidx.media3.datasource.DataSource.Factory? =
         session.wifiLink?.let { CameraHttpDataSource.Factory(it) }
 
-    fun previewUrl(file: CameraFile): String = "http://${CameraTcp.HOST}${session.previewUri(file)}"
+    fun previewUrl(file: CameraFile): String =
+        // The camera's low-res copy is the preview; a video whose .lrv turned out to be gone plays itself.
+        if (file.name in noLrv) "http://${CameraTcp.HOST}${file.uri}"
+        else "http://${CameraTcp.HOST}${session.previewUri(file)}"
+
+    /**
+     * Videos whose low-res `.lrv` answered 404 while the video itself is on the card: play the file itself from then
+     * on (the camera's index can keep an `.lrv` that is no longer there — a stale entry after a card swap).
+     */
+    var noLrv by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /**
+     * The player (or a fetch) hit an HTTP 404: either the whole file is gone — the camera's index keeps entries of
+     * another card after a swap — or only its `.lrv` preview. Ask about the file itself: a missing one gets the
+     * «нет на карте» mark and a message, a present one is then played as it is.
+     */
+    fun checkMissing(file: CameraFile) {
+        scope.launch {
+            val here = runCatching { session.fileAvailable(file.uri) }.getOrDefault(true)
+            when {
+                !here -> {
+                    markMissing(file.name)
+                    missingFileMessage()
+                }
+                file.name !in noLrv -> {
+                    log("превью ${file.name}: .lrv нет на карте — играю сам файл")
+                    noLrv = noLrv + file.name
+                }
+            }
+        }
+    }
 
     /** Film strip frames: one per piece (its middle), small; null where a frame couldn't be read. */
     suspend fun pieceFrames(file: CameraFile, pieces: List<Highlight>): List<ImageBitmap?> {
@@ -2319,7 +2585,14 @@ class CameraController(private val app: Application) {
         // A live photo with a frame as its cover: show that (the gallery file), not the camera's photo.
         val bytes = (if (coverReplaced(file)) LiveCover.video(app, file.name)?.let { LiveCover.photoPart(app, it) } else null)
             ?: runCatching { session.fetchFile(session.previewUri(file)) }
-                .onFailure { log("просмотр ${file.name}: ${it.message}") }.getOrNull() ?: return@withContext null
+                .onFailure {
+                    log("просмотр ${file.name}: ${it.message}")
+                    // A photo the camera lists but that isn't on the card (its index keeps another card's entries).
+                    if (it.message?.contains("HTTP 404") == true) {
+                        markMissing(file.name)
+                        missingFileMessage()
+                    }
+                }.getOrNull() ?: return@withContext null
         shownPhoto = file.name to bytes.copyOf(minOf(bytes.size, 256 * 1024)) // the EXIF is at the start
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -2589,6 +2862,8 @@ class CameraController(private val app: Application) {
 
     suspend fun thumbnail(file: CameraFile): ImageBitmap? {
         memCache.get(file.name)?.let { return it }
+        // A file the camera lists but that isn't on the card: no requests at all, the tile says so.
+        if (file.name in missingFiles) return null
         val cached = File(thumbDir, file.name + ".jpg")
         val bitmap = withContext(Dispatchers.IO) {
             cached.takeIf { it.exists() }?.let { f ->
@@ -2601,10 +2876,22 @@ class CameraController(private val app: Application) {
                     .getOrNull()
             } else if (conn == ConnState.Connected) {
                 thumbPermits.withPermit {
-                    runCatching { session.thumbnail(file) }
+                    val bmp = runCatching { session.thumbnail(file) }
                         .onFailure { log("thumbnail ${file.name}: ${it.message}") }
                         .getOrNull()
-                        ?.also { bmp -> saveAtomically(cached, bmp) }
+                    when {
+                        bmp != null -> {
+                            saveAtomically(cached, bmp)
+                            bmp
+                        }
+                        // No picture at all: either the camera makes none for this kind of file, or the file isn't
+                        // on the card at all — its index keeps entries of another card (HTTP 404 for the file).
+                        !runCatching { session.fileAvailable(file.uri) }.getOrDefault(true) -> {
+                            markMissing(file.name)
+                            null
+                        }
+                        else -> null
+                    }
                 }
             } else {
                 null
@@ -2748,11 +3035,15 @@ class CameraController(private val app: Application) {
     fun downloadSelected(overwrite: Boolean) {
         if (isDownloading) return
         // A live photo goes with its clip as one gallery file.
-        // Only the card's files (a selection of phone files has nothing to download).
-        val queue = selectedFiles.filter { !it.isOnPhone && (overwrite || it.name !in downloaded) }.sortedBy { it.created }
+        // Only the card's files (a selection of phone files has nothing to download); files the camera merely lists
+        // but doesn't have (a stale index after a card swap) can't be fetched — they are left out and explained.
+        val stale = selectedFiles.any { !it.isOnPhone && it.name in missingFiles }
+        val queue = selectedFiles.filter { !it.isOnPhone && (overwrite || it.name !in downloaded) && it.name !in missingFiles }
+            .sortedBy { it.created }
         if (queue.isEmpty()) {
             selected.clear()
-            message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")
+            if (stale) missingFileMessage()
+            else message = tr("Все выбранные файлы уже в галерее", "All selected files are already in the gallery")
             return
         }
         downloadJob = scope.launch {
@@ -2834,9 +3125,178 @@ class CameraController(private val app: Application) {
     /** [pieces] null: back to the camera's marks. */
     fun savePieces(file: CameraFile, pieces: List<Highlight>?) {
         piecePrefs.edit().apply { if (pieces == null) remove(file.name) else putString(file.name, Highlights.encode(pieces)) }.apply()
+        piecesVersion++
     }
 
     fun clipName(file: CameraFile, n: Int = 1): String = file.stem + "_HL" + (if (n > 1) "$n" else "") + ".mp4"
+
+    // ---------- projects: a montage of references to the camera's files ----------
+
+    /** The projects of this phone: small JSONs of references in the app's own storage (the media stays on the camera). */
+    private val projectStore = Projects(File(app.filesDir, "projects"))
+
+    /** The projects as last read; the tab refreshes them when it opens and after every change. */
+    var projects by mutableStateOf<List<Project>>(emptyList())
+        private set
+
+    fun reloadProjects() {
+        projects = projectStore.list()
+        // The open project is read from the same store: a save made elsewhere (Add to project, from the gallery) must
+        // show up in it too — otherwise the file sits in the store but not on the screen until it is opened again.
+        seenProject?.let { open -> seenProject = projects.firstOrNull { it.id == open.id } }
+        pruneFrames(projects)
+    }
+
+    /** Card frames no project refers to any more (a piece removed, re-cut or its project deleted) leave the disk. */
+    private fun pruneFrames(all: List<Project>) {
+        val kept = all.flatMap { p -> p.clips.map { "${it.file}@${it.fromMs}.jpg" } }.toSet() + "_black.jpg"
+        scope.launch(Dispatchers.IO) {
+            frameDir.listFiles()?.forEach { if (it.name !in kept && !it.name.endsWith(".tmp")) it.delete() }
+        }
+    }
+
+    /**
+     * The files any project holds: the gallery marks them, so a file already taken into a project is visible as such
+     * and the same clip is not added twice (asked for on the phone, 07.11).
+     */
+    val projectFiles: Set<String> by derivedStateOf { projects.flatMap { p -> p.clips.map { it.file } }.toSet() }
+
+    /** A new, empty project (see `memory-bank/projects-plan.md`); the tab calls [reloadProjects] before showing it. */
+    fun createProject(name: String): Project = projectStore.create(name.trim()).also { reloadProjects() }
+
+    /** Saves the project and gives it back: the callers keep their own copy in step (the open project screen). */
+    fun saveProject(p: Project): Project {
+        projectStore.save(p)
+        reloadProjects()
+        return p
+    }
+
+    /** The project open on its own screen (null: the list is showing). */
+    var seenProject by mutableStateOf<Project?>(null)
+        private set
+
+    /** Bumped by every piece edit: the open project re-reads the files' pieces and refreshes its marks (plan §7). */
+    var piecesVersion by mutableIntStateOf(0)
+        private set
+
+    fun showProject(p: Project) {
+        seenProject = p
+    }
+
+    fun closeProject() {
+        seenProject = null
+    }
+
+    /** The ✕ on a card: the clip leaves the project; the base goes with its last clip (see [Project.without]). */
+    fun removeProjectClip(clip: ProjectClip) {
+        // [saveProject] reloads the list, and the open project comes with it.
+        seenProject?.let { saveProject(it.without(clip)) }
+    }
+
+    /** Dragging a card along the strip: the piece takes another place in the project's order (see [Project.movedSequence]). */
+    fun moveProjectClip(from: Int, to: Int) {
+        seenProject?.let { saveProject(it.movedSequence(from, to)) }
+    }
+
+    /** A still's length in the project, set by hand from its card (the slider opens on the length of a photo). */
+    fun setClipLength(clip: ProjectClip, ms: Long) {
+        seenProject?.let { p ->
+            saveProject(p.copy(clips = p.clips.map { if (it == clip) it.copy(toMs = it.fromMs + ms) else it }))
+        }
+    }
+
+    /**
+     * The pieces edited in the file editor are the truth for their file: the open project takes them on the spot, so a
+     * piece added, dropped or re-cut in the film strip shows in the project at once, and a clip is never left reading
+     * «gone from the file» after its own file was edited (asked for on the phone, 07.11).
+     */
+    fun resyncProjectClips(edited: Map<String, List<Highlight>>) {
+        if (edited.isEmpty()) return
+        seenProject?.let { open -> open.resynced(edited).takeIf { it != open }?.let(::saveProject) }
+    }
+
+    /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
+    fun projectFile(name: String): CameraFile? =
+        (files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name })
+            ?.also { if (!it.isOnPhone) seenFiles[name] = it }
+
+    /** The camera's files of projects as last seen: the project goes on showing them while the camera is away. */
+    private val seenFiles = HashMap<String, CameraFile>()
+
+    /**
+     * A project's file that is out of reach (the camera is away, or this file is not on its card now): as last seen, or
+     * known only by its name. Nothing is asked of the camera for it — its pictures come from the phone's caches.
+     */
+    fun offlineFile(name: String): CameraFile =
+        seenFiles[name] ?: CameraFile("/DCIM/Camera01/$name", null, null, null, null, null, null)
+
+    /** Frames of project cards kept on disk, so a project still shows its pieces with the camera away (see [offlineStill]). */
+    private val frameDir = File(app.cacheDir, "frames").apply { mkdirs() }
+
+    private fun frameFile(file: CameraFile, ms: Long) = File(frameDir, "${file.name}@$ms.jpg")
+
+    /**
+     * The picture that stands in the preview for a piece out of reach, as a file URI the player can show: the piece's
+     * own card frame, else its file's tile, else black — the preview always has something to hold for the piece's length.
+     */
+    suspend fun offlineStill(file: CameraFile, ms: Long): String = withContext(Dispatchers.IO) {
+        val frame = frameFile(file, ms).takeIf { it.exists() }
+            ?: File(thumbDir, file.name + ".jpg").takeIf { it.exists() }
+            ?: File(frameDir, "_black.jpg").also { black ->
+                if (!black.exists()) saveAtomically(black, Bitmap.createBitmap(16, 9, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLACK) })
+            }
+        android.net.Uri.fromFile(frame).toString()
+    }
+
+    fun renameProject(p: Project, name: String) {
+        projectStore.rename(p, name.trim())
+        reloadProjects()
+    }
+
+    fun deleteProject(p: Project) {
+        projectStore.delete(p)
+        reloadProjects()
+    }
+
+    /**
+     * Adds the selected files to [p]: each video's pieces as they stand (edited on the phone, or the camera's marks; a
+     * video without marks goes in whole), each photo as a still — see `memory-bank/projects-plan.md`. The camera's
+     * files are only read: nothing is copied, cut or changed here.
+     */
+    fun addToProject(p: Project, files: List<CameraFile>) {
+        scope.launch {
+            var skipped = 0
+            val added = files.flatMap { file ->
+                if (file.kind == MediaKind.PHOTO) {
+                    listOf(ProjectClip(file.name, 0L, STILL_MS, role = ProjectClip.Role.STILL))
+                } else {
+                    val limit = file.durationSec?.let { (it + 1) * 1000L }
+                    val length = file.durationSec?.let { it * 1000L }
+                    val pieces = Highlights.inEffect(editedPieces(file), highlights(file), limit, length)
+                    // A file nobody marked and nobody edited goes in as one whole take; its marked pieces as inserts.
+                    val whole = length != null && pieces.size == 1 && pieces[0].startMs == 0L && pieces[0].endMs == length
+                    if (pieces.isEmpty()) {
+                        skipped++
+                        emptyList()
+                    } else {
+                        pieces.map {
+                            ProjectClip(
+                                file.name, it.startMs, it.endMs!!,
+                                role = if (whole) ProjectClip.Role.TAKE else ProjectClip.Role.INSERT,
+                            )
+                        }
+                    }
+                }
+            }
+            // Added again on purpose: pieces taken out of that file by hand are welcome back.
+            if (added.isNotEmpty()) {
+                val names = added.map { it.file }.toSet()
+                saveProject(p.copy(clips = p.clips + added, hidden = p.hidden.filterNot { it.file in names }))
+            }
+            message = tr("В «%s»: +%s кусков", "Into «%s»: +%s clips").format(p.name, added.size) +
+                if (skipped > 0) tr(", %s без длины пропущено", ", %s without a duration skipped").format(skipped) else ""
+        }
+    }
 
     // ---------- the editor's timeline: frames along the whole video ----------
 
@@ -2844,10 +3304,19 @@ class CameraController(private val app: Application) {
     private var timelineReader: Pair<String, FrameReader>? = null
     private val timelineFrames = LruCache<String, ImageBitmap>(600)
 
-    /** A small frame of [file] near [ms] (its key frame), from the phone's copy or the camera's light copy. */
-    suspend fun timelineFrame(file: CameraFile, ms: Long): ImageBitmap? {
+    /**
+     * A small frame of [file] near [ms] (its key frame), from the phone's copy or the camera's light copy. [keep]: the
+     * frame is also kept on disk (a project's card), so it is there with the camera away and after a restart.
+     */
+    suspend fun timelineFrame(file: CameraFile, ms: Long, keep: Boolean = false): ImageBitmap? {
         val key = "${file.name}@$ms"
         timelineFrames.get(key)?.let { return it }
+        frameFile(file, ms).takeIf { it.exists() }?.let { kept ->
+            withContext(Dispatchers.IO) { BitmapFactory.decodeFile(kept.path) }?.asImageBitmap()?.let {
+                timelineFrames.put(key, it)
+                return it
+            }
+        }
         return timelineLock.withLock {
             withContext(Dispatchers.IO) {
                 timelineFrames.get(key) ?: run {
@@ -2855,7 +3324,9 @@ class CameraController(private val app: Application) {
                     val reader = timelineReader?.takeIf { it.first == id }?.second
                         ?: openFrameReader(file)?.also { r -> timelineReader?.second?.close(); timelineReader = id to r }
                         ?: return@withContext null
-                    reader.frame(ms, 192)?.asImageBitmap()?.also { timelineFrames.put(key, it) }
+                    reader.frame(ms, 192)
+                        ?.also { if (keep) saveAtomically(frameFile(file, ms), it) }
+                        ?.asImageBitmap()?.also { timelineFrames.put(key, it) }
                 }
             }
         }
@@ -3182,6 +3653,272 @@ class CameraController(private val app: Application) {
         }
     }
 
+    // ---------- a project into one video ----------
+
+    /** The pieces of [p] whose file can't be read now: not on the list, or on the camera while it is away. */
+    fun projectUnreachable(p: Project): Int = p.clips.count { c ->
+        val f = projectFile(c.file)
+        f == null || (!f.isOnPhone && conn != ConnState.Connected)
+    }
+
+    /** Whether any file of [p] has its colour set: that colour is kept only by a precise (re-encoded) save. */
+    fun projectHasColour(p: Project): Boolean = p.clips.map { it.file }.distinct().any { name ->
+        val f = projectFile(name) ?: return@any false
+        look(f)?.let { !it.isPlain(f.iLog ?: true) } ?: false
+    }
+
+    /** Why the files of a project can't be joined as shot, in words. */
+    private fun mismatchText(why: ClipMaker.Mismatch) = when (why) {
+        ClipMaker.Mismatch.CODEC -> tr("разные кодеки", "different codecs")
+        ClipMaker.Mismatch.SIZE -> tr("разные размеры кадра", "different frame sizes")
+        ClipMaker.Mismatch.ROTATION -> tr("разный поворот кадра", "different rotation")
+        ClipMaker.Mismatch.SETUP -> tr("разные режимы съёмки", "different shooting modes")
+        ClipMaker.Mismatch.SOUND -> tr("разный звук", "different sound")
+    }
+
+    /** The project's file name in the gallery: its own name, then …2, …3 if taken. */
+    private suspend fun projectSaveName(p: Project): String {
+        val stem = ProjectExport.fileStem(p.name)
+        var n = 1
+        while (nameTaken(stem + (if (n > 1) "$n" else "") + ".mp4")) n++
+        return stem + (if (n > 1) "$n" else "") + ".mp4"
+    }
+
+    /**
+     * [p] into one video in the gallery. Not [precise]: as shot — the pieces copied without re-encoding, each starting
+     * on its key frame; only for video pieces of one format (a photo, or files shot differently, need [precise]).
+     * [precise]: re-encoded, each piece cut exactly, photos held for their length. Every piece's file has to be at
+     * hand: a camera file needs the camera.
+     */
+    /** Why a project's save failed, in words: a camera that most likely ran flat is said to be so. */
+    private fun projectFailure(e: Exception, fromCamera: Boolean): String =
+        if (fromCamera && cameraLikelyFlat) {
+            tr("Камера, похоже, разрядилась (%s %%) — зарядите её и сохраните проект ещё раз", "The camera seems to have run flat (%s %%) — charge it and save the project again")
+                .format(lastBattery?.first ?: 0)
+        } else {
+            tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+        }
+
+    fun exportProject(p: Project, precise: Boolean, sound: Boolean, retried: Boolean = false) {
+        if (isDownloading || exportJob?.isActive == true || batchJob?.isActive == true || p.clips.isEmpty()) return
+        val away = projectUnreachable(p)
+        if (away > 0) {
+            message = tr("Не сохранить: %s кусков без файла — подключите камеру", "Can't save: %s clips without their file — connect the camera").format(away)
+            return
+        }
+        val files = p.clips.map { it.file }.distinct().associateWith { projectFile(it)!! }
+        // The battery read fresh: if the camera goes during the save, its level tells whether it ran flat.
+        if (files.values.any { !it.isOnPhone }) refreshSettings()
+        if (!precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound, retried) else encodeProject(p, files, sound, retried)
+    }
+
+    /**
+     * The camera's Wi-Fi went while a project was being saved (it restarts its access point once, about half a minute
+     * after it wakes): instead of a bare read error, the save waits for the link to come back and starts once more.
+     * True when it took that on — the caller then says so rather than reporting a failure.
+     */
+    private fun retryWhenBack(p: Project, precise: Boolean, sound: Boolean, retried: Boolean, fromCamera: Boolean, error: Exception): Boolean {
+        val readFailed = error is java.io.IOException || error.cause is java.io.IOException
+        if (!fromCamera || retried || (conn == ConnState.Connected && !readFailed)) return false
+        // Low and not charging when last read: it ran out — nothing to wait for.
+        if (cameraLikelyFlat) {
+            log("проект: связь пропала, заряд камеры был ${lastBattery?.first} % — похоже, разрядилась")
+            return false
+        }
+        log("проект: связь с камерой пропала во время сохранения — жду её и начну заново")
+        scope.launch {
+            // The loss may not have been noticed yet: the link is looked at again only after it had time to show.
+            delay(5_000)
+            val back = kotlinx.coroutines.withTimeoutOrNull(120_000) {
+                androidx.compose.runtime.snapshotFlow { conn }.first { it == ConnState.Connected }
+            }
+            downloadJob?.join()
+            exportJob?.join()
+            if (back == null) {
+                message = tr("Камера не вернулась — сохраните проект ещё раз", "The camera didn't come back — save the project again")
+                return@launch
+            }
+            delay(2_000)
+            // The project as it was when Save was pressed: edits made since belong to the next save.
+            exportProject(p, precise, sound, retried = true)
+        }
+        return true
+    }
+
+    /** The project as shot: one extractor per run of pieces ([ProjectExport.runs]), all into one muxer ([ClipMaker.joinAll]). */
+    private fun copyProject(p: Project, files: Map<String, CameraFile>, sound: Boolean, retried: Boolean) {
+        val runs = ProjectExport.runs(p.clips)
+        val wantedUs = p.clips.sumOf { it.durationMs } * 1000
+        // Progress in bytes, as for downloads: each piece's share of its file's size.
+        val estimate = p.clips.sumOf { c ->
+            val f = files.getValue(c.file)
+            f.size?.let { size -> f.durationSec?.takeIf { it > 0 }?.let { size * c.durationMs / (it * 1000L) } } ?: 0L
+        }
+        val fromCamera = files.values.any { !it.isOnPhone }
+        downloadJob = scope.launch {
+            val name = projectSaveName(p)
+            download = DownloadProgress(name, 1, 1, 0, estimate, 0)
+            try {
+                val sources = withContext(Dispatchers.IO) {
+                    runs.map { run ->
+                        val file = files.getValue(run.file)
+                        val local = file.localUri
+                        val open: (android.media.MediaExtractor) -> Unit = if (local == null) {
+                            val camera = session.clipSource(file);
+                            { ex -> ex.setDataSource(camera) }
+                        } else {
+                            val uri = android.net.Uri.parse(local);
+                            { ex -> ex.setDataSource(app, uri, null) }
+                        }
+                        ClipMaker.Source(open, run.pieces)
+                    }
+                }
+                var lengthUs = 0L
+                withContext(Dispatchers.IO) {
+                    val job = coroutineContext[Job]
+                    var reportedAt = 0L
+                    Downloader.saveClip(app, name, System.currentTimeMillis()) { fd ->
+                        lengthUs = ClipMaker.joinAll(sources, fd, sound) { us ->
+                            if (job?.isActive == false) throw CancellationException("остановлено")
+                            val now = System.currentTimeMillis()
+                            if (now - reportedAt >= 250) {
+                                reportedAt = now
+                                val done = if (wantedUs > 0) estimate * minOf(us, wantedUs) / wantedUs else 0L
+                                scope.launch { download = DownloadProgress(name, 1, 1, done, maxOf(estimate, done), 0) }
+                            }
+                        }
+                    }
+                }
+                lastResult = tr("Проект сохранён: %s · ", "Project saved: %s · ").format(name) + "%.1f ".format(lengthUs / 1e6) + tr("с", "s")
+                log("проект $name как снято: ${runs.size} отрезков, ${p.clips.size} кусков, %.1f с".format(lengthUs / 1e6))
+                forgetThumbnail(name)
+                lastSaveOk = true
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Проект не сохранён: остановлено", "Project not saved: stopped")
+                throw e
+            } catch (e: ClipMaker.MismatchException) {
+                val run = runs.getOrNull(e.piece - 1)
+                log("проект как снято: ${run?.file} — ${e.why}: ${e.first} / ${e.other}")
+                val detail = mismatchText(e.why) + when (e.why) {
+                    ClipMaker.Mismatch.SIZE -> " ${e.first.width}×${e.first.height} / ${e.other.width}×${e.other.height}"
+                    else -> ""
+                }
+                lastResult = tr(
+                    "Куски сняты по-разному (%s, кусок %s) — сохраните точно, с перекодированием",
+                    "The clips were shot differently (%s, clip %s) — save precisely, re-encoding",
+                ).format(detail, (run?.first ?: (e.piece - 1)) + 1)
+            } catch (e: Exception) {
+                log("проект как снято: ${e.javaClass.simpleName}: ${e.message}")
+                lastResult = if (retryWhenBack(p, false, sound, retried, fromCamera, e)) {
+                    tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
+                } else {
+                    projectFailure(e, fromCamera)
+                }
+            } finally {
+                download = null
+                message = lastResult
+                touch()
+            }
+        }
+        if (fromCamera) CameraService.start(app)
+    }
+
+    /**
+     * The project re-encoded: one sequence — each video piece clipped exactly, each photo held for its length — at the
+     * first video's frame size (the others fitted into it) and its codec and bitrate, as a save with colour keeps them.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    private fun encodeProject(p: Project, files: Map<String, CameraFile>, sound: Boolean, retried: Boolean) {
+        val fromCamera = files.values.any { !it.isOnPhone }
+        exportJob = scope.launch {
+            val name = projectSaveName(p)
+            export = ExportProgress(name, 0)
+            val tmp = java.io.File(app.cacheDir, "export.mp4")
+            val startedAt = System.currentTimeMillis()
+            try {
+                val camera = if (fromCamera) previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera")) else null
+                if (fromCamera) CameraService.start(app)
+                fun uriOf(f: CameraFile) = f.localUri ?: previewUrlOf(f)
+                // The look of the copy is the first video's: its codec, its bitrate, its frame.
+                val firstVideo = p.clips.firstOrNull { it.role != ProjectClip.Role.STILL }?.let { files.getValue(it.file) }
+                val source = firstVideo?.let { f ->
+                    withContext(Dispatchers.IO) {
+                        val index = if (f.localUri == null) session.indexSource(f) else null
+                        exportSource(f.size) { ex -> if (index != null) ex.setDataSource(index) else ex.setDataSource(app, android.net.Uri.parse(f.localUri!!), null) }
+                    }
+                } ?: ExportSource(androidx.media3.common.MimeTypes.VIDEO_H264, 20_000_000, 1080, 0)
+                val w = firstVideo?.width ?: 1920
+                val h = firstVideo?.height ?: 1080
+                // Each file's own colour, as set in its viewer: the same effects a save with colour uses, per piece.
+                var table: CubeLut? = null
+                val colours = files.values.associate { f ->
+                    val look = look(f)
+                    val iLog = if (look != null) isILog(f) else false
+                    f.name to look?.takeIf { !it.isPlain(iLog) }?.let { l ->
+                        val lut = if (iLog && l.lut && l.strength > 0f) table ?: lut().also { table = it } else null
+                        exportEffects(lut, l, minOf(f.width ?: 1080, f.height ?: 1080))
+                    }.orEmpty()
+                }
+                val items = p.clips.map { c ->
+                    val f = files.getValue(c.file)
+                    val colour = androidx.media3.transformer.Effects(emptyList(), colours[f.name].orEmpty())
+                    if (c.role == ProjectClip.Role.STILL) {
+                        val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f)).setImageDurationMs(c.durationMs).build()
+                        androidx.media3.transformer.EditedMediaItem.Builder(media)
+                            .setDurationUs(c.durationMs * 1000)
+                            .setFrameRate(30)
+                            .setEffects(colour)
+                            .build()
+                    } else {
+                        val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f))
+                            .setClippingConfiguration(
+                                androidx.media3.common.MediaItem.ClippingConfiguration.Builder()
+                                    .setStartPositionMs(c.fromMs)
+                                    .setEndPositionMs(c.toMs)
+                                    .build(),
+                            ).build()
+                        androidx.media3.transformer.EditedMediaItem.Builder(media).setRemoveAudio(!sound).setEffects(colour).build()
+                    }
+                }
+                val fit = androidx.media3.effect.Presentation.createForWidthAndHeight(w, h, androidx.media3.effect.Presentation.LAYOUT_SCALE_TO_FIT)
+                val composition = androidx.media3.transformer.Composition.Builder(androidx.media3.transformer.EditedMediaItemSequence(items))
+                    .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf(fit)))
+                    // A photo has no sound: silence stands in for it, so the pieces around it keep theirs.
+                    .experimentalSetForceAudioTrack(sound)
+                    .build()
+                tmp.delete()
+                runComposition(composition, tmp, source, null, camera) { export = ExportProgress(name, it) }
+                withContext(Dispatchers.IO) {
+                    Downloader.saveClip(app, name, System.currentTimeMillis()) { fd ->
+                        java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
+                    }
+                }
+                log("проект $name точно: ${items.size} кусков, ${w}×$h, ${source.mime}, ${bitrateText(source.bitrate)}, " +
+                    "с цветом ${colours.count { it.value.isNotEmpty() }} файлов, ${(System.currentTimeMillis() - startedAt) / 1000} с")
+                lastResult = tr("Проект сохранён: %s", "Project saved: %s").format(name)
+                forgetThumbnail(name)
+                lastSaveOk = true
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Проект не сохранён: остановлено", "Project not saved: stopped")
+                throw e
+            } catch (e: Exception) {
+                log("проект точно: ${e.javaClass.simpleName}: ${e.message} ${e.cause?.message ?: ""}")
+                lastResult = if (retryWhenBack(p, true, sound, retried, fromCamera, e)) {
+                    tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
+                } else {
+                    projectFailure(e, fromCamera)
+                }
+            } finally {
+                tmp.delete()
+                export = null
+                message = lastResult
+                touch()
+            }
+        }
+    }
+
     /** A batch save: which video of how many. */
     data class BatchProgress(val index: Int, val count: Int)
 
@@ -3338,44 +4075,8 @@ class CameraController(private val app: Application) {
         gopSeconds: Float?,
         sound: Boolean,
         onPercent: (Int) -> Unit,
-    ) = kotlinx.coroutines.coroutineScope {
-        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
-            .setRequestedVideoEncoderSettings(encoderSettings(source, gopSeconds))
-            .setEnableFallback(true)
-            .build()
-        val builder = androidx.media3.transformer.Transformer.Builder(app)
-            .setVideoMimeType(source.mime)
-            .setEncoderFactory(encoders)
-        if (fromCamera) {
-            val camera = previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera"))
-            builder.setAssetLoaderFactory(
-                androidx.media3.transformer.DefaultAssetLoaderFactory(
-                    app,
-                    androidx.media3.transformer.DefaultDecoderFactory.Builder(app).build(),
-                    androidx.media3.common.util.Clock.DEFAULT,
-                    // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
-                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(camera),
-                    androidx.media3.datasource.DataSourceBitmapLoader(app),
-                ),
-            )
-        }
-        val t = builder
-            .addListener(object : androidx.media3.transformer.Transformer.Listener {
-                override fun onCompleted(composition: androidx.media3.transformer.Composition, exportResult: androidx.media3.transformer.ExportResult) {
-                    done.complete(Unit)
-                }
-
-                override fun onError(
-                    composition: androidx.media3.transformer.Composition,
-                    exportResult: androidx.media3.transformer.ExportResult,
-                    exportException: androidx.media3.transformer.ExportException,
-                ) {
-                    done.completeExceptionally(exportException)
-                }
-            })
-            .build()
-        exporter = t
+    ) {
+        val camera = if (fromCamera) previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera")) else null
         // A piece: the media item clipped to it, its picture only — the sound of pieces is joined with crossfades
         // afterwards (ClipAudio), which the transformer can't do.
         fun item(piece: Highlight?): androidx.media3.transformer.EditedMediaItem {
@@ -3397,6 +4098,63 @@ class CameraController(private val app: Application) {
         val composition = androidx.media3.transformer.Composition.Builder(
             androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
         ).build()
+        runComposition(composition, out, source, gopSeconds, camera, onPercent)
+    }
+
+    /**
+     * Runs the transformer on [composition] on the main thread until it is done; [onPercent] twice a second. [camera]:
+     * the camera's data source, under the stock one — items may then be the camera's files over Wi-Fi as well as the
+     * phone's own. Photos are taken in at half their size: a 50 MP photo whole does not fit in memory, and the video it
+     * goes into is no bigger than 4K.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    private suspend fun runComposition(
+        composition: androidx.media3.transformer.Composition,
+        out: java.io.File,
+        source: ExportSource,
+        gopSeconds: Float?,
+        camera: androidx.media3.datasource.DataSource.Factory?,
+        onPercent: (Int) -> Unit,
+    ) = kotlinx.coroutines.coroutineScope {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
+            .setRequestedVideoEncoderSettings(encoderSettings(source, gopSeconds))
+            .setEnableFallback(true)
+            .build()
+        val data = if (camera != null) androidx.media3.datasource.DefaultDataSource.Factory(app, camera)
+        else androidx.media3.datasource.DefaultDataSource.Factory(app)
+        val t = androidx.media3.transformer.Transformer.Builder(app)
+            .setVideoMimeType(source.mime)
+            .setEncoderFactory(encoders)
+            .setAssetLoaderFactory(
+                androidx.media3.transformer.DefaultAssetLoaderFactory(
+                    app,
+                    androidx.media3.transformer.DefaultDecoderFactory.Builder(app).build(),
+                    androidx.media3.common.util.Clock.DEFAULT,
+                    // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(data),
+                    androidx.media3.datasource.DataSourceBitmapLoader(
+                        androidx.media3.datasource.DataSourceBitmapLoader.DEFAULT_EXECUTOR_SERVICE.get(),
+                        data,
+                        android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 },
+                    ),
+                ),
+            )
+            .addListener(object : androidx.media3.transformer.Transformer.Listener {
+                override fun onCompleted(composition: androidx.media3.transformer.Composition, exportResult: androidx.media3.transformer.ExportResult) {
+                    done.complete(Unit)
+                }
+
+                override fun onError(
+                    composition: androidx.media3.transformer.Composition,
+                    exportResult: androidx.media3.transformer.ExportResult,
+                    exportException: androidx.media3.transformer.ExportException,
+                ) {
+                    done.completeExceptionally(exportException)
+                }
+            })
+            .build()
+        exporter = t
         val ticker = launch {
             val holder = androidx.media3.transformer.ProgressHolder()
             while (true) {

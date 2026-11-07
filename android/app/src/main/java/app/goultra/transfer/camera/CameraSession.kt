@@ -19,6 +19,9 @@ import kotlin.random.Random
  */
 class CameraSession(private val context: Context, private val log: (String) -> Unit) {
     companion object {
+        /** The access-point password every GO-family camera ships with (community notes; option 36 overrides it). */
+        private const val DEFAULT_AP_PASSWORD = "88888888"
+
         /** Android shows the BLE pairing request as a notification that expires in ~30 s. */
         /** This phone's id for CHECK_AUTHORIZATION / wake, generated once («gut-» + 12 hex). Shared with diagnostics. */
         fun authId(context: Context): String {
@@ -47,9 +50,25 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     private val ble = CameraBle(context, log)
     private val wifi = CameraWifi(context, log) { linkLost() }
+
+    /** Card state and sizes the camera reports by itself (8198 / 8201 / 8290): the UI warns instead of a bare «0». */
+    @Volatile var onStorage: ((StorageEvent) -> Unit)? = null
+
+    init {
+        // Storage events arrive on both links; the card's state must be followed even while the live view is off
+        // (a card pulled out mid-recording shows up only as an 8198 — its 8201 is lost with the Wi-Fi link).
+        ble.onNotify = { m -> publishStorage(m) }
+    }
+
+    private fun publishStorage(m: CamMessage) {
+        StorageEvent.parse(m.code, m.body)?.let { event -> runCatching { onStorage?.invoke(event) } }
+    }
     private val tcpLock = Mutex()
     @Volatile private var tcp: CameraTcp? = null
     @Volatile private var closing = false
+
+    /** True while the whole process is bound to a network the user joined by hand (see [adoptCurrentNetwork]). */
+    @Volatile private var adoptedProcessBound = false
 
     /** Authorization id the camera remembers for this install (also used to wake it). */
     val authId: String by lazy { authId(context) }
@@ -145,9 +164,75 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         connectControl(step)?.let { return it }
         closeWifi()
         closing = false
-        val creds = ble.wifiCredentials() ?: return Phrase("Не удалось получить пароль Wi-Fi камеры", "Couldn't get the camera's Wi-Fi password")
-        step(Phrase("Подключение к Wi-Fi камеры…\nподтвердите системный запрос, если появится", "Connecting to the camera's Wi-Fi…\nconfirm the system prompt if it appears"))
-        val net = wifi.connect(creds) ?: return Phrase("Не удалось подключиться к Wi-Fi камеры", "Couldn't connect to the camera's Wi-Fi")
+        // The phone may already be on the camera's Wi-Fi — joined by hand (the manual fallback, or a GO 2/3 without
+        // option 36). Every Insta360 AP uses the same subnet, so that network is used as it is.
+        var net = adoptCurrentNetwork()
+        var hadCredentials = false
+        if (net == null) {
+            val creds = ble.wifiCredentials()
+            if (creds != null) {
+                hadCredentials = true
+                net = joinWifi(creds, step)
+            } else {
+                // GO 2/3/3S may not answer option 36: try the family default password before involving the user.
+                for (candidate in defaultWifiCandidates()) {
+                    log("Wi-Fi камеры: пробую «${candidate.ssid}» с паролем по умолчанию")
+                    net = joinWifi(candidate, step)
+                    if (net != null) break
+                }
+            }
+        }
+        if (net == null) {
+            if (hadCredentials) {
+                // The password was known: the join itself failed (the system dialog, a band mismatch, a VPN…).
+                return Phrase("Не удалось подключиться к Wi-Fi камеры", "Couldn't connect to the camera's Wi-Fi")
+            }
+            return Phrase(
+                "Пароль Wi-Fi камеры не прочитан. Подключите телефон к сети камеры вручную (пароль — на экране " +
+                    "камеры) и нажмите «Подключиться» ещё раз.",
+                "Couldn't read the camera's Wi-Fi password. Join the camera's Wi-Fi by hand (the password is on the " +
+                    "camera's screen) and tap «Connect» again.",
+            )
+        }
+        return openTcp(net, step)
+    }
+
+    private suspend fun joinWifi(creds: WifiCreds, step: (Phrase) -> Unit): CameraLink? {
+        step(
+            Phrase(
+                "Подключение к Wi-Fi камеры…\nподтвердите системный запрос, если появится",
+                "Connecting to the camera's Wi-Fi…\nconfirm the system prompt if it appears",
+            ),
+        )
+        return wifi.connect(creds)
+    }
+
+    /**
+     * SSID candidates for the GO 2/3 family when the camera doesn't hand out its credentials (option 36): the access
+     * point is named «<model> <BLE name>.OSC» and the family's default password is 88888888 (community notes).
+     */
+    private suspend fun defaultWifiCandidates(): List<WifiCreds> {
+        val name = cameraName ?: return emptyList()
+        val model = runCatching { optionText(48) }.getOrNull()?.trim().orEmpty()
+        val base = model.removePrefix("Insta360").trim().ifBlank { "GO" }
+        return listOf("$base $name.OSC", "$base $name").distinct()
+            .map { WifiCreds(it, DEFAULT_AP_PASSWORD, 0) }
+    }
+
+    /** Adopts a network the user joined by hand — every Insta360 AP uses the same subnet (see [CameraNetworks]). */
+    private fun adoptCurrentNetwork(): CameraLink? {
+        val cm = context.getSystemService(android.net.ConnectivityManager::class.java)
+        val network = CameraNetworks.find(cm) ?: return null
+        val adoption = CameraNetworks.adopt(cm, network)
+        adoptedProcessBound = adoption.boundProcess
+        if (!adoption.socketsBindable) log("ручное подключение: сокеты не привязываются — привязан весь процесс")
+        wifi.adopt(adoption.link)
+        log("ручное подключение: сеть камеры принята (${CameraNetworks.CAMERA_SUBNET}x)")
+        return adoption.link
+    }
+
+    /** Opens TCP 6666 over [net]; the error phrases match what the screens show for a failed connection. */
+    private suspend fun openTcp(net: CameraLink, step: (Phrase) -> Unit): Phrase? {
         step(Phrase("Связь с камерой…", "Talking to the camera…"))
         val t = CameraTcp(net, log) { linkLost() }
         val opened = try {
@@ -156,7 +241,10 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             t.close()
             // A VPN app keeps other apps' traffic out of non-VPN networks: binding fails with EPERM.
             return if (e.message?.contains("EPERM") == true) {
-                Phrase("Нет доступа к сети камеры. Если включён VPN — отключите его и нажмите «Подключиться».", "No access to the camera's network. If a VPN is on, turn it off and tap «Connect».")
+                Phrase(
+                    "Нет доступа к сети камеры. Если включён VPN — отключите его и нажмите «Подключиться».",
+                    "No access to the camera's network. If a VPN is on, turn it off and tap «Connect».",
+                )
             } else {
                 Phrase("Камера не отвечает по Wi-Fi: ", "The camera doesn't respond over Wi-Fi: ") + e.message
             }
@@ -166,7 +254,25 @@ class CameraSession(private val context: Context, private val log: (String) -> U
             return Phrase("Камера не отвечает по Wi-Fi", "The camera doesn't respond over Wi-Fi")
         }
         tcp = t
+        wireNotifications(t)
         return null
+    }
+
+    /**
+     * Routes the camera's notifications (over TCP) to the callbacks above and to the storage events. Set once the
+     * link is up: a card pulled out mid-recording reaches the app only this way (its 8201 dies with the Wi-Fi link).
+     */
+    private fun wireNotifications(t: CameraTcp) {
+        t.onNotification = { m ->
+            when (m.code) {
+                Proto.NOTIFY_LIVE_STREAM_PARAMS -> onLiveParams?.invoke()
+                Proto.NOTIFY_SUB_MODE -> onModeChanged?.invoke()
+                // CAPTURE_STATUS {1 state, 2 seconds, 7 phase: 0 running, 1 paused, 2 stopping, 3 finishing}.
+                Proto.NOTIFY_CAPTURE_STATUS -> m.body.pbFields().field(7)?.varint?.let { onCapturePhase?.invoke(it.toInt()) }
+                in Proto.NOTIFY_POWER -> onPowerChanged?.invoke()
+            }
+            publishStorage(m)
+        }
     }
 
     private fun linkLost() {
@@ -198,6 +304,13 @@ class CameraSession(private val context: Context, private val log: (String) -> U
 
     /** Size of a file the listing reported without one (HEAD request over Wi-Fi). */
     suspend fun fileSize(file: CameraFile): Long? = Downloader.contentLength(link, file.uri)
+
+    /**
+     * True when the file really is on the card (a HEAD request). The camera's listing keeps entries of another card
+     * after a swap — such a file stays in the list and answers HTTP 404 (measured 06.11.2026).
+     */
+    suspend fun fileAvailable(uri: String): Boolean =
+        runCatching { Downloader.contentLength(link, uri) }.getOrNull() != null
 
     /** Every uri of the last listing, LRV previews included (they are deleted along with their video). */
     @Volatile private var allUris: List<String> = emptyList()
@@ -392,13 +505,14 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         )
     }
 
+    /** One GET_OPTIONS request, only its text field (model 48, firmware 30, serial 15…). */
+    private suspend fun optionText(type: Int): String? = ble.request(
+        Proto.CMD_GET_OPTIONS, PbWriter().packed(1, listOf(type.toLong())).toByteArray(), timeoutMs = 1_500, quiet = true,
+    )?.takeIf { it.code == 200 }?.body?.pbFields()?.field(2)?.data?.pbFields()?.field(type)?.string
+
     /** Model, firmware and serial number for the «Camera» screen (one request each). */
-    suspend fun cameraInfo(): CameraInfo {
-        suspend fun text(type: Int) = ble.request(
-            Proto.CMD_GET_OPTIONS, PbWriter().packed(1, listOf(type.toLong())).toByteArray(), timeoutMs = 1_500, quiet = true,
-        )?.takeIf { it.code == 200 }?.body?.pbFields()?.field(2)?.data?.pbFields()?.field(type)?.string
-        return CameraInfo(model = text(48), firmware = text(30), serial = text(15))
-    }
+    suspend fun cameraInfo(): CameraInfo =
+        CameraInfo(model = optionText(48), firmware = optionText(30), serial = optionText(15))
 
     /** Debug: raw reply (hex) of a read-only command with an empty body (only capture status is allowed). */
     suspend fun rawCommand(code: Int, body: ByteArray = ByteArray(0)): String {
@@ -431,8 +545,17 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         return ble.request(Proto.CMD_SET_TIMELAPSE_OPTIONS, body)?.code == 200
     }
 
-    /** Photo / burst shutter: TAKE_PICTURE (3) with an empty body (the camera shoots in its current photo mode). */
-    suspend fun takePicture(): Boolean = ble.request(Proto.CMD_TAKE_PICTURE, timeoutMs = 15_000)?.code == 200
+    /**
+     * Photo / burst shutter: TAKE_PICTURE (3) with an empty body (the camera shoots in its current photo mode).
+     * Null when the shot was taken, otherwise the camera's own refusal words — empty when it gave none (a non-200
+     * code, silence). Code 200 alone means nothing: with an unusable card the camera even answers with a file uri
+     * while writing nothing, so the caller must also look at the storage state ([onStorage]).
+     */
+    suspend fun takePicture(): String? {
+        val r = ble.request(Proto.CMD_TAKE_PICTURE, timeoutMs = 15_000) ?: return ""
+        if (r.code != 200) return ""
+        return replyRefusal(r.body)
+    }
 
     /**
      * Read-only dump of every Options / PhotographyOptions field (of the camera's current mode), flattened to
@@ -576,15 +699,6 @@ class CameraSession(private val context: Context, private val log: (String) -> U
     suspend fun startLive(onPacket: (ByteArray) -> Unit): Boolean {
         val t = tcp ?: return false
         t.onStream = onPacket
-        t.onNotification = { m ->
-            when (m.code) {
-                Proto.NOTIFY_LIVE_STREAM_PARAMS -> onLiveParams?.invoke()
-                Proto.NOTIFY_SUB_MODE -> onModeChanged?.invoke()
-                // CAPTURE_STATUS {1 state, 2 seconds, 7 phase: 0 running, 1 paused, 2 stopping, 3 finishing}.
-                Proto.NOTIFY_CAPTURE_STATUS -> m.body.pbFields().field(7)?.varint?.let { onCapturePhase?.invoke(it.toInt()) }
-                in Proto.NOTIFY_POWER -> onPowerChanged?.invoke()
-            }
-        }
         val r = t.request(Proto.CMD_START_LIVE_STREAM, ByteArray(0))
         log("StartLiveStream: ${r?.code}")
         if (r?.code == 200) t.request(Proto.CMD_IFRAME_REQUEST, ByteArray(0), 3_000)
@@ -603,6 +717,10 @@ class CameraSession(private val context: Context, private val log: (String) -> U
         tcp?.close()
         tcp = null
         wifi.release()
+        if (adoptedProcessBound) {
+            CameraNetworks.unbind(context.getSystemService(android.net.ConnectivityManager::class.java))
+            adoptedProcessBound = false
+        }
     }
 
     fun disconnect() {

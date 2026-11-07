@@ -140,7 +140,7 @@ class CameraService : Service() {
                 ID_DONE,
                 NotificationCompat.Builder(this, CHANNEL)
                     .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                    .setContentTitle("GO Ultra")
+                    .setContentTitle("insta360 transfer")
                     .setContentText(result)
                     .setContentIntent(openApp())
                     .setAutoCancel(true)
@@ -189,7 +189,7 @@ class CameraService : Service() {
                 .setContentTitle(tr("Камера подключена", "Camera connected"))
                 .setContentText(
                     if (left != null) tr("Отключится через %s мин, если не вернуться в приложение", "Disconnects in %s min unless you return to the app").format((left + 59) / 60)
-                    else "GO Ultra Transfer",
+                    else "insta360 transfer",
                 )
                 .addAction(0, tr("Отключить", "Disconnect"), serviceIntent(ACTION_DISCONNECT, 2))
         }

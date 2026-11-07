@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.goultra.transfer.camera.CardInfo
+import app.goultra.transfer.camera.CardState
 
 /** Menu ⋮ → «Камера»: which camera this phone uses, its state, firmware and serial; connect / disconnect. */
 @Composable
@@ -50,7 +52,7 @@ fun CameraInfoDialog(vm: CameraController, onDismiss: () -> Unit) {
                 info?.serial?.let { InfoRow(tr("Серийный номер", "Serial number"), it) }
                 s?.batteryPercent?.let { InfoRow(tr("Заряд камеры", "Camera battery"), "$it %" + if (s.charging) tr(", заряжается", ", charging") else "") }
                 s?.podBatteryPercent?.let { InfoRow(tr("Заряд Pod", "Pod battery"), "$it %" + if (s.podCharging) tr(", заряжается", ", charging") else "") }
-                s?.card?.let { InfoRow(tr("Карта памяти", "Memory card"), formatSize(it.freeBytes) + tr(" свободно из ", " free of ") + formatSize(it.totalBytes)) }
+                s?.card?.let { InfoRow(tr("Карта памяти", "Memory card"), cardLine(it, vm.cardState)) }
                 if (info == null && !live) {
                     Text(
                         tr("Подключитесь, чтобы увидеть прошивку, заряд и карту.", "Connect to see the firmware, battery and card."),
@@ -77,5 +79,33 @@ private fun InfoRow(label: String, value: String) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(12.dp))
         Text(value)
+    }
+}
+
+/**
+ * The card's row: free of total plus the camera's own reserve (exactly 10 % — it never records into that part,
+ * which is why a 62.5 GB card refuses to record while «free» still shows a gigabyte), or the trouble in words.
+ */
+private fun cardLine(c: CardInfo, state: CardState): String = buildString {
+    when {
+        // Zero sizes with an «OK» state = no usable card (the state itself arrives only on a change).
+        state == CardState.NO_CARD || (state == CardState.OK && c.totalBytes == 0L) -> append(tr("нет карты", "no card"))
+        state == CardState.UNUSABLE -> append(tr("карта не читается", "card unreadable"))
+        state == CardState.WRITE_ERROR -> append(tr("ошибка карты", "card error"))
+        state == CardState.FULL -> {
+            append(tr("карта заполнена", "card full"))
+            append(" · ")
+            append(formatSize(c.freeBytes))
+        }
+        else -> {
+            append(formatSize(c.freeBytes))
+            append(tr(" свободно из ", " free of "))
+            append(formatSize(c.totalBytes))
+            if (c.reserveBytes > 0) {
+                append(tr(" (резерв камеры ", " (camera reserve "))
+                append(formatSize(c.reserveBytes))
+                append(")")
+            }
+        }
     }
 }

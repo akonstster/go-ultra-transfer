@@ -23,6 +23,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import app.goultra.transfer.ui.GalleryScreen
 import app.goultra.transfer.ui.OnboardingScreen
+import app.goultra.transfer.ui.OscController
+import app.goultra.transfer.ui.OscScreen
 import app.goultra.transfer.ui.Splash
 import app.goultra.transfer.ui.AppPrefs
 import app.goultra.transfer.ui.ThemeMode
@@ -80,6 +82,8 @@ class MainActivity : ComponentActivity() {
         val splashFirst = savedInstanceState == null && intent?.action != ACTION_RECORD && animations
         setContent {
             var showSplash by rememberSaveable { mutableStateOf(splashFirst) }
+            var oscOpen by rememberSaveable { mutableStateOf(false) }
+            val osc = remember { OscController(applicationContext) }
             AppTheme { Box(Modifier.fillMaxSize()) {
                 var hasPermissions by remember { mutableStateOf(hasPermissions()) }
                 var afterGrant by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -112,16 +116,29 @@ class MainActivity : ComponentActivity() {
                 val shareLog = {
                     val send = Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, tr("GO Ultra Transfer — журнал", "GO Ultra Transfer — log"))
+                        .putExtra(Intent.EXTRA_SUBJECT, tr("insta360 transfer — журнал", "insta360 transfer — log"))
                         .putExtra(Intent.EXTRA_TEXT, controller.logText())
                     startActivity(Intent.createChooser(send, tr("Отправить журнал", "Send log")))
                 }
-                if (!controller.onboarded) {
+                if (oscOpen) {
+                    OscScreen(
+                        osc = osc,
+                        onClose = { osc.close(); oscOpen = false },
+                        onShareProfile = { text ->
+                            val send = Intent(Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_SUBJECT, tr("Профиль камеры (альфа)", "Camera profile (alpha)"))
+                                .putExtra(Intent.EXTRA_TEXT, text)
+                            startActivity(Intent.createChooser(send, tr("Отправить профиль", "Send profile")))
+                        },
+                    )
+                } else if (!controller.onboarded) {
                     OnboardingScreen(
                         controller = controller,
                         hasPermissions = hasPermissions,
                         onStart = { controller.showLinkHints(); withPermissions(controller::runSetup) },
                         onShareLog = shareLog,
+                        onOtherCameras = { series -> osc.chooseModel(series); oscOpen = true },
                     )
                 } else {
                     LaunchedEffect(recordRequested) {
@@ -145,6 +162,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onShareLog = shareLog,
                         onRecord = { withPermissions(controller::startRecording) },
+                        onOpenOsc = { controller.disconnect(); osc.chooseModel(null); oscOpen = true },
                     )
                 }
                 if (showSplash) Splash { showSplash = false }

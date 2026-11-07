@@ -44,6 +44,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.RadioButton
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistRemove
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -120,6 +121,7 @@ fun GalleryScreen(
     onOpenDiagnostics: () -> Unit,
     onShareLog: () -> Unit,
     onRecord: () -> Unit,
+    onOpenOsc: () -> Unit,
 ) {
     val vm = controller
     // Asking for the camera brings back the link hints put away with ×.
@@ -132,11 +134,14 @@ fun GalleryScreen(
         }
     }
     val selectionCount = vm.selected.size
+    // A project open on its own screen is an editor: the app's top bar and the tabs step aside so the screen is all
+    // project (asked for on the phone, 07.11 — the save and export buttons will live in its own header).
+    val editor = vm.tab == Tab.PROJECTS && vm.seenProject != null
     Box(Modifier.fillMaxSize()) {
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(if (selectionCount > 0) tr("Выбрано: %s", "Selected: %s").format(selectionCount) else "GO Ultra") },
+            if (!editor) TopAppBar(
+                title = { Text(if (selectionCount > 0) tr("Выбрано: %s", "Selected: %s").format(selectionCount) else "insta360 transfer") },
                 navigationIcon = {
                     if (selectionCount > 0) {
                         IconButton(vm::clearSelection) { Icon(Icons.Filled.Close, tr("Снять выбор", "Clear selection")) }
@@ -204,6 +209,8 @@ fun GalleryScreen(
                     if (showSettings) AppSettingsDialog { showSettings = false }
                     if (showCamera) CameraInfoDialog(vm) { showCamera = false }
                     if (showAbout) AboutDialog { showAbout = false }
+                    // A newer build of our own channel: offered by the daily check or ⋮ → «Проверить обновление».
+                    vm.update?.let { UpdateDialog(vm, it) { vm.dismissUpdate() } }
                     IconButton({ menu = true }) { Icon(Icons.Filled.MoreVert, tr("Меню", "Menu")) }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem({ Text(tr("Камера", "Camera")) }, { menu = false; showCamera = true })
@@ -212,7 +219,9 @@ fun GalleryScreen(
                         }
                         DropdownMenuItem({ Text(tr("Настройки", "Settings")) }, { menu = false; showSettings = true })
                         DropdownMenuItem({ Text(tr("О приложении", "About")) }, { menu = false; showAbout = true })
+                        DropdownMenuItem({ Text(tr("Проверить обновление", "Check for updates")) }, { menu = false; vm.checkUpdate(manual = true) })
                         DropdownMenuItem({ Text(tr("Настроить камеру заново", "Set up the camera again")) }, { menu = false; vm.restartOnboarding() })
+                        DropdownMenuItem({ Text(tr("Другая камера (альфа)…", "Another camera (alpha)…")) }, { menu = false; onOpenOsc() })
                         DropdownMenuItem({ Text(tr("Отправить журнал", "Send log")) }, { menu = false; onShareLog() })
                         // Developer tools, in debug builds only.
                         if (vm.isDebugBuild) {
@@ -237,14 +246,21 @@ fun GalleryScreen(
         bottomBar = { if (vm.tab == Tab.FILES) BottomPanel(vm) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            TabRow(selectedTabIndex = vm.tab.ordinal) {
+            if (!editor) TabRow(selectedTabIndex = vm.tab.ordinal) {
                 Tab(vm.tab == Tab.FILES, { vm.tab = Tab.FILES; vm.touch() }, text = { Text(tr("Файлы", "Files")) })
                 Tab(vm.tab == Tab.CAMERA, { vm.tab = Tab.CAMERA; vm.touch() }, text = { Text(tr("Камера", "Camera")) })
+                Tab(vm.tab == Tab.PROJECTS, { vm.tab = Tab.PROJECTS; vm.touch() }, text = { Text(tr("Проекты", "Projects")) })
             }
             PhoneRadiosBanner(vm)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     vm.tab == Tab.CAMERA -> CameraTab(vm, connect, onRecord)
+                    vm.tab == Tab.PROJECTS -> {
+                        val open = vm.seenProject
+                        if (open == null) ProjectsTab(vm) else ProjectScreen(vm, open)
+                        // The file editor opens over the project screen as well: a card taps through to its piece.
+                        vm.viewing?.let { FileViewer(vm, it, snackbar) { vm.viewing = null } }
+                    }
                     vm.conn == ConnState.Connected -> FileGrid(vm, snackbar)
                     // No camera: what is already on the phone, with the way to connect above it.
                     vm.listedFiles.isNotEmpty() -> Column(Modifier.fillMaxSize()) {
@@ -440,29 +456,41 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                     DayHeader(day, dayFiles.size)
                 }
                 items(dayFiles, key = { it.uri }) { file ->
+                    // A file the camera lists but that isn't on the card (HTTP 404): shown marked, never opened.
+                    val missing = !file.isOnPhone && file.name in vm.missingFiles
                     FileTile(
                         file = file,
                         selected = file.name in vm.selected,
+                        missing = missing,
                         // On the phone list everything is downloaded: no mark needed.
                         downloaded = !file.isOnPhone && file.name in vm.downloaded,
                         favorite = file.name in vm.favorites,
                         coloured = file.kind == MediaKind.VIDEO && vm.hasLook(file),
                         phoneOnly = file.isOnPhone && !vm.showsPhone,
                         added = file.isAdded,
+                        // Already in a project (by name — the camera's file and its phone copy are the same shot).
+                        inProject = file.name in vm.projectFiles,
                         // With the video's own colour on it; drawn again when a colour changes.
                         loadThumbnail = vm::tileImage,
                         colourKey = if (file.kind == MediaKind.VIDEO || vm.canColourPhoto(file)) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
-                        // delete), so files only on the phone just open.
+                        // delete), so files only on the phone just open. A missing file only says what it is.
                         onClick = {
                             when {
+                                missing -> vm.missingFileMessage()
                                 vm.selected.isEmpty() -> open(file)
                                 selectable(file) -> vm.toggle(file)
                                 else -> notSelectable()
                             }
                         },
-                        onLongClick = { if (selectable(file)) vm.toggle(file) else notSelectable() },
+                        onLongClick = {
+                            when {
+                                missing -> vm.missingFileMessage()
+                                selectable(file) -> vm.toggle(file)
+                                else -> notSelectable()
+                            }
+                        },
                     )
                 }
             }
@@ -484,11 +512,13 @@ private fun DayHeader(day: LocalDate?, count: Int) {
 private fun FileTile(
     file: CameraFile,
     selected: Boolean,
+    missing: Boolean,
     downloaded: Boolean,
     favorite: Boolean,
     coloured: Boolean,
     phoneOnly: Boolean,
     added: Boolean,
+    inProject: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
     colourKey: String?,
     onClick: () -> Unit,
@@ -523,12 +553,19 @@ private fun FileTile(
                 fontSize = 12.sp,
             )
         val label = when {
+            missing -> null // the badge below says «нет на карте»
             file.kind == MediaKind.VIDEO -> "▶ " + (file.durationSec?.let(::formatDuration) ?: "")
             file.name.endsWith(".dng", ignoreCase = true) -> "RAW"
             file.isLive -> "LIVE"
             else -> null
         }
-        label?.let { Badge(it, Modifier.align(Alignment.BottomStart)) }
+        if (missing) {
+            // The camera lists it but answers 404 for the file: dim the tile and name the trouble.
+            Box(Modifier.matchParentSizeOverlay().background(Color(0x8A000000)))
+            Badge(tr("нет на карте", "not on the card"), Modifier.align(Alignment.BottomStart), warn = true)
+        } else {
+            label?.let { Badge(it, Modifier.align(Alignment.BottomStart)) }
+        }
         if (favorite) {
             Icon(
                 Icons.Filled.Favorite, tr("Избранное", "Favorite"),
@@ -565,6 +602,15 @@ private fun FileTile(
                     .background(Color(0xFF2E7D32), CircleShape),
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Filled.Check, tr("Скачано", "Downloaded"), Modifier.size(13.dp), tint = Color.White) }
+        }
+        if (inProject) {
+            // Taken into a project (any of them): the mark shows while scrolling, so a file already used is not added
+            // a second time. The same green the auto montage's badge wears on a project's cards.
+            Box(
+                Modifier.align(Alignment.TopEnd).padding(5.dp).size(18.dp)
+                    .background(Color(0xCC0B6E4F), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, tr("В проекте", "In a project"), Modifier.size(12.dp), tint = Color.White) }
         }
         if (selected) {
             Box(Modifier.matchParentSizeOverlay())
@@ -662,15 +708,58 @@ private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
     }
 }
 
+/**
+ * «В проект»: the selected files into a montage project — each video with the pieces it has today (edited on the
+ * phone or the camera's marks), each photo as a still. See `memory-bank/projects-plan.md`; the pieces are only
+ * referenced, the files themselves are not touched.
+ */
+@Composable
+private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
+    var picking by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf(false) }
+    IconButton({ vm.reloadProjects(); picking = true }) {
+        Icon(Icons.AutoMirrored.Filled.PlaylistAdd, tr("В проект", "Add to project"), tint = MaterialTheme.colorScheme.primary)
+    }
+    if (picking) {
+        AlertDialog(
+            onDismissRequest = { picking = false },
+            title = { Text(tr("В проект", "Add to project")) },
+            text = {
+                Column {
+                    vm.projects.forEach { p ->
+                        TextButton({ vm.addToProject(p, selection); vm.clearSelection(); picking = false }) { Text(p.name) }
+                    }
+                    TextButton({ picking = false; creating = true }) { Text(tr("Новый проект", "New project")) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ picking = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
+    }
+    if (creating) {
+        NameDialog(
+            title = tr("Новый проект", "New project"),
+            confirm = tr("Создать", "Create"),
+            initial = "",
+            onDismiss = { creating = false },
+            onDone = { name ->
+                vm.addToProject(vm.createProject(name), selection)
+                vm.clearSelection()
+                creating = false
+            },
+        )
+    }
+}
+
 private fun Modifier.matchParentSizeOverlay(): Modifier = fillMaxSize().background(Color(0x33000000))
 
 @Composable
-private fun Badge(text: String, modifier: Modifier) {
+private fun Badge(text: String, modifier: Modifier, warn: Boolean = false) {
     Text(
         text,
         modifier
             .padding(4.dp)
-            .background(Color(0x99000000), RoundedCornerShape(4.dp))
+            .background(if (warn) Color(0xCC7F1D1D) else Color(0x99000000), RoundedCornerShape(4.dp))
             .padding(horizontal = 4.dp, vertical = 1.dp),
         color = Color.White,
         fontSize = 11.sp,
@@ -710,6 +799,8 @@ private fun BottomPanel(vm: CameraController) {
                 Text(tr("%s шт.", "%s items").format(selection.size) + " · ${formatSize(selection.sumOf { it.size ?: 0L })}", Modifier.weight(1f))
                 PasteColour(vm, selection)
                 SaveSelected(vm, selection)
+                // A project takes the phone's files as readily as the camera's (their marks live in the file itself).
+                AddToProject(vm, selection)
                 // Added files: off the list (they stay on the phone).
                 if (selection.all { it.isAdded }) {
                     IconButton({ vm.removeAdded(selection) }) {
@@ -754,6 +845,7 @@ private fun BottomPanel(vm: CameraController) {
                     )
                     PasteColour(vm, selection)
                     SaveSelected(vm, selection)
+                    AddToProject(vm, selection)
                     Button({
                         val already = vm.selectedAlreadyDownloaded
                         if (already > 0) askAlready = already else vm.downloadSelected(overwrite = false)
@@ -761,7 +853,8 @@ private fun BottomPanel(vm: CameraController) {
                     if (askAlready > 0) AlreadyDownloadedDialog(vm, askAlready) { askAlready = 0 }
                 }
                 else -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    val newCount = vm.visibleFiles.count { it.name !in vm.downloaded }
+                    // Files the camera only lists (not on the card) don't count: nothing to download.
+                    val newCount = vm.notDownloadedCount
                     Column(Modifier.weight(1f)) {
                         Text(
                             if (newCount > 0) tr("Не скачано: %s", "Not downloaded: %s").format(newCount) else tr("Всё скачано", "All downloaded"),

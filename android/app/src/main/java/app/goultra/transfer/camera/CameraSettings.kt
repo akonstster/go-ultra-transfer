@@ -128,7 +128,7 @@ object SettingCodes {
     const val OPT_BLUR_REDUCTION = 134
     const val OPT_VIDEO_SECONDS_LEFT = 9 // recording time left on the card in the current mode, s
     const val OPT_PHOTOS_LEFT = 10 // photos left (photo modes only)
-    const val OPT_CARD = 158 // {1: total bytes, 2: free bytes, 3: reserve}
+    const val OPT_CARD = 158 // {1: total bytes, 2: free bytes, 3: reserve = 10 % of the card, 4: 0}
     /** GO Ultra quirk: Options field 134 is requested (and set) as type 133, and type 134 answers with field 133. */
     const val OPT_BLUR_REDUCTION_TYPE = 133
     /** Sub-mode value meaning «the other kind is active» (video_sub_mode = 100 while in a photo mode and vice versa). */
@@ -243,7 +243,17 @@ object SettingCodes {
 }
 
 /** Memory card: bytes, plus what the camera estimates for the current mode (null when it doesn't say). */
-data class CardInfo(val totalBytes: Long, val freeBytes: Long, val videoSecondsLeft: Int?, val photosLeft: Int?) {
+data class CardInfo(
+    val totalBytes: Long,
+    val freeBytes: Long,
+    /**
+     * The camera's own reserve — exactly 10 % of the card (Options 158 field 3, measured 05.11). It never records
+     * into this part: on a 62.5 GB card recording stops while `free` is still ≈1 GB, so the screens say so.
+     */
+    val reserveBytes: Long = 0,
+    val videoSecondsLeft: Int?,
+    val photosLeft: Int?,
+) {
     companion object {
         /** From separate GET_OPTIONS replies (body field 2 = Options); missing parts are null. */
         fun parse(card: ByteArray?, videoLeft: ByteArray?, photosLeft: ByteArray?): CardInfo? {
@@ -253,6 +263,7 @@ data class CardInfo(val totalBytes: Long, val freeBytes: Long, val videoSecondsL
             return CardInfo(
                 totalBytes = total,
                 freeBytes = c.field(2)?.varint ?: 0,
+                reserveBytes = c.field(3)?.varint ?: 0,
                 videoSecondsLeft = opts(videoLeft)?.field(SettingCodes.OPT_VIDEO_SECONDS_LEFT)?.varint?.toInt(),
                 photosLeft = opts(photosLeft)?.field(SettingCodes.OPT_PHOTOS_LEFT)?.varint?.toInt(),
             )

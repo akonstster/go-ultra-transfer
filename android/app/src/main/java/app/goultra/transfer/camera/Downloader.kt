@@ -566,7 +566,9 @@ object Downloader {
     /** MIME by extension: a wrong one (e.g. image/jpeg for .dng) makes MediaProvider rename the file to "x.dng.jpg". */
     fun mimeType(name: String): String = when (name.substringAfterLast('.').lowercase()) {
         "mp4" -> "video/mp4"
+        "insv" -> "video/mp4" // a 360 video (Insta360 container) — saved as-is into the video collection
         "jpg", "jpeg" -> "image/jpeg"
+        "insp" -> "image/jpeg" // a 360 photo — saved as-is into the pictures collection
         "dng" -> "image/x-adobe-dng"
         else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.').lowercase())
             ?: "application/octet-stream"

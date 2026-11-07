@@ -76,6 +76,23 @@ object Proto {
     /** Sent when the camera's or the Action Pod's power changes (bodies not decoded: 8222 = option 85 again). */
     val NOTIFY_POWER = setOf(8217, 8219, 8222)
 
+    /**
+     * Storage notifications (measured on a GO Ultra, fw v1.9.29 — PROTOCOL.md, «Card states and errors»):
+     * 8198 `{1: state, 2: 0}`, 8199 STORAGE_FULL, 8201 `{1: reason}` a refused/aborted capture,
+     * 8256 `{1: 1}`/`{1: 0}` a recording started/stopped, 8290 `{1: total, 2: free, 3: reserve, 4: 0}`.
+     */
+    const val NOTIFY_STORAGE_UPDATE = 8198
+    const val NOTIFY_STORAGE_FULL = 8199
+    const val NOTIFY_CAPTURE_STOPPED = 8201
+    const val NOTIFY_RECORD_STATE = 8256
+    const val NOTIFY_CARD_INFO = 8290
+
+    /** The card was inserted or removed: seen on the GO Ultra as `{1: 1}`/`{1: 0}` toggles (06.11.2026). */
+    const val NOTIFY_MEDIA_CHANGE = 8250
+
+    /** STOP reason (8201 field 1): the camera refused to capture because the card is unusable for writing. */
+    const val STOP_REASON_CANNOT_WRITE = 11
+
     const val OPTION_WIFI_INFO = 36L
     const val MEDIA_VIDEO_AND_PHOTO = 2L
     const val EXTRA_TYPE_THUMBNAIL = 2L
@@ -94,6 +111,69 @@ object Proto {
         return CamMessage(u16(p, offset + 3), seq, p.copyOfRange(offset + 12, p.size))
     }
 }
+
+/**
+ * The camera's own verdict on its card — notification 8198 field 1 (verified 05.11.2026, fw v1.9.29; PROTOCOL.md).
+ * The reply to a command is not the truth: an unusable card still answers a photo with a file uri while writing
+ * nothing, and 8201 carries only a reason — this state is what the screens must trust.
+ */
+enum class CardState {
+    OK, // 0 — everything is fine
+    NO_CARD, // 1
+    FULL, // 2 — no room for video: the camera keeps a 10 % reserve it never records into
+    UNUSABLE, // 3 — a foreign filesystem/unformatted: the card is not mounted at all
+    WRITE_ERROR, // 5 — the card was pulled out mid-recording
+    UNKNOWN;
+
+    companion object {
+        fun of(code: Int): CardState = when (code) {
+            0 -> OK
+            1 -> NO_CARD
+            2 -> FULL
+            3 -> UNUSABLE
+            5 -> WRITE_ERROR
+            else -> UNKNOWN
+        }
+    }
+}
+
+/**
+ * A storage notification: the card's state and/or its sizes, or why a capture was refused.
+ * 8198 `{1: state, 2: 0}` · 8290 `{1: total, 2: free, 3: reserve}` · 8201 `{1: reason}`.
+ */
+data class StorageEvent(
+    val state: CardState? = null,
+    val totalBytes: Long? = null,
+    val freeBytes: Long? = null,
+    val reserveBytes: Long? = null,
+    val stopReason: Int? = null,
+    /** The card was inserted/removed (8250): the camera re-scans it and the file list is worth reloading. */
+    val mediaChanged: Boolean = false,
+) {
+    companion object {
+        fun parse(code: Int, body: ByteArray): StorageEvent? {
+            if (code == Proto.NOTIFY_MEDIA_CHANGE) return StorageEvent(mediaChanged = true)
+            val f = body.pbFields()
+            return when (code) {
+                Proto.NOTIFY_STORAGE_UPDATE -> StorageEvent(state = CardState.of(f.field(1)?.varint?.toInt() ?: 0))
+                Proto.NOTIFY_CAPTURE_STOPPED -> StorageEvent(stopReason = f.field(1)?.varint?.toInt())
+                Proto.NOTIFY_CARD_INFO -> StorageEvent(
+                    totalBytes = f.field(1)?.varint,
+                    freeBytes = f.field(2)?.varint,
+                    reserveBytes = f.field(3)?.varint,
+                )
+                else -> null
+            }
+        }
+    }
+}
+
+/**
+ * What the camera put in a reply that should have carried a file uri — its own words («No SD card») — or null for a
+ * real uri. A photo refusal comes as code 200 with `{3: {1: "<text>"}}`, so the code alone says nothing.
+ */
+fun replyRefusal(body: ByteArray): String? =
+    body.pbFields().field(3)?.data?.pbFields()?.field(1)?.string?.takeIf { it.isNotEmpty() && !it.startsWith("/") }
 
 object Crc16 {
     /** CRC-16/MODBUS: init 0xFFFF, reflected poly 0xA001. */

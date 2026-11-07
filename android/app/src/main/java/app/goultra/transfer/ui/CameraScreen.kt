@@ -124,6 +124,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import app.goultra.transfer.camera.CameraConf
 import app.goultra.transfer.camera.CamSettings
 import app.goultra.transfer.camera.CardInfo
+import app.goultra.transfer.camera.CardState
 import app.goultra.transfer.camera.SettingCodes
 
 private val RecordRed = Color(0xFFE53935)
@@ -580,7 +581,7 @@ private fun PreviewBox(
         // Readings only for a live link: after a disconnect the last values would be stale.
         val live = conn == ConnState.Connected || conn == ConnState.Remote
         // Card and battery on top, the recording time at the bottom (they don't fit one row in TimeShift).
-        if (live) settings?.card?.let { CardChip(it, Modifier.align(Alignment.TopStart).padding(10.dp)) }
+        if (live) settings?.card?.let { CardChip(it, vm.cardState, Modifier.align(Alignment.TopStart).padding(10.dp)) }
         if (recording) RecBadge(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp))
         // Zoom on the picture itself (it changes what is seen there), bottom right.
         if (live) Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) { ZoomButton(vm, settings, vm.conf) }
@@ -1061,10 +1062,22 @@ private fun BatteryLabel(name: String, percent: Int, charging: Boolean) {
     Text("$name $percent%", color = Color.White, fontSize = 12.sp)
 }
 
-/** «SD 46 мин» (video) or «SD 1630 фото» (photo): what still fits on the card. */
+/** «SD 46 мин» / «SD 1630 фото» — or the card's trouble: «SD нет карты», «SD карта заполнена»… */
 @Composable
-private fun CardChip(card: CardInfo, modifier: Modifier = Modifier) {
+private fun CardChip(card: CardInfo, state: CardState, modifier: Modifier = Modifier) {
+    // «Full» is about the room for video: a photo mode still writes photos, so the count stays there.
+    // Zero sizes with an «OK» state mean the camera has no usable card at all (the state itself arrives only on a
+    // change — a fresh start would otherwise show a bare «0» until the first command).
+    val trouble = when {
+        state == CardState.UNKNOWN -> null
+        state == CardState.NO_CARD || (state == CardState.OK && card.totalBytes == 0L) -> tr("нет карты", "no card")
+        state == CardState.UNUSABLE -> tr("карта не читается", "card unreadable")
+        state == CardState.WRITE_ERROR -> tr("ошибка карты", "card error")
+        state == CardState.FULL && card.photosLeft == null -> tr("карта заполнена", "card full")
+        else -> null
+    }
     val left = when {
+        trouble != null -> trouble
         card.photosLeft != null -> "${card.photosLeft} " + tr("фото", "photos")
         card.videoSecondsLeft != null -> {
             val m = card.videoSecondsLeft / 60
@@ -1075,7 +1088,7 @@ private fun CardChip(card: CardInfo, modifier: Modifier = Modifier) {
     // Only what still fits (the free size made the label run into the battery one); the size if that's unknown.
     Text(
         "SD " + (left ?: formatSize(card.freeBytes)),
-        color = if (card.freeBytes < card.totalBytes / 20) Color(0xFFFFB4A9) else Color.White, // < 5 % free: warn
+        color = if (trouble != null || card.freeBytes < card.totalBytes / 20) Color(0xFFFFB4A9) else Color.White, // warn
         fontSize = 12.sp,
         modifier = modifier.background(Color(0x99000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
     )
@@ -1238,7 +1251,7 @@ internal fun LandscapeLive(vm: CameraController, rotation: Int, onRecord: () -> 
                 Box(Modifier.align(Alignment.BottomEnd).padding(12.dp)) { ZoomButton(vm, vm.settings, vm.conf) }
                 // Same places as in portrait: card top left, batteries top right.
                 val s = vm.settings
-                s?.card?.let { CardChip(it, Modifier.align(Alignment.TopStart).padding(12.dp)) }
+                s?.card?.let { CardChip(it, vm.cardState, Modifier.align(Alignment.TopStart).padding(12.dp)) }
                 if (s?.batteryPercent != null || s?.podBatteryPercent != null) {
                     Row(
                         Modifier.align(Alignment.TopEnd).padding(12.dp)

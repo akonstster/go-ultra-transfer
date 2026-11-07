@@ -31,7 +31,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
         title = { Text(tr("О приложении", "About")) },
         text = {
             Column {
-                Text("GO Ultra Transfer")
+                Text("insta360 transfer")
                 Spacer(Modifier.height(12.dp))
                 Text("${tr("Версия", "Version")}: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}, ${BuildConfig.BUILD_TYPE})")
                 Text("${tr("Номер сборки", "Build number")}: $built")
