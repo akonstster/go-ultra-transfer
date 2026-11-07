@@ -62,6 +62,8 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Slider
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -100,13 +102,20 @@ private data class FilePieces(
 
 /** The card in the hand: the piece under the finger while the timeline slides (the joystick's knob). */
 @Composable
-private fun HeldCard(vm: CameraController, clip: ProjectClip, file: CameraFile?, modifier: Modifier) {
+private fun HeldCard(
+    vm: CameraController,
+    clip: ProjectClip,
+    file: CameraFile?,
+    modifier: Modifier,
+    alpha: Float = 0.72f,
+    scale: Float = 1.06f,
+) {
     val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
         value = file?.let {
             if (clip.role == ProjectClip.Role.STILL) vm.thumbnail(it) else vm.timelineFrame(it, clip.fromMs)
         }
     }
-    Column(modifier.width(CARD_W).graphicsLayer { scaleX = 1.06f; scaleY = 1.06f; alpha = 0.72f }) {
+    Column(modifier.width(CARD_W).graphicsLayer { scaleX = scale; scaleY = scale; this.alpha = alpha }) {
         Box(
             Modifier.fillMaxWidth().height(96.dp).clip(RoundedCornerShape(10.dp))
                 .background(Color(0xCC000000))
@@ -125,6 +134,9 @@ private fun HeldCard(vm: CameraController, clip: ProjectClip, file: CameraFile?,
         Text(file?.stem ?: clip.file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
+
+/** A card on its way home: where it was let go of, and where it lands (the slot it was carried to). */
+private data class Landing(val clip: ProjectClip, val fromX: Float, val fromY: Float, val toX: Float)
 
 /** The slot nearest the middle of the strip (moved a little by [extra]): where a carried card will land. */
 private fun centerSlot(state: LazyListState, pitch: Float, padPx: Float, stripW: Float, count: Int, extra: Float = 0f): Int {
@@ -189,6 +201,16 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var stickPx by remember(p.id) { mutableFloatStateOf(0f) }
     var stickY by remember(p.id) { mutableFloatStateOf(0f) }
     var heldX by remember(p.id) { mutableFloatStateOf(0f) }
+    var landing by remember(p.id) { mutableStateOf<Landing?>(null) }
+    // The card flying into its place when the finger lets go: down to the strip, smaller, giving way to the card
+    // standing there — the eye follows it in, and by the time the timeline has grown back it is already in its place.
+    val landProgress by animateFloatAsState(if (landing != null) 1f else 0f, tween(260))
+    LaunchedEffect(landing) {
+        if (landing != null) {
+            delay(300)
+            landing = null
+        }
+    }
     var stripW by remember(p.id) { mutableIntStateOf(0) }
     var playingNow by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
     val listState = rememberLazyListState()
@@ -316,6 +338,10 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                                 if (lifted == clip) {
                                     val from = p.sequence.indexOf(clip)
                                     val to = p.clips.getOrNull(targetArray)?.let { p.sequence.indexOf(it) } ?: from
+                                    // The card flies to the slot it was carried to (that is where it lands): the strip
+                                    // keeps its scroll, so the eye has only the flying card to follow.
+                                    val scrolled = listState.firstVisibleItemIndex * pitchPx + listState.firstVisibleItemScrollOffset
+                                    landing = Landing(clip, heldX, stickY, padPx + targetArray * pitchPx - scrolled)
                                     if (from >= 0 && to >= 0 && to != from) vm.moveProjectClip(from, to)
                                     lifted = null
                                     targetArray = -1
@@ -338,6 +364,18 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                     HeldCard(
                         vm, clip, vm.projectFile(clip.file),
                         Modifier.offset { IntOffset(heldX.roundToInt(), stickY.roundToInt()) }.zIndex(2f),
+                    )
+                }
+                landing?.let { home ->
+                    // Coming down: the card goes to the slot it was carried to, shrinking to its size and fading as
+                    // the card standing there takes over.
+                    val x = home.fromX + (home.toX - home.fromX) * landProgress
+                    val y = home.fromY * (1f - landProgress)
+                    HeldCard(
+                        vm, home.clip, vm.projectFile(home.clip.file),
+                        Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.zIndex(3f),
+                        alpha = 0.72f * (1f - landProgress),
+                        scale = 1.06f - 0.06f * landProgress,
                     )
                 }
             }
