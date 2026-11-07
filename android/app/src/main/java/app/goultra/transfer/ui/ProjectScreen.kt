@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,12 +38,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,23 +57,29 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Slider
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
@@ -83,6 +92,34 @@ private data class FilePieces(
     val all: Map<String, List<Highlight>>,
     val edited: Map<String, List<Highlight>>,
 )
+
+/** The card in the hand: the piece under the finger while the timeline slides (the joystick's knob). */
+@Composable
+private fun HeldCard(vm: CameraController, clip: ProjectClip, file: CameraFile?, modifier: Modifier) {
+    val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
+        value = file?.let {
+            if (clip.role == ProjectClip.Role.STILL) vm.thumbnail(it) else vm.timelineFrame(it, clip.fromMs)
+        }
+    }
+    Column(modifier.width(CARD_W).graphicsLayer { scaleX = 1.06f; scaleY = 1.06f }) {
+        Box(
+            Modifier.fillMaxWidth().height(96.dp).clip(RoundedCornerShape(10.dp))
+                .background(Color(0xCC000000))
+                .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp)),
+        ) {
+            thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+            Text(
+                formatDuration((clip.durationMs / 1000).toInt()),
+                Modifier.align(Alignment.BottomStart).padding(4.dp)
+                    .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                color = Color.White,
+                fontSize = 11.sp,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(file?.stem ?: clip.file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
 
 /** One card of the strip: its width and the room between two of them (a drag counts places by that distance). */
 private val CARD_W = 150.dp
@@ -114,11 +151,15 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     val stale = remember(loaded.all, p.clips) { p.staleClips(loaded.all).toSet() }
     val totalMs = p.clips.sumOf { it.durationMs }
 
-    // A project's cards are all one width: the drag counts places by it (see the strip below).
+    // A project's cards are all one width: the finger's travel counts places by it (see the strip below).
     var play by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
     var lifted by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
-    var dragPx by remember(p.id) { mutableFloatStateOf(0f) }
-    var fromSeq by remember(p.id) { mutableIntStateOf(0) }
+    var heldFrom by remember(p.id) { mutableIntStateOf(-1) }
+    var targetArray by remember(p.id) { mutableIntStateOf(-1) }
+    var scrollPx by remember(p.id) { mutableFloatStateOf(0f) }
+    var heldX by remember(p.id) { mutableFloatStateOf(0f) }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -149,46 +190,71 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            // Cards are all one width, so a drag counts places by the distance over that width (see [ClipCard]).
-            val pitch = with(LocalDensity.current) { (CARD_W + CARD_GAP).toPx() }
-            LazyRow(
-                Modifier.fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(CARD_GAP),
-            ) {
-                itemsIndexed(p.clips, key = { i, c -> "$i-${c.file}-${c.fromMs}" }) { _, clip ->
-                    // «The file is not on the list any more» is only said when the list is complete: with the camera
-                    // away a file it holds is simply out of reach, not gone.
-                    ClipCard(
-                        vm, p, clip, vm.projectFile(clip.file),
-                        stale = clip in stale,
-                        missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
-                        offset = if (lifted == clip) dragPx else 0f,
-                        // Tapping plays the piece in the preview; a photo has nothing to play, so it opens instead.
-                        onTap = {
-                            val f = vm.projectFile(clip.file)
-                            if (clip.role == ProjectClip.Role.STILL) vm.viewing = f else play = clip
-                        },
-                        onEdit = { vm.viewing = vm.projectFile(clip.file) },
-                        onDragStart = {
-                            // Only the pieces of the row move: a cutaway is pinned to the base's own time (P3).
-                            val at = p.sequence.indexOf(clip)
-                            if (clip.atMs == null && at >= 0) {
-                                lifted = clip
-                                dragPx = 0f
-                                fromSeq = at
-                            }
-                        },
-                        onDrag = { if (lifted == clip) dragPx += it },
-                        onDragEnd = {
-                            if (lifted == clip) {
-                                val to = (fromSeq + (dragPx / pitch).roundToInt()).coerceIn(0, p.sequence.size - 1)
-                                if (to != fromSeq) vm.moveProjectClip(fromSeq, to)
-                                lifted = null
-                                dragPx = 0f
-                            }
-                        },
-                    )
+            // Cards are all one width, so the finger's travel counts places by that distance: the card in the hand is
+            // a joystick — the timeline slides under it and the place it would land in is marked.
+            val density = LocalDensity.current
+            val pitch = with(density) { (CARD_W + CARD_GAP).toPx() }
+            val cardW = with(density) { CARD_W.toPx() }
+            val edge = with(density) { 12.dp.toPx() }
+            Box(Modifier.fillMaxWidth()) {
+                LazyRow(
+                    state = listState,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(CARD_GAP),
+                ) {
+                    itemsIndexed(p.clips, key = { i, c -> "$i-${c.file}-${c.fromMs}" }) { i, clip ->
+                        // «The file is not on the list any more» is only said when the list is complete: with the
+                        // camera away a file it holds is simply out of reach, not gone.
+                        val shrink by animateFloatAsState(if (lifted != null && lifted != clip) 0.72f else 1f)
+                        ClipCard(
+                            vm, p, clip, vm.projectFile(clip.file),
+                            stale = clip in stale,
+                            missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
+                            scale = shrink,
+                            alpha = if (lifted == clip) 0.25f else 1f,
+                            target = lifted != null && i == targetArray,
+                            // Tapping plays the piece in the preview; a photo has nothing to play, so it opens instead.
+                            onTap = {
+                                val f = vm.projectFile(clip.file)
+                                if (clip.role == ProjectClip.Role.STILL) vm.viewing = f else play = clip
+                            },
+                            onEdit = { vm.viewing = vm.projectFile(clip.file) },
+                            onDragStart = { localX ->
+                                // Only the pieces of the row are carried: a cutaway is pinned to the base's time (P3).
+                                if (clip.atMs == null && p.sequence.indexOf(clip) >= 0) {
+                                    val scrolled = listState.firstVisibleItemIndex * pitch + listState.firstVisibleItemScrollOffset
+                                    lifted = clip
+                                    heldFrom = i
+                                    targetArray = i
+                                    scrollPx = 0f
+                                    // The held card is centred under the finger, where it was taken.
+                                    heldX = edge + i * pitch + localX - scrolled - cardW / 2f
+                                }
+                            },
+                            onDrag = { dx ->
+                                if (lifted == clip) {
+                                    scrollPx += dx
+                                    targetArray = (heldFrom + (scrollPx / pitch).roundToInt()).coerceIn(0, p.clips.size - 1)
+                                    scope.launch { listState.scrollBy(-dx) }
+                                }
+                            },
+                            onDragEnd = {
+                                if (lifted == clip) {
+                                    val from = p.sequence.indexOf(clip)
+                                    val to = p.clips.getOrNull(targetArray)?.let { p.sequence.indexOf(it) } ?: from
+                                    if (from >= 0 && to >= 0 && to != from) vm.moveProjectClip(from, to)
+                                    lifted = null
+                                    scrollPx = 0f
+                                    targetArray = -1
+                                }
+                            },
+                        )
+                    }
+                }
+                lifted?.let { clip ->
+                    // The joystick's knob: the card in the hand, drawn where the finger took it.
+                    HeldCard(vm, clip, vm.projectFile(clip.file), Modifier.offset { IntOffset(heldX.roundToInt(), 0) }.zIndex(2f))
                 }
             }
         }
@@ -208,10 +274,12 @@ private fun ClipCard(
     file: CameraFile?,
     stale: Boolean,
     missing: Boolean,
-    offset: Float,
+    scale: Float,
+    alpha: Float,
+    target: Boolean,
     onTap: () -> Unit,
     onEdit: () -> Unit,
-    onDragStart: () -> Unit,
+    onDragStart: (Float) -> Unit,
     onDrag: (Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
@@ -223,19 +291,22 @@ private fun ClipCard(
         }
     }
     Column(
-        Modifier.width(CARD_W)
-            .offset { IntOffset(offset.roundToInt(), 0) }
-            .zIndex(if (offset != 0f) 1f else 0f),
+        Modifier.width(CARD_W).graphicsLayer {
+            // While one card is carried, the others recede; the slot it came from keeps its place as a ghost.
+            scaleX = scale
+            scaleY = scale
+            this.alpha = alpha
+        },
     ) {
         Box(
             Modifier.fillMaxWidth().height(96.dp).clip(RoundedCornerShape(10.dp))
                 .background(Color(0x22000000))
-                .then(if (offset != 0f) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp)) else Modifier)
-                .clickable(enabled = file != null) { onTap() }
+                .then(if (target) Modifier.border(3.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp)) else Modifier)
+                .clickable(enabled = file != null && alpha == 1f) { onTap() }
                 .pointerInput(clip) {
-                    // A long press lifts the card: the finger then drags it along the strip (the caller counts places).
+                    // A long press takes the card: the finger then slides the whole timeline (see the strip's callers).
                     detectDragGesturesAfterLongPress(
-                        onDragStart = { onDragStart() },
+                        onDragStart = { at -> onDragStart(at.x) },
                         onDrag = { _, amount -> onDrag(amount.x) },
                         onDragEnd = { onDragEnd() },
                         onDragCancel = { onDragEnd() },
@@ -243,33 +314,32 @@ private fun ClipCard(
                 },
         ) {
             thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-            Text(
-                formatDuration((clip.durationMs / 1000).toInt()),
-                Modifier.align(Alignment.BottomStart).padding(4.dp)
-                    .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
-                color = Color.White,
-                fontSize = 11.sp,
-            )
-            if (clip.auto) {
+            Row(Modifier.align(Alignment.BottomStart).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    tr("Авто", "Auto"),
-                    Modifier.align(Alignment.TopStart).padding(4.dp)
-                        .background(Color(0xAA0B6E4F), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                    formatDuration((clip.durationMs / 1000).toInt()),
+                    Modifier.background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
                     color = Color.White,
                     fontSize = 11.sp,
                 )
+                if (clip.auto) {
+                    Text(
+                        tr("Авто", "Auto"),
+                        Modifier.padding(start = 4.dp).background(Color(0xAA0B6E4F), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 4.dp, vertical = 1.dp),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                    )
+                }
             }
             if (p.baseFile == clip.file) {
                 Text("★", Modifier.align(Alignment.BottomEnd).padding(4.dp), color = Color.White, fontSize = 14.sp)
             }
-            Row(Modifier.align(Alignment.TopEnd)) {
-                // The pencil opens the file: its pieces are edited in the usual film strip (the plan §7).
-                IconButton(onEdit, Modifier.size(28.dp)) {
-                    Icon(Icons.Filled.Edit, tr("Править куски", "Edit pieces"), tint = Color.White, modifier = Modifier.size(16.dp))
-                }
-                IconButton({ confirming = true }, Modifier.size(28.dp)) {
-                    Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(16.dp))
-                }
+            // The pencil on the left, the cross on the right: opposite corners, so neither is hit by accident.
+            IconButton(onEdit, Modifier.align(Alignment.TopStart).size(28.dp)) {
+                Icon(Icons.Filled.Edit, tr("Править куски", "Edit pieces"), tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+            IconButton({ confirming = true }, Modifier.align(Alignment.TopEnd).size(28.dp)) {
+                Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(16.dp))
             }
             // The file was edited since (its piece is gone) or is not on the list any more: say so rather than play it.
             if (missing || stale) {
@@ -331,6 +401,44 @@ private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile)
 }
 
 /**
+ * The project's own clock, not the player's: a playlist reports the position inside the item being played, so the
+ * whole timeline is put together from its windows — the pieces' real lengths as the player sees them. Returns the
+ * absolute position in the project and its total (0 while the playlist hasn't said).
+ */
+private fun playerClock(player: Player): Pair<Long, Long> {
+    val timeline = player.currentTimeline
+    if (timeline.isEmpty) return player.currentPosition.coerceAtLeast(0L) to 0L
+    val window = Timeline.Window()
+    var before = 0L
+    var total = 0L
+    for (i in 0 until timeline.windowCount) {
+        timeline.getWindow(i, window)
+        val ms = window.durationMs
+        if (ms == C.TIME_UNSET) continue
+        if (i < player.currentMediaItemIndex) before += ms
+        total += ms
+    }
+    return (before + player.currentPosition.coerceAtLeast(0L)) to total
+}
+
+/** Seeks the playlist to an absolute time of the project's timeline: the window that holds it, then inside it. */
+private fun seekAbsolute(player: Player, atMs: Long) {
+    val timeline = player.currentTimeline
+    if (timeline.isEmpty) return
+    val window = Timeline.Window()
+    var left = atMs.coerceAtLeast(0L)
+    for (i in 0 until timeline.windowCount) {
+        timeline.getWindow(i, window)
+        val ms = window.durationMs
+        if (ms == C.TIME_UNSET || left <= ms) {
+            player.seekTo(i, left)
+            return
+        }
+        left -= ms
+    }
+}
+
+/**
  * The project's preview: the pieces in the order they will play, each cut to its own range. They are a media3 playlist
  * — the pieces one after another for now; the base with its cutaways needs the montage engine (P3). A camera file plays
  * its light copy over Wi-Fi and a phone copy plays itself — the same sources the viewer uses.
@@ -351,9 +459,11 @@ private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>, play:
     }
     val player = remember(factory) { ExoPlayer.Builder(context, factory).build().apply { playWhenReady = false } }
     var playing by remember { mutableStateOf(false) }
-    var position by remember { mutableIntStateOf(0) }
     var dragging by remember { mutableStateOf<Float?>(null) }
     val totalMs = clips.sumOf { it.durationMs }
+    // The clock of the whole timeline: absolute milliseconds, and its total (the pieces' own lengths once known).
+    var shown by remember { mutableLongStateOf(0L) }
+    var shownTotal by remember { mutableLongStateOf(totalMs) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -376,10 +486,15 @@ private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>, play:
         player.prepare()
         if (at > 0L) player.seekTo(minOf(at, maxOf(totalMs, 1L)))
     }
-    // The clock follows the player whether or not it plays: a seek on a pause used to snap back to the old position.
+    // The clock follows the player whether or not it plays, and it never counts only the item being played: the strip
+    // shows the whole timeline (a seek on a pause used to snap back to the old spot too).
     LaunchedEffect(player) {
         while (true) {
-            if (dragging == null) position = player.currentPosition.toInt()
+            if (dragging == null) {
+                val (at, whole) = playerClock(player)
+                shown = at
+                shownTotal = if (whole > 0L) whole else totalMs
+            }
             delay(250)
         }
     }
@@ -406,20 +521,20 @@ private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>, play:
                 )
             }
             Slider(
-                value = dragging ?: position.toFloat(),
+                value = dragging ?: shown.toFloat(),
                 onValueChange = { dragging = it },
                 onValueChangeFinished = {
-                    dragging?.let {
-                        player.seekTo(it.toLong())
-                        position = it.toInt()
+                    dragging?.let { ms ->
+                        seekAbsolute(player, ms.toLong())
+                        shown = ms.toLong()
                     }
                     dragging = null
                 },
-                valueRange = 0f..maxOf(totalMs, 1L).toFloat(),
+                valueRange = 0f..maxOf(shownTotal, 1L).toFloat(),
                 modifier = Modifier.weight(1f),
             )
             Text(
-                formatDuration((position / 1000).toInt()) + " / " + formatDuration((totalMs / 1000).toInt()),
+                formatDuration((shown / 1000).toInt()) + " / " + formatDuration((shownTotal / 1000).toInt()),
                 Modifier.padding(start = 8.dp),
                 fontSize = 12.sp,
             )
