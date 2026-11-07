@@ -21,14 +21,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -116,6 +121,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
  */
 @Composable
 private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: CameraFile?, stale: Boolean, missing: Boolean) {
+    var confirming by remember { mutableStateOf(false) }
     val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
         value = file?.let {
             // A photo is not a video with a frame at a time: it has its own tile picture.
@@ -148,7 +154,7 @@ private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: 
             if (p.baseFile == clip.file) {
                 Text("★", Modifier.align(Alignment.BottomEnd).padding(4.dp), color = Color.White, fontSize = 14.sp)
             }
-            IconButton({ vm.removeProjectClip(clip) }, Modifier.align(Alignment.TopEnd).size(28.dp)) {
+            IconButton({ confirming = true }, Modifier.align(Alignment.TopEnd).size(28.dp)) {
                 Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(16.dp))
             }
             // The file was edited since (its piece is gone) or is not on the list any more: say so rather than play it.
@@ -167,5 +173,30 @@ private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: 
         }
         Spacer(Modifier.height(4.dp))
         Text(file?.stem ?: clip.file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    // The ✕ asks first: a project is put together by hand and a stray tap must not take a piece out of it. The files
+    // themselves are never touched — that is what the dialog says outright (asked for on the phone, 07.11).
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            icon = { Icon(Icons.Filled.Close, null) },
+            title = { Text(tr("Убрать кусок из проекта?", "Remove the clip from the project?")) },
+            text = {
+                Text(
+                    tr(
+                        "Из проекта уйдёт только этот кусок. Сам файл остаётся на камере и на телефоне — ничего не удаляется.",
+                        "Only this piece leaves the project. The file itself stays on the camera and on the phone — " +
+                            "nothing is deleted.",
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    { vm.removeProjectClip(clip); confirming = false },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(tr("Убрать", "Remove")) }
+            },
+            dismissButton = { TextButton({ confirming = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
     }
 }
