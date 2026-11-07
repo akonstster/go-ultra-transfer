@@ -3746,11 +3746,16 @@ class CameraController(private val app: Application) {
                 lastResult = tr("Проект не сохранён: остановлено", "Project not saved: stopped")
                 throw e
             } catch (e: ClipMaker.MismatchException) {
-                log("проект как снято: кусок ${e.piece} — ${e.why}")
+                val run = runs.getOrNull(e.piece - 1)
+                log("проект как снято: ${run?.file} — ${e.why}: ${e.first} / ${e.other}")
+                val detail = mismatchText(e.why) + when (e.why) {
+                    ClipMaker.Mismatch.SIZE -> " ${e.first.width}×${e.first.height} / ${e.other.width}×${e.other.height}"
+                    else -> ""
+                }
                 lastResult = tr(
                     "Куски сняты по-разному (%s, кусок %s) — сохраните точно, с перекодированием",
                     "The clips were shot differently (%s, clip %s) — save precisely, re-encoding",
-                ).format(mismatchText(e.why), e.piece)
+                ).format(detail, (run?.first ?: (e.piece - 1)) + 1)
             } catch (e: Exception) {
                 log("проект как снято: ${e.javaClass.simpleName}: ${e.message}")
                 lastResult = tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")

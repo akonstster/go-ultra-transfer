@@ -15,6 +15,8 @@ class ProjectExportTest {
         val runs = ProjectExport.runs(listOf(clip("A", 0, 1000), clip("A", 2000, 3000), clip("B", 0, 500)))
         assertEquals(listOf("A", "B"), runs.map { it.file })
         assertEquals(listOf(Highlight(0, 1000), Highlight(2000, 3000)), runs[0].pieces)
+        // Each run knows its first card: an error names the card the user sees.
+        assertEquals(listOf(0, 2), runs.map { it.first })
     }
 
     @Test

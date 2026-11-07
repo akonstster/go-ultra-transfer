@@ -132,8 +132,9 @@ object ClipMaker {
         else -> null
     }
 
-    /** Thrown by [joinAll] when a file's formats differ from the first one's: [piece] (from 1) and why. */
-    class MismatchException(val piece: Int, val why: Mismatch) : IllegalStateException("кусок $piece: $why")
+    /** Thrown by [joinAll] when a file's formats differ from the first one's: [piece] (from 1), why, and both formats. */
+    class MismatchException(val piece: Int, val why: Mismatch, val first: Signature, val other: Signature) :
+        IllegalStateException("кусок $piece: $why ($first / $other)")
 
     private fun MediaFormat.int(key: String) = if (containsKey(key)) getInteger(key) else 0
 
@@ -186,7 +187,7 @@ object ClipMaker {
                         if (aFormat != null) audioOut = m.addTrack(aFormat)
                         m.start()
                     }
-                    first?.let { f -> mismatch(f, sig)?.let { throw MismatchException(n + 1, it) } }
+                    first?.let { f -> mismatch(f, sig)?.let { throw MismatchException(n + 1, it, f, sig) } }
                     ex.selectTrack(video)
                     if (audioOut >= 0) ex.selectTrack(audio)
                     val tracks = buildMap { put(video, videoOut); if (audioOut >= 0) put(audio, audioOut) }

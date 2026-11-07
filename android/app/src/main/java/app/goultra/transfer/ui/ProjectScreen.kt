@@ -91,7 +91,9 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 )
             }
             if (p.clips.isNotEmpty()) {
-                IconButton({ saving = true }, enabled = !vm.isDownloading && !vm.isExporting) {
+                // The progress itself, not the jobs: a job is still active while its last state is set, and the
+                // button read that way stayed off for good after a failed save.
+                IconButton({ saving = true }, enabled = vm.download == null && vm.export == null) {
                     Icon(Icons.Filled.Save, tr("Сохранить видео", "Save the video"))
                 }
             }

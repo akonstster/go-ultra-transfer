@@ -2,8 +2,8 @@ package app.goultra.transfer.camera
 
 /** How a project is put into one video file: which pieces go together, and whether it can be made without re-encoding. */
 object ProjectExport {
-    /** One file's pieces in a row: read with one extractor, cut and joined without re-reading the file. */
-    data class Run(val file: String, val pieces: List<Highlight>)
+    /** One file's pieces in a row: read with one extractor, cut and joined without re-reading the file. [first]: its first card (from 0). */
+    data class Run(val file: String, val pieces: List<Highlight>, val first: Int = 0)
 
     /**
      * The project's pieces as runs: a piece joins the run before it when it is of the same file and starts after that
@@ -11,13 +11,13 @@ object ProjectExport {
      */
     fun runs(clips: List<ProjectClip>): List<Run> {
         val out = mutableListOf<Run>()
-        for (c in clips) {
+        for ((i, c) in clips.withIndex()) {
             val piece = Highlight(c.fromMs, c.toMs)
             val last = out.lastOrNull()
             if (last != null && last.file == c.file && c.fromMs >= (last.pieces.last().endMs ?: 0L)) {
                 out[out.lastIndex] = last.copy(pieces = last.pieces + piece)
             } else {
-                out += Run(c.file, listOf(piece))
+                out += Run(c.file, listOf(piece), i)
             }
         }
         return out
