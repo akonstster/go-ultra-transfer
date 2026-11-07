@@ -5,15 +5,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,9 +22,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -36,6 +35,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -48,7 +49,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -64,19 +64,24 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Slider
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.animation.core.spring
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -102,89 +107,59 @@ private data class FilePieces(
     val edited: Map<String, List<Highlight>>,
 )
 
-/** The card in the hand: the piece under the finger while the timeline slides (the joystick's knob). */
-@Composable
-private fun HeldCard(
-    vm: CameraController,
-    clip: ProjectClip,
-    file: CameraFile?,
-    modifier: Modifier,
-    alpha: Float = 0.72f,
-    scale: Float = 1.06f,
+/**
+ * The strip's geometry at a scale [k] (1 = as it is, [CARRY_SCALE] = a card carried): where a slot's middle is drawn
+ * and which slot is under a point. Slots are counted in cards, so a card's place does not change when the strip
+ * gathers — only where it is drawn does. Pure, so the drag's arithmetic is checked rather than guessed at.
+ */
+internal class StripGeometry(
+    val cardW: Float,
+    val gap: Float,
+    val edge: Float,
+    val stripW: Float,
+    val count: Int,
+    val k: Float,
 ) {
-    val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
-        value = file?.let {
-            if (clip.role == ProjectClip.Role.STILL) vm.thumbnail(it) else vm.timelineFrame(it, clip.fromMs)
-        }
-    }
-    // A little bigger than a card of the strip: it is held under the finger, where a thumbnail of 66 dp would be lost.
-    Column(modifier.width(CARD_W * 1.9f).graphicsLayer { scaleX = scale; scaleY = scale; this.alpha = alpha }) {
-        Box(
-            Modifier.fillMaxWidth().aspectRatio(1.5f).clip(RoundedCornerShape(8.dp))
-                .background(Color(0xCC000000))
-                .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)),
-        ) {
-            thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-            Text(
-                formatDuration((clip.durationMs / 1000).toInt()),
-                Modifier.align(Alignment.BottomStart).padding(3.dp)
-                    .background(Color(0x99000000), RoundedCornerShape(3.dp)).padding(horizontal = 3.dp, vertical = 1.dp),
-                color = Color.White,
-                fontSize = 10.sp,
-            )
-        }
-        Spacer(Modifier.height(2.dp))
-    }
+    val w: Float get() = cardW * k
+    val pitch: Float get() = (cardW + gap) * k
+
+    /** The scroll at which the last card's far side meets the strip's end. */
+    val maxScroll: Float get() = if (count <= 0) 0f else maxOf(0f, 2f * edge + (count - 1) * pitch + w - stripW)
+
+    /** Where the middle of [slot] (fractional while it moves) is drawn on screen. */
+    fun center(slot: Float, scroll: Float): Float = edge + slot * pitch + w / 2f - scroll
+
+    /** The slot whose middle is drawn at [x] — fractional, the inverse of [center]. */
+    fun slotAt(x: Float, scroll: Float): Float = if (pitch <= 0f) 0f else (x + scroll - edge - w / 2f) / pitch
+
+    /** The scroll that puts the middle of [slot] at [x], kept inside the strip's ends. */
+    fun scrollFor(slot: Float, x: Float): Float = (edge + slot * pitch + w / 2f - x).coerceIn(0f, maxScroll)
 }
 
-/** A card on its way home: where it was let go of, and where it lands (the slot it was carried to). */
-private data class Landing(val clip: ProjectClip, val fromX: Float, val fromY: Float, val toX: Float)
-
-/** The stick's lean of the point of insertion, and how far it may go (a share of the strip's width). */
-private const val LEAN = 0.3f
-private const val LEAN_MAX = 0.15f
-
-/** How much of the way left to the place the timeline covers each frame: a glide, not a hop. */
-private const val GLIDE = 0.22f
-
-/** The drag loop's step, ms (and its share of a second, for the stick's speed). */
-private const val TICK_MS = 16L
-
-/** The lean of the point of insertion: a share of the finger's travel, kept inside a share of the strip. */
-private fun leanOf(stickPx: Float, stripW: Int): Float =
-    (stickPx * LEAN).coerceIn(-stripW * LEAN_MAX, stripW * LEAN_MAX)
-
-/** One card of the strip: its width and the room between two of them (a drag counts places by that distance). */
-private val CARD_W = 66.dp
-private val CARD_GAP = 6.dp
-
-/** How much the cards recede while one is carried: the strip reads the same, only a little further away. */
-private const val DRAG_SCALE = 0.85f
-
-/**
- * The stick's speed in px/s: nothing inside the middle, then the further the finger is from where the card was taken
- * the faster the timeline slides, capped so a long move stays controllable — a transmitter stick, not a drag.
- */
-internal fun stickSpeed(offsetPx: Float): Float {
-    val dead = 24f
-    val full = 150f
-    val capped = 900f
-    val away = abs(offsetPx)
-    if (away <= dead) return 0f
-    val ramp = ((away - dead) / (full - dead)).coerceIn(0f, 1f)
-    return ramp * capped * (if (offsetPx > 0f) 1f else -1f)
+/** How fast the strip slides when the carried card is at [x]: nothing in the middle, easing in toward either end. */
+internal fun edgeSpeed(x: Float, stripW: Float): Float {
+    if (stripW <= 0f) return 0f
+    val zone = stripW * EDGE_ZONE
+    val v = when {
+        x < zone -> -(zone - x) / zone
+        x > stripW - zone -> (x - (stripW - zone)) / zone
+        else -> 0f
+    }.coerceIn(-1f, 1f)
+    return v * abs(v) * EDGE_SPEED
 }
 
 /**
- * The slot nearest [atMiddle] on the strip's own grid: the arithmetic of the drag, kept pure so it can be tested
- * without a screen (a wrong sum here threw the carried card about, so it is not guessed at any more).
+ * The place in [Project.sequence] a card goes to when it is let go of before [others]`[insertAt]` ([others] is the
+ * strip without it): the clips of the sequence in front of that point. Cutaways keep their moment and don't count.
  */
-internal fun slotAt(atMiddle: Float, pitch: Float, padPx: Float, count: Int): Int =
-    if (count <= 0 || pitch <= 0f) 0 else ((atMiddle - padPx) / pitch).roundToInt().coerceIn(0, count - 1)
+internal fun sequenceIndexFor(others: List<ProjectClip>, insertAt: Int): Int =
+    others.take(insertAt.coerceIn(0, others.size)).count { it.atMs == null }
+
 /**
  * A project's own screen: the pieces it is made of, in the order they will play (see `memory-bank/projects-plan.md`).
- * Dragging the cards around, the base with its cutaways, the preview and the export come next; the file behind a piece
- * is edited in the usual film strip — the card opens it.
+ * A long press lifts a card: it follows the finger, the others gather smaller so more of them are seen and part for
+ * it where it would land; let go, it settles into that place. The file behind a piece is edited in the usual film
+ * strip — the card's pencil opens it.
  */
 @Composable
 fun ProjectScreen(vm: CameraController, p: Project) {
@@ -207,100 +182,168 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     val stale = remember(loaded.all, p.clips) { p.staleClips(loaded.all).toSet() }
     val totalMs = p.clips.sumOf { it.durationMs }
 
-    // A project's cards are all one width: the finger's travel counts places by it (see the strip below).
-    var play by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
-    var lifted by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
-    // Where the carried card stands among the others (the slot it opens), and where that slot was when it was taken:
-    // the slot moves with the stick, counted from where it started, so letting go without moving leaves it in place.
-    var carriedIdx by remember(p.id) { mutableIntStateOf(-1) }
-    // Where the slot stands on screen while a card is carried (px in the strip): where it was taken, kept between the
-    // middle halves so it never leaves the eye. The finger moves the place; the timeline follows it.
-    var markerX by remember(p.id) { mutableFloatStateOf(0f) }
-    // How many slots the place has moved, as a fraction: the stick's speed drives it, so a long move stays a glide.
-    var slotsFloat by remember(p.id) { mutableFloatStateOf(0f) }
-    var targetArray by remember(p.id) { mutableIntStateOf(0) }
-    var stickPx by remember(p.id) { mutableFloatStateOf(0f) }
-    var stickY by remember(p.id) { mutableFloatStateOf(0f) }
-    var heldX by remember(p.id) { mutableFloatStateOf(0f) }
-    // Where the drawing is looked at while a card is carried: the point it was taken from, so it does not slide away
-    // from under the finger as the strip gathers.
-    var zoomAt by remember(p.id) { mutableFloatStateOf(0f) }
-    var landing by remember(p.id) { mutableStateOf<Landing?>(null) }
-    // The card flying into its place when the finger lets go: down to the strip, smaller, giving way to the card
-    // standing there — the eye follows it in, and by the time the timeline has grown back it is already in its place.
-    val landGo = remember { Animatable(0f) }
-    LaunchedEffect(landing) {
-        if (landing == null) return@LaunchedEffect
-        landGo.snapTo(0f)
-        landGo.animateTo(1f, tween(260))
-        landing = null
-    }
-    var stripW by remember(p.id) { mutableIntStateOf(0) }
-    var playingNow by remember(p.id) { mutableStateOf<ProjectClip?>(null) }
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    // The cards are all one width and the strip is padded so any slot can sit under its middle; while a card is
-    // carried they lay themselves out smaller, so five or six read at once and the eye keeps the timeline.
-    // The cards keep their size in the layout — only the drawing gets smaller while a card is carried — so nothing
-    // moves under the eye when one is taken (that jump was the layout being re-made). The strip is padded so any slot
-    // can sit under its middle.
+    // Cards are told apart by their place in [Project.clips], not by equality: the same piece may be in twice.
+    var play by remember(p.id) { mutableStateOf<Int?>(null) }
+    var playingNow by remember(p.id) { mutableStateOf<Int?>(null) }
+
     val density = LocalDensity.current
-    val pitchPx = with(density) { (CARD_W + CARD_GAP).toPx() }
-    val padNow = with(density) { maxOf(0.dp, (stripW.toDp() - CARD_W) / 2) }
-    val padPx = with(density) { padNow.toPx() }
     val cardWpx = with(density) { CARD_W.toPx() }
-    // The eye's distance while a card is carried: the cards gather around the middle of the strip, five or six of them
-    // reading at once. The drawing follows this; the layout never does.
-    val zoom by animateFloatAsState(if (lifted != null) DRAG_SCALE else 1f, tween(220))
-    // The stick's own loop: near the middle nothing happens, further out the timeline slides under the card in the
-    // hand; the point of insertion is the slot at the middle of the strip, so it never leaves the eye.
-    // The point of insertion leans the way the finger goes (a little), while the timeline slides the other way — the
-    // eye then reads both: where it goes and how far it has come. The stick's own loop does the moving (16 ms a tick).
-    val markerShift = leanOf(stickPx, stripW)
-    // While a card is carried the strip shows the others with an empty slot for it at the place it will land: the slot
-    // moves with the stick and the cards part as it comes (asked for on the phone, 07.11).
-    val others = remember(p.clips, carriedIdx, lifted) {
-        if (lifted == null) p.clips.mapIndexed { i, c -> i to c }
-        else p.clips.withIndex().filter { it.index != carriedIdx }.map { it.index to it.value }
+    val gapPx = with(density) { CARD_GAP.toPx() }
+    val edgePx = with(density) { STRIP_EDGE.toPx() }
+    val risePx = with(density) { LIFT_RISE.toPx() }
+    val maxYpx = with(density) { LIFT_MAX_Y.toPx() }
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val count = p.clips.size
+
+    var stripW by remember { mutableIntStateOf(0) }
+    // The strip's own scroll, px: the strip is drawn by hand, so every card's place is one sum (see [StripGeometry]).
+    var scroll by remember(p.id) { mutableFloatStateOf(0f) }
+    // 0 = the strip as it is, 1 = a card carried (the others small); and how far the carried card is lifted.
+    val zoom = remember(p.id) { Animatable(0f) }
+    val lift = remember(p.id) { Animatable(0f) }
+    val project by rememberUpdatedState(p)
+    fun geometry() = StripGeometry(cardWpx, gapPx, edgePx, stripW.toFloat(), count, 1f - (1f - CARRY_SCALE) * zoom.value)
+
+    // A card's identity in the strip: the clip and which of its equals it is, so a card keeps its own movement across a
+    // reorder instead of taking over its neighbour's.
+    val keys = remember(p.clips) {
+        val seen = HashMap<ProjectClip, Int>()
+        p.clips.map { c -> c to seen.merge(c, 1, Int::plus)!! }
     }
-    // The strip while a card is carried: the others in order, with an empty slot at the place it will land. The slot
-    // keeps the carried card's own index, so its key in the list does not change — an item rebuilt under the finger
-    // would lose the very gesture that is carrying it.
-    val display: List<Pair<Int, ProjectClip?>> = remember(others, targetArray, lifted, carriedIdx) {
-        buildList {
-            if (lifted == null) {
-                others.forEach { add(it) }
-            } else {
-                others.forEachIndexed { k, entry ->
-                    if (k == targetArray) add(carriedIdx to null)
-                    add(entry)
-                }
-                if (targetArray >= others.size) add(carriedIdx to null)
-            }
-        }
+    // Where each card is drawn, in slots: a spring that follows its place, so the cards part and close organically.
+    val slots = remember(p.id) { HashMap<Any, Animatable<Float, AnimationVector1D>>() }
+
+    // The carried card (held under the finger) and the lifted one (held, or still settling into its place).
+    var heldKey by remember(p.id) { mutableStateOf<Any?>(null) }
+    var liftKey by remember(p.id) { mutableStateOf<Any?>(null) }
+    var heldIdx by remember(p.id) { mutableIntStateOf(-1) }
+    // The place among the others where the carried card would land.
+    var target by remember(p.id) { mutableIntStateOf(0) }
+    var fingerX by remember(p.id) { mutableFloatStateOf(0f) }
+    var fingerY by remember(p.id) { mutableFloatStateOf(0f) }
+    var downY by remember(p.id) { mutableFloatStateOf(0f) }
+    // Where the finger took the card, from its middle at full size: the card does not jump to centre on the finger.
+    var grab by remember(p.id) { mutableFloatStateOf(0f) }
+    // The strip gathers and spreads about this slot standing at this point on screen; the slide at the ends moves it.
+    var anchorSlot by remember(p.id) { mutableFloatStateOf(0f) }
+    var anchorX by remember(p.id) { mutableFloatStateOf(0f) }
+    // A card carried or still settling: the strip is driven by the drag then, not by the finger's scroll.
+    var settling by remember(p.id) { mutableStateOf(false) }
+    val landY = remember(p.id) { Animatable(0f) }
+    val gapAt = remember(p.id) { Animatable(0f) }
+
+    fun scaleOf(lifted: Boolean): Float {
+        val k = 1f - (1f - CARRY_SCALE) * zoom.value
+        return if (lifted) k + (LIFT_SCALE - k) * lift.value else k
     }
-    LaunchedEffect(lifted, pitchPx, padPx, display.size) {
-        while (lifted != null) {
-            val speed = stickSpeed(stickPx)
-            // The finger moves the place of insertion at the stick's speed; the timeline then follows, so the place
-            // never leaves the eye and always stands where the card will land (a sum per card, or a scroll that ran
-            // on its own, threw the card about and even off the screen).
-            if (speed != 0f) slotsFloat += speed * (TICK_MS / 1000f) / pitchPx
-            val shift = leanOf(stickPx, stripW)
-            targetArray = (carriedIdx + slotsFloat.roundToInt()).coerceIn(0, others.size)
-            val want = padPx + targetArray * pitchPx - (markerX + shift)
-            val now = listState.firstVisibleItemIndex * pitchPx + listState.firstVisibleItemScrollOffset
-            // Toward it (a part of what is left each frame): the timeline glides to the place instead of hopping, and
-            // the place itself follows the finger smoothly because its slots are counted as a fraction.
-            if (want != now) listState.scrollBy((want - now) * GLIDE)
-            delay(TICK_MS)
+
+    fun heldCenter(): Float = fingerX - grab * scaleOf(true)
+
+    /** The slot a card stands in: its own index, or — while one is carried — its place among the others, parted. */
+    fun baseSlot(i: Int): Int {
+        if (heldKey == null || heldIdx < 0) return i
+        if (i == heldIdx) return target
+        val j = if (i > heldIdx) i - 1 else i
+        return if (j >= target) j + 1 else j
+    }
+
+    val scrollState = rememberScrollableState { delta ->
+        val old = scroll
+        scroll = (scroll - delta).coerceIn(0f, geometry().maxScroll)
+        old - scroll
+    }
+    LaunchedEffect(count, stripW) {
+        if (!settling) scroll = scroll.coerceIn(0f, geometry().maxScroll)
+    }
+    // The drag's own loop, frame by frame: the strip gathers about the place it was taken from, slides when the card
+    // is near an end, and the place of landing is read from where the card is drawn.
+    LaunchedEffect(settling) {
+        if (!settling) return@LaunchedEffect
+        var last = 0L
+        while (heldKey != null || zoom.isRunning || lift.isRunning || zoom.value > 0f) {
+            val now = withFrameNanos { it }
+            val dt = if (last == 0L) 0f else ((now - last) / 1_000_000f).coerceIn(0f, TICK_MAX_MS)
+            last = now
+            val g = geometry()
+            if (heldKey != null && dt > 0f && g.pitch > 0f) anchorSlot += edgeSpeed(fingerX, g.stripW) * dt / 1000f / g.pitch
+            scroll = g.scrollFor(anchorSlot, anchorX)
+            // Held at an end, the anchor is where the end lets it be: the slide does not pile up beyond it.
+            anchorSlot = g.slotAt(anchorX, scroll)
+            if (heldKey != null) target = g.slotAt(heldCenter(), scroll).roundToInt().coerceIn(0, maxOf(0, count - 1))
         }
+        settling = false
+    }
+    // The empty place follows the landing point with the same spring as the cards, so it never runs ahead of them.
+    LaunchedEffect(target, heldKey) {
+        if (heldKey != null) gapAt.animateTo(target.toFloat(), PART_SPRING)
     }
     // While something plays, its card is marked and kept in view (asked for on the phone, 07.11).
-    LaunchedEffect(playingNow, lifted, stripW) {
-        if (lifted != null || stripW <= 0) return@LaunchedEffect
-        val at = playingNow?.let { p.clips.indexOf(it) } ?: -1
-        if (at >= 0) listState.animateScrollToItem(at, -(stripW / 2 - (cardWpx / 2).toInt()))
+    LaunchedEffect(playingNow, settling, stripW) {
+        if (settling || stripW <= 0) return@LaunchedEffect
+        val at = playingNow ?: -1
+        if (at in project.clips.indices) scrollState.animateScrollBy(scroll - geometry().scrollFor(at.toFloat(), stripW / 2f))
+    }
+    val visible by remember(count, cardWpx, gapPx, edgePx) {
+        derivedStateOf {
+            val g = geometry()
+            (floor(g.slotAt(0f, scroll)).toInt() - 2)..(ceil(g.slotAt(g.stripW, scroll)).toInt() + 2)
+        }
+    }
+
+    fun take(x: Float, y: Float) {
+        if (heldKey != null || settling || count == 0) return
+        val g = geometry()
+        val i = g.slotAt(x, scroll).roundToInt()
+        if (i !in 0 until count || abs(x - g.center(i.toFloat(), scroll)) > g.w / 2f) return
+        // Cutaways are pinned to the base's time (P3): they are not carried along the order.
+        if (project.clips[i].atMs != null) return
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        heldIdx = i
+        target = i
+        heldKey = keys[i]
+        liftKey = keys[i]
+        fingerX = x
+        fingerY = y
+        downY = y
+        grab = x - g.center(i.toFloat(), scroll)
+        anchorX = x
+        anchorSlot = g.slotAt(x, scroll)
+        settling = true
+        scope.launch { scrollState.stopScroll() }
+        scope.launch { gapAt.snapTo(i.toFloat()) }
+        scope.launch { zoom.animateTo(1f, ZOOM_SPRING) }
+        scope.launch { lift.animateTo(1f, LAND_SPRING) }
+    }
+
+    fun drop() {
+        val key = heldKey ?: return
+        val g = geometry()
+        val from = heldIdx
+        val to = target
+        val landFrom = g.slotAt(heldCenter(), scroll)
+        val y = ((fingerY - downY) * LIFT_FOLLOW_Y).coerceIn(-maxYpx, maxYpx)
+        scope.launch {
+            // The card settles from where it was let go of: its spring starts there, not at its old place.
+            slots[key]?.snapTo(landFrom)
+            landY.snapTo(y)
+            // The strip spreads back about the place of landing, so that place stays where the eye is.
+            anchorSlot = to.toFloat()
+            anchorX = g.center(to.toFloat(), scroll)
+            val pr = project
+            val clip = pr.clips.getOrNull(from)
+            heldKey = null
+            heldIdx = -1
+            if (clip != null && to != from) {
+                val a = pr.sequence.indexOf(clip)
+                val b = sequenceIndexFor(pr.clips.filterIndexed { n, _ -> n != from }, to)
+                if (a >= 0 && a != b) vm.moveProjectClip(a, b)
+            }
+            launch { zoom.animateTo(0f, ZOOM_SPRING) }
+            launch { landY.animateTo(0f, LAND_SPRING) }
+            lift.animateTo(0f, LAND_SPRING)
+            if (liftKey == key) liftKey = null
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -320,14 +363,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             }
         }
         // The pieces that can play: a photo is a still, and waits for the slideshow way of showing them (P4).
-        val playable = p.clips.filter { vm.projectFile(it.file)?.kind == MediaKind.VIDEO }
+        val playable = p.clips.withIndex().filter { vm.projectFile(it.value.file)?.kind == MediaKind.VIDEO }
         if (playable.isNotEmpty()) {
             ProjectPreview(
                 vm, playable, play,
                 onPlayed = { play = null },
                 onPlaying = { playingNow = it },
                 // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
-                carrying = lifted != null,
+                carrying = heldKey != null,
             )
         }
         if (p.clips.isEmpty()) {
@@ -340,153 +383,91 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            // The strip is padded so any slot can sit under its middle — that middle is where a carried card lands,
-            // so the point of insertion never leaves the eye while the timeline slides (asked for on the phone, 07.11).
             Box(
                 Modifier.fillMaxWidth()
-                    // The strip's own height, not the overlays': the card in the hand is larger than a card of the
-                    // strip, and letting it size this box moved everything under the finger at the take.
+                    .padding(vertical = 6.dp)
                     .height(CARD_W / 1.5f + 2.dp)
-                    .onSizeChanged { stripW = it.width },
-            ) {
-                LazyRow(
-                    state = listState,
-                    // The whole strip draws smaller toward the point of insertion while a card is carried: one
-                    // transform for all of it, so nothing can shift between the cards as the slot passes them (a sum
-                    // per card ran away exactly when the slot moved). The layout is untouched: there is nothing to jump.
-                    modifier = Modifier.fillMaxWidth().graphicsLayer {
-                        scaleX = zoom
-                        scaleY = zoom
-                        transformOrigin = TransformOrigin(
-                            if (stripW > 0) (if (zoomAt > 0f) zoomAt else stripW / 2f) / stripW else 0.5f,
-                            0.5f,
+                    .onSizeChanged { stripW = it.width }
+                    .scrollable(scrollState, Orientation.Horizontal, enabled = !settling)
+                    // Inside the scroll: a long press wins over it, a plain swipe still scrolls the strip.
+                    .pointerInput(Unit) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { at -> take(at.x, at.y) },
+                            onDrag = { change, amount ->
+                                if (heldKey != null) {
+                                    change.consume()
+                                    fingerX += amount.x
+                                    fingerY += amount.y
+                                }
+                            },
+                            onDragEnd = { drop() },
+                            onDragCancel = { drop() },
                         )
                     },
-                    contentPadding = PaddingValues(horizontal = padNow),
-                    horizontalArrangement = Arrangement.spacedBy(CARD_GAP),
-                ) {
-                    items(display, key = { (i, _) -> "$i" }) { (i, clip) ->
-                        // The gesture lives on this wrapper, not on the card: a carried card leaves the strip (its
-                        // place becomes the empty slot), so a gesture bound to the card itself was cancelled the moment
-                        // the drag started. The wrapper keeps the item's identity; the live values are read right here.
-                        val shown by rememberUpdatedState(clip)
-                        val project by rememberUpdatedState(p)
-                        Column(
-                            Modifier.width(CARD_W)
-                                .clickable(enabled = clip != null) {
-                                    val c = shown ?: return@clickable
-                                    if (lifted != null) return@clickable
-                                    val f = vm.projectFile(c.file)
-                                    if (c.role == ProjectClip.Role.STILL) vm.viewing = f else play = c
+            ) {
+                if (heldKey != null) {
+                    // The empty place the card would land in: an outline the others part around.
+                    Box(
+                        Modifier
+                            .offset { IntOffset((geometry().center(gapAt.value, scroll) - cardWpx / 2f).roundToInt(), 0) }
+                            .graphicsLayer { scaleOf(false).let { scaleX = it; scaleY = it } }
+                            .width(CARD_W).height(CARD_W / 1.5f)
+                            .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f), RoundedCornerShape(8.dp)),
+                    )
+                }
+                p.clips.forEachIndexed { i, clip ->
+                    val k = keys[i]
+                    val base = baseSlot(i)
+                    if (base !in visible && k != liftKey) return@forEachIndexed
+                    key(k) {
+                        val anim = slots.getOrPut(k) { Animatable(base.toFloat()) }
+                        val held = k == heldKey
+                        LaunchedEffect(anim, base, held) {
+                            if (!held) anim.animateTo(base.toFloat(), PART_SPRING)
+                        }
+                        Box(
+                            Modifier
+                                // Read where the card is placed and drawn, never in the composition: the drag
+                                // moves only the drawing, sixty or a hundred and twenty times a second.
+                                .offset {
+                                    val lifted = k == liftKey
+                                    val x = if (k == heldKey) heldCenter() else geometry().center(anim.value, scroll)
+                                    val y = when {
+                                        k == heldKey -> ((fingerY - downY) * LIFT_FOLLOW_Y).coerceIn(-maxYpx, maxYpx)
+                                        lifted -> landY.value
+                                        else -> 0f
+                                    } - (if (lifted) risePx * lift.value else 0f)
+                                    IntOffset((x - cardWpx / 2f).roundToInt(), y.roundToInt())
                                 }
-                                .pointerInput(Unit) {
-                                    fun pitchNow() = with(density) { (CARD_W + CARD_GAP).toPx() }
-                                    fun padNow() = with(density) { maxOf(0.dp, (stripW.toDp() - CARD_W) / 2).toPx() }
-
-                                    fun drop() {
-                                        val c = lifted ?: return
-                                        val pr = project
-                                        val pitch = pitchNow()
-                                        val othersNow = pr.clips.withIndex().filter { it.index != carriedIdx }.map { it.value }
-                                        val scrolled = listState.firstVisibleItemIndex * pitch + listState.firstVisibleItemScrollOffset
-                                        val from = pr.sequence.indexOf(c)
-                                        val to = if (targetArray >= othersNow.size) pr.sequence.size - 1
-                                        else othersNow.getOrNull(targetArray)?.let { pr.sequence.indexOf(it) } ?: from
-                                        landing = Landing(c, heldX, stickY, padNow() + targetArray * pitch - scrolled)
-                                        if (from >= 0 && to >= 0 && to != from) vm.moveProjectClip(from, to)
-                                        lifted = null
-                                        // The flight's target is the slot's own place: nothing to log.
+                                .zIndex(if (k == liftKey) 1f else 0f)
+                                .graphicsLayer {
+                                    val lifted = k == liftKey
+                                    val s = scaleOf(lifted)
+                                    scaleX = s
+                                    scaleY = s
+                                    if (lifted) {
+                                        shadowElevation = LIFT_SHADOW.toPx() * lift.value
+                                        shape = RoundedCornerShape(6.dp)
                                     }
-
-                                    detectDragGesturesAfterLongPress(
-                                        onDragStart = { at ->
-                                            val c = shown
-                                            val pr = project
-                                            if (c != null && lifted == null && pr.sequence.indexOf(c) >= 0) {
-                                                val pitch = pitchNow()
-                                                val pad = padNow()
-                                                lifted = c
-                                                carriedIdx = i
-                                                stickPx = 0f
-                                                stickY = 0f
-                                                // A follow that is under way must not fight the stick.
-                                                scope.launch { listState.scrollBy(0f) }
-                                                targetArray = i
-                                                val scrolled = listState.firstVisibleItemIndex * pitch + listState.firstVisibleItemScrollOffset
-                                                heldX = pad + i * pitch + at.x - scrolled - with(density) { CARD_W.toPx() } / 2f
-                                                val cardW = with(density) { CARD_W.toPx() }
-                                                zoomAt = pad + i * pitch - scrolled + cardW / 2f
-                                                // The place of insertion starts where the card was taken: nothing moves under the
-                                                // finger at the take, and the timeline follows the place from there.
-                                                markerX = (pad + i * pitch - scrolled + cardW / 2f).coerceIn(stripW * 0.25f, stripW * 0.75f)
-                                                slotsFloat = 0f
-                                                // Nothing to log: the take is the state above.
-                                            }
-                                        },
-                                        onDrag = { _, amount ->
-                                            if (lifted != null) {
-                                                // The strip is drawn scaled: the finger's own movement is the local one
-                                                // times that scale, so the stick keeps the feel it had.
-                                                stickPx += amount.x * zoom
-                                                stickY = (stickY + amount.y * zoom).coerceIn(-320f, 320f)
-                                            }
-                                        },
-                                        onDragEnd = { drop() },
-                                        onDragCancel = { drop() },
-                                    )
+                                }
+                                .width(CARD_W)
+                                .clickable(enabled = !settling) {
+                                    val f = vm.projectFile(clip.file)
+                                    if (clip.role == ProjectClip.Role.STILL) vm.viewing = f else play = i
                                 },
                         ) {
-                            if (clip == null) {
-                                // The empty slot: the place the carried card will land in, parting the cards as it comes.
-                                Box(
-                                    Modifier.fillMaxWidth().height(96.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
-                                        .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp)),
-                                )
-                            } else {
-                                // «The file is not on the list any more» is only said when the list is complete: with
-                                // the camera away a file it holds is simply out of reach, not gone.
-                                ClipCard(
-                                    vm, p, clip, vm.projectFile(clip.file),
-                                    stale = clip in stale,
-                                    missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
-                                    width = CARD_W,
-                                    playing = clip == playingNow,
-                                    onEdit = { vm.viewing = vm.projectFile(clip.file) },
-                                )
-                            }
+                            // «The file is not on the list any more» is only said when the list is complete: with
+                            // the camera away a file it holds is simply out of reach, not gone.
+                            ClipCard(
+                                vm, p, clip, vm.projectFile(clip.file),
+                                stale = clip in stale,
+                                missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
+                                width = CARD_W,
+                                playing = i == playingNow,
+                                onEdit = { vm.viewing = vm.projectFile(clip.file) },
+                            )
                         }
                     }
-                }
-                if (lifted != null) {
-                    // The point of insertion: standing where the card was taken (leaning a little with the stick), with
-                    // the timeline following it, so it never leaves the eye.
-                    Box(
-                        Modifier.align(Alignment.Center)
-                            .offset { IntOffset((markerX + markerShift - stripW / 2f).roundToInt(), 0) }
-                            .width(3.dp).fillMaxHeight().background(MaterialTheme.colorScheme.primary),
-                    )
-                }
-                lifted?.let { clip ->
-                    // The card in the hand, half seen so the moving timeline shows through it; the finger may carry it
-                    // up or down as well, out of the way.
-                    HeldCard(
-                        vm, clip, vm.projectFile(clip.file),
-                        Modifier.offset { IntOffset(heldX.roundToInt(), stickY.roundToInt()) }.zIndex(2f),
-                    )
-                }
-                landing?.let { home ->
-                    // Coming down: the card goes to the slot it was carried to, shrinking to its size and fading as
-                    // the card standing there takes over.
-                    val x = home.fromX + (home.toX - home.fromX) * landGo.value
-                    val y = home.fromY * (1f - landGo.value)
-                    HeldCard(
-                        vm, home.clip, vm.projectFile(home.clip.file),
-                        Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.zIndex(3f),
-                        alpha = 0.72f * (1f - landGo.value),
-                        scale = 1.06f - 0.06f * landGo.value,
-                    )
                 }
             }
         }
@@ -539,7 +520,7 @@ private fun ClipCard(
                         // tapping the length opens it (asked for on the phone, 07.11).
                         .then(if (clip.role == ProjectClip.Role.STILL) Modifier.clickable { askingLength = true } else Modifier),
                     color = Color.White,
-                    fontSize = 9.sp,
+                    fontSize = 10.sp,
                 )
                 if (clip.auto) {
                     Text(
@@ -547,19 +528,21 @@ private fun ClipCard(
                         Modifier.padding(start = 3.dp).background(Color(0xAA0B6E4F), RoundedCornerShape(3.dp))
                             .padding(horizontal = 3.dp, vertical = 1.dp),
                         color = Color.White,
-                        fontSize = 9.sp,
+                        fontSize = 10.sp,
                     )
                 }
             }
             if (p.baseFile == clip.file) {
-                Text("★", Modifier.align(Alignment.BottomEnd).padding(2.dp), color = Color.White, fontSize = 11.sp)
+                Text("★", Modifier.align(Alignment.BottomEnd).padding(2.dp), color = Color.White, fontSize = 13.sp)
             }
-            // The pencil on the left, the cross on the right: opposite corners, so neither is hit by accident.
-            IconButton(onEdit, Modifier.align(Alignment.TopStart).size(20.dp)) {
-                Icon(Icons.Filled.Edit, tr("Править куски", "Edit pieces"), tint = Color.White, modifier = Modifier.size(12.dp))
+            // The pencil on the left, the cross on the right: opposite corners, so neither is hit by accident — and each
+            // of them is a good third of a card, since a card of the strip is small and a finger is not (asked for on
+            // the phone, 07.11: at 20 dp the pencil and the cross could not be hit at all).
+            IconButton(onEdit, Modifier.align(Alignment.TopStart).padding(2.dp).size(34.dp).background(Color(0x66000000), CircleShape)) {
+                Icon(Icons.Filled.Edit, tr("Править куски", "Edit pieces"), tint = Color.White, modifier = Modifier.size(18.dp))
             }
-            IconButton({ confirming = true }, Modifier.align(Alignment.TopEnd).size(20.dp)) {
-                Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(12.dp))
+            IconButton({ confirming = true }, Modifier.align(Alignment.TopEnd).padding(2.dp).size(34.dp).background(Color(0x66000000), CircleShape)) {
+                Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(18.dp))
             }
             // The file was edited since (its piece is gone) or is not on the list any more: say so rather than play it.
             if (missing || stale) {
@@ -646,63 +629,57 @@ private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile)
 }
 
 /**
- * The project's own clock, not the player's: a playlist reports the position inside the item being played, so the
- * whole timeline is put together from its windows — the pieces' real lengths as the player sees them. Returns the
- * absolute position in the project and its total (0 while the playlist hasn't said).
+ * The pieces' lengths as the playlist plays them: the player's own for the items it has prepared, the clip's range for
+ * the rest. media3 knows a length only once an item is prepared (the current one and the next), so a clock built from
+ * its windows alone grew as it played and a seek landed in the wrong piece.
  */
-private fun playerClock(player: Player): Pair<Long, Long> {
+private fun lengthsOf(player: Player, clips: List<ProjectClip>): List<Long> {
     val timeline = player.currentTimeline
-    // -1 stands for «nothing to say» (a playlist being put together): the pointer then stays where it was.
-    if (timeline.isEmpty) return -1L to 0L
     val window = Timeline.Window()
-    var before = 0L
-    var total = 0L
-    for (i in 0 until timeline.windowCount) {
-        timeline.getWindow(i, window)
-        val ms = window.durationMs
-        if (ms == C.TIME_UNSET) continue
-        if (i < player.currentMediaItemIndex) before += ms
-        total += ms
+    return clips.mapIndexed { i, clip ->
+        val known = if (i < timeline.windowCount) timeline.getWindow(i, window).durationMs else C.TIME_UNSET
+        if (known == C.TIME_UNSET || known <= 0L) clip.durationMs else known
     }
-    return (before + player.currentPosition.coerceAtLeast(0L)) to total
 }
 
-/** Seeks the playlist to an absolute time of the project's timeline: the window that holds it, then inside it. */
-private fun seekAbsolute(player: Player, atMs: Long) {
-    val timeline = player.currentTimeline
-    if (timeline.isEmpty) return
-    val window = Timeline.Window()
+/** The project's clock at [posMs] into item [index]: everything before it plus the position in it. */
+internal fun clockAt(lengths: List<Long>, index: Int, posMs: Long): Long =
+    lengths.take(index.coerceIn(0, lengths.size)).sum() + posMs.coerceAtLeast(0L)
+
+/** The item and the place in it that an absolute time of the project falls on (the end holds at the last item). */
+internal fun seekPoint(lengths: List<Long>, atMs: Long): Pair<Int, Long> {
+    if (lengths.isEmpty()) return 0 to 0L
     var left = atMs.coerceAtLeast(0L)
-    for (i in 0 until timeline.windowCount) {
-        timeline.getWindow(i, window)
-        val ms = window.durationMs
-        if (ms == C.TIME_UNSET || left <= ms) {
-            player.seekTo(i, left)
-            return
-        }
+    for ((i, ms) in lengths.withIndex()) {
+        if (left < ms || i == lengths.lastIndex) return i to left.coerceAtMost(ms)
         left -= ms
     }
+    return lengths.lastIndex to 0L
 }
 
 /**
  * The project's preview: the pieces in the order they will play, each cut to its own range. They are a media3 playlist
- * — the pieces one after another for now; the base with its cutaways needs the montage engine (P3). A camera file plays
- * its light copy over Wi-Fi and a phone copy plays itself — the same sources the viewer uses.
+ * ? the pieces one after another for now; the base with its cutaways needs the montage engine (P3). A camera file plays
+ * its light copy over Wi-Fi and a phone copy plays itself ? the same sources the viewer uses. A piece is known by its
+ * place in the project's clips ([clips] carries it), so the same piece put in twice is still two cards.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun ProjectPreview(
     vm: CameraController,
-    clips: List<ProjectClip>,
-    play: ProjectClip?,
+    clips: List<IndexedValue<ProjectClip>>,
+    play: Int?,
     onPlayed: () -> Unit,
-    onPlaying: (ProjectClip?) -> Unit,
+    onPlaying: (Int?) -> Unit,
     carrying: Boolean,
 ) {
     val context = LocalContext.current
-    // A piece whose file isn't around is left out of the playlist — and out of the numbering the cards seek by.
-    val items = clips.mapNotNull { clip -> vm.projectFile(clip.file)?.let { file -> clip to mediaItem(vm, clip, file) } }
-    val signature = items.joinToString("|") { "${it.first.file}:${it.first.fromMs}-${it.first.toMs}" }
+    // A piece whose file isn't around is left out of the playlist ? and out of the numbering the cards seek by.
+    val items = clips.mapNotNull { e -> vm.projectFile(e.value.file)?.let { file -> e to mediaItem(vm, e.value, file) } }
+    val signature = items.joinToString("|") { "${it.first.value.file}:${it.first.value.fromMs}-${it.first.value.toMs}" }
+    // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
+    val itemsNow by rememberUpdatedState(items)
+    val onPlayingNow by rememberUpdatedState(onPlaying)
     // The camera's own data source (its Wi-Fi is bound to this app) under the stock one: content and file URIs keep
     // going to the phone's own readers.
     val factory = remember(vm.conn) {
@@ -711,10 +688,20 @@ private fun ProjectPreview(
         else DefaultMediaSourceFactory(DefaultDataSource.Factory(context, camera))
     }
     val player = remember(factory) { ExoPlayer.Builder(context, factory).build().apply { playWhenReady = false } }
+    // What the player holds right now: its indices mean this list, not the one just composed.
+    val inPlayer = remember(player) { mutableListOf<IndexedValue<ProjectClip>>() }
+    // The same pieces in the same order, only their cards' places moved (a photo taken out before them): no rebuild,
+    // but the cards they stand for are the new ones.
+    SideEffect {
+        if (inPlayer.map { it.value } == items.map { it.first.value }) {
+            inPlayer.clear()
+            inPlayer.addAll(items.map { it.first })
+        }
+    }
     var playing by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf<Float?>(null) }
-    val totalMs = clips.sumOf { it.durationMs }
-    // The clock of the whole timeline: absolute milliseconds, and its total (the pieces' own lengths once known).
+    val totalMs = items.sumOf { it.first.value.durationMs }
+    // The clock of the whole timeline: absolute milliseconds, and its total.
     var shown by remember { mutableLongStateOf(0L) }
     var shownTotal by remember { mutableLongStateOf(totalMs) }
 
@@ -735,35 +722,34 @@ private fun ProjectPreview(
         if (carrying) player.pause()
     }
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
-    // clipping — a progressive source would play the whole file.
+    // clipping ? a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {
-        // A rebuild keeps the piece and the place: an edit re-cuts it, a drag only moves it along the order — the
-        // absolute time means nothing after a move (it used to drag the clock and the length about with it).
-        val wasClip = items.getOrNull(player.currentMediaItemIndex)?.first
+        // A rebuild keeps the piece and the place in it: the piece is looked up in the list the player held (its index
+        // meant that list), then found again in the new order ? a move or an addition must not jump to another piece.
+        val was = inPlayer.getOrNull(player.currentMediaItemIndex)?.value
         val wasAt = player.currentPosition.coerceAtLeast(0L)
         player.setMediaItems(items.map { it.second })
+        inPlayer.clear()
+        inPlayer.addAll(items.map { it.first })
         player.prepare()
-        val at = items.indexOfFirst { it.first == wasClip }
-        if (at >= 0) player.seekTo(at, minOf(wasAt, items[at].first.durationMs))
-        else if (wasAt > 0L) player.seekTo(minOf(wasAt, maxOf(totalMs, 1L)))
+        val at = if (was == null) -1 else items.indexOfFirst { it.first.value == was }
+        if (at >= 0) player.seekTo(at, minOf(wasAt, items[at].first.value.durationMs))
     }
-    // The clock follows the player whether or not it plays, and it never counts only the item being played: the strip
-    // shows the whole timeline (a seek on a pause used to snap back to the old spot too).
+    // The clock follows the player whether or not it plays, and it counts the whole timeline, not the item played.
     LaunchedEffect(player) {
         while (true) {
-            if (dragging == null) {
-                val (at, whole) = playerClock(player)
-                if (at >= 0L) shown = at
-                if (whole > 0L) shownTotal = whole
-            }
+            val now = inPlayer.toList()
+            val lengths = lengthsOf(player, now.map { it.value })
+            if (dragging == null && now.isNotEmpty()) shown = clockAt(lengths, player.currentMediaItemIndex, player.currentPosition)
+            shownTotal = if (lengths.isEmpty()) itemsNow.sumOf { it.first.value.durationMs } else lengths.sum()
             // Told to the screen: its card is marked in the strip and the strip follows it.
-            onPlaying(items.getOrNull(player.currentMediaItemIndex)?.first)
+            onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.index)
             delay(250)
         }
     }
     // A card tapped: the preview jumps to that piece and plays it (a photo never reaches the playlist).
     LaunchedEffect(play, signature) {
-        val at = items.indexOfFirst { it.first == play }
+        val at = inPlayer.indexOfFirst { it.index == play }
         if (at >= 0) {
             player.seekTo(at, 0L)
             player.play()
@@ -788,7 +774,8 @@ private fun ProjectPreview(
                 onValueChange = { dragging = it },
                 onValueChangeFinished = {
                     dragging?.let { ms ->
-                        seekAbsolute(player, ms.toLong())
+                        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.value }), ms.toLong())
+                        if (inPlayer.isNotEmpty()) player.seekTo(i, at)
                         shown = ms.toLong()
                     }
                     dragging = null
