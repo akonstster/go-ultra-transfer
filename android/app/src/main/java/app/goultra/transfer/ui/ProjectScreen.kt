@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -44,9 +45,26 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.Slider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.platform.LocalContext
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.delay
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.MediaKind
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
 
@@ -86,6 +104,9 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 )
             }
         }
+        // The pieces that can play: a photo is a still, and waits for the slideshow way of showing them (P4).
+        val playable = p.clips.filter { vm.projectFile(it.file)?.kind == MediaKind.VIDEO }
+        if (playable.isNotEmpty()) ProjectPreview(vm, playable)
         if (p.clips.isEmpty()) {
             Text(
                 tr(
@@ -198,5 +219,98 @@ private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: 
             },
             dismissButton = { TextButton({ confirming = false }) { Text(tr("Отмена", "Cancel")) } },
         )
+    }
+}
+
+/**
+ * The project's preview: the pieces in the order they will play, each cut to its own range. They are a media3 playlist
+ * — the pieces one after another for now; the base with its cutaways needs the montage engine (P3). A camera file plays
+ * its light copy over Wi-Fi and a phone copy plays itself — the same sources the viewer uses.
+ */
+@OptIn(UnstableApi::class)
+@Composable
+private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>) {
+    val context = LocalContext.current
+    val signature = clips.joinToString("|") { "${it.file}:${it.fromMs}-${it.toMs}" }
+    // The camera's own data source (its Wi-Fi is bound to this app) under the stock one: content and file URIs keep
+    // going to the phone's own readers.
+    val factory = remember(vm.conn) {
+        val camera = vm.previewSource()
+        if (camera == null) DefaultMediaSourceFactory(DefaultDataSource.Factory(context))
+        else DefaultMediaSourceFactory(DefaultDataSource.Factory(context, camera))
+    }
+    val player = remember(factory) { ExoPlayer.Builder(context, factory).build().apply { playWhenReady = false } }
+    var playing by remember { mutableStateOf(false) }
+    var position by remember { mutableIntStateOf(0) }
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val totalMs = clips.sumOf { it.durationMs }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                playing = isPlaying
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+        }
+    }
+    // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
+    // clipping — a progressive source would play the whole file.
+    LaunchedEffect(signature, factory) {
+        player.setMediaItems(
+            clips.mapNotNull { clip ->
+                val file = vm.projectFile(clip.file) ?: return@mapNotNull null
+                val uri = if (file.isOnPhone) file.localUri ?: clip.file else vm.previewUrl(file)
+                MediaItem.Builder()
+                    .setUri(uri)
+                    .setClippingConfiguration(
+                        MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs(clip.fromMs)
+                            .setEndPositionMs(clip.toMs)
+                            .build(),
+                    )
+                    .build()
+            },
+        )
+        player.prepare()
+    }
+    LaunchedEffect(playing) {
+        while (playing) {
+            position = player.currentPosition.toInt()
+            delay(250)
+        }
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        AndroidView(
+            factory = { ctx -> PlayerView(ctx).apply { useController = false; this.player = player } },
+            modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black),
+        )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton({ if (playing) player.pause() else player.play() }) {
+                Icon(
+                    if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    if (playing) tr("Пауза", "Pause") else tr("Играть", "Play"),
+                )
+            }
+            Slider(
+                value = dragging ?: position.toFloat(),
+                onValueChange = { dragging = it },
+                onValueChangeFinished = {
+                    dragging?.let { player.seekTo(it.toLong()) }
+                    dragging = null
+                },
+                valueRange = 0f..maxOf(totalMs, 1L).toFloat(),
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                formatDuration((position / 1000).toInt()) + " / " + formatDuration((totalMs / 1000).toInt()),
+                Modifier.padding(start = 8.dp),
+                fontSize = 12.sp,
+            )
+        }
     }
 }

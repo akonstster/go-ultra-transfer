@@ -134,10 +134,13 @@ fun GalleryScreen(
         }
     }
     val selectionCount = vm.selected.size
+    // A project open on its own screen is an editor: the app's top bar and the tabs step aside so the screen is all
+    // project (asked for on the phone, 07.11 — the save and export buttons will live in its own header).
+    val editor = vm.tab == Tab.PROJECTS && vm.seenProject != null
     Box(Modifier.fillMaxSize()) {
     Scaffold(
         topBar = {
-            TopAppBar(
+            if (!editor) TopAppBar(
                 title = { Text(if (selectionCount > 0) tr("Выбрано: %s", "Selected: %s").format(selectionCount) else "insta360 transfer") },
                 navigationIcon = {
                     if (selectionCount > 0) {
@@ -243,7 +246,7 @@ fun GalleryScreen(
         bottomBar = { if (vm.tab == Tab.FILES) BottomPanel(vm) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            TabRow(selectedTabIndex = vm.tab.ordinal) {
+            if (!editor) TabRow(selectedTabIndex = vm.tab.ordinal) {
                 Tab(vm.tab == Tab.FILES, { vm.tab = Tab.FILES; vm.touch() }, text = { Text(tr("Файлы", "Files")) })
                 Tab(vm.tab == Tab.CAMERA, { vm.tab = Tab.CAMERA; vm.touch() }, text = { Text(tr("Камера", "Camera")) })
                 Tab(vm.tab == Tab.PROJECTS, { vm.tab = Tab.PROJECTS; vm.touch() }, text = { Text(tr("Проекты", "Projects")) })
