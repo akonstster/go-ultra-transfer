@@ -3653,6 +3653,12 @@ class CameraController(private val app: Application) {
         f == null || (!f.isOnPhone && conn != ConnState.Connected)
     }
 
+    /** Whether any file of [p] has its colour set: that colour is kept only by a precise (re-encoded) save. */
+    fun projectHasColour(p: Project): Boolean = p.clips.map { it.file }.distinct().any { name ->
+        val f = projectFile(name) ?: return@any false
+        look(f)?.let { !it.isPlain(f.iLog ?: true) } ?: false
+    }
+
     /** Why the files of a project can't be joined as shot, in words. */
     private fun mismatchText(why: ClipMaker.Mismatch) = when (why) {
         ClipMaker.Mismatch.CODEC -> tr("разные кодеки", "different codecs")
@@ -3783,13 +3789,25 @@ class CameraController(private val app: Application) {
                 } ?: ExportSource(androidx.media3.common.MimeTypes.VIDEO_H264, 20_000_000, 1080, 0)
                 val w = firstVideo?.width ?: 1920
                 val h = firstVideo?.height ?: 1080
+                // Each file's own colour, as set in its viewer: the same effects a save with colour uses, per piece.
+                var table: CubeLut? = null
+                val colours = files.values.associate { f ->
+                    val look = look(f)
+                    val iLog = if (look != null) isILog(f) else false
+                    f.name to look?.takeIf { !it.isPlain(iLog) }?.let { l ->
+                        val lut = if (iLog && l.lut && l.strength > 0f) table ?: lut().also { table = it } else null
+                        exportEffects(lut, l, minOf(f.width ?: 1080, f.height ?: 1080))
+                    }.orEmpty()
+                }
                 val items = p.clips.map { c ->
                     val f = files.getValue(c.file)
+                    val colour = androidx.media3.transformer.Effects(emptyList(), colours[f.name].orEmpty())
                     if (c.role == ProjectClip.Role.STILL) {
                         val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f)).setImageDurationMs(c.durationMs).build()
                         androidx.media3.transformer.EditedMediaItem.Builder(media)
                             .setDurationUs(c.durationMs * 1000)
                             .setFrameRate(30)
+                            .setEffects(colour)
                             .build()
                     } else {
                         val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f))
@@ -3799,7 +3817,7 @@ class CameraController(private val app: Application) {
                                     .setEndPositionMs(c.toMs)
                                     .build(),
                             ).build()
-                        androidx.media3.transformer.EditedMediaItem.Builder(media).setRemoveAudio(!sound).build()
+                        androidx.media3.transformer.EditedMediaItem.Builder(media).setRemoveAudio(!sound).setEffects(colour).build()
                     }
                 }
                 val fit = androidx.media3.effect.Presentation.createForWidthAndHeight(w, h, androidx.media3.effect.Presentation.LAYOUT_SCALE_TO_FIT)
@@ -3815,7 +3833,8 @@ class CameraController(private val app: Application) {
                         java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
                     }
                 }
-                log("проект $name точно: ${items.size} кусков, ${w}×$h, ${source.mime}, ${bitrateText(source.bitrate)}, ${(System.currentTimeMillis() - startedAt) / 1000} с")
+                log("проект $name точно: ${items.size} кусков, ${w}×$h, ${source.mime}, ${bitrateText(source.bitrate)}, " +
+                    "с цветом ${colours.count { it.value.isNotEmpty() }} файлов, ${(System.currentTimeMillis() - startedAt) / 1000} с")
                 lastResult = tr("Проект сохранён: %s", "Project saved: %s").format(name)
                 forgetThumbnail(name)
                 lastSaveOk = true

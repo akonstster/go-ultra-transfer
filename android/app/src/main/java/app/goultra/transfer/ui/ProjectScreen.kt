@@ -153,7 +153,8 @@ fun ProjectScreen(vm: CameraController, p: Project) {
 @Composable
 private fun SaveProjectDialog(vm: CameraController, p: Project, onDismiss: () -> Unit) {
     val canCopy = ProjectExport.canCopy(p.clips)
-    var precise by remember { mutableStateOf(!canCopy) }
+    val coloured = remember(p.clips) { vm.projectHasColour(p) }
+    var precise by remember { mutableStateOf(!canCopy || coloured) }
     var sound by remember { mutableStateOf(true) }
     val away = vm.projectUnreachable(p)
     AlertDialog(
@@ -170,12 +171,16 @@ private fun SaveProjectDialog(vm: CameraController, p: Project, onDismiss: () ->
                     Column {
                         Text(tr("Быстро — как снято", "Fast — as shot"))
                         Text(
-                            if (canCopy) tr(
+                            if (!canCopy) tr("В проекте есть фото — только точно", "The project has photos — precise only")
+                            else if (coloured) tr(
+                                "Без перекодирования; цвет, настроенный в файлах, не сохранится",
+                                "No re-encoding; the colour set in the files is not kept",
+                            ) else tr(
                                 "Без перекодирования, качество оригинала; куски начинаются с ближайшего ключевого кадра",
                                 "No re-encoding, the original quality; clips start on the nearest key frame",
-                            ) else tr("В проекте есть фото — только точно", "The project has photos — precise only"),
+                            ),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (canCopy && coloured) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -188,8 +193,8 @@ private fun SaveProjectDialog(vm: CameraController, p: Project, onDismiss: () ->
                         Text(tr("Точно — с перекодированием", "Precise — re-encoded"))
                         Text(
                             tr(
-                                "Каждый кусок ровно по отметкам, фото — свою длину; заметно дольше",
-                                "Every clip exactly as marked, photos for their length; takes much longer",
+                                "Каждый кусок ровно по отметкам, с цветом файлов, фото — свою длину; заметно дольше",
+                                "Every clip exactly as marked, with the files' colour, photos for their length; takes much longer",
                             ),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
