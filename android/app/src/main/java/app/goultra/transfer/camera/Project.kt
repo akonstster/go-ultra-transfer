@@ -122,11 +122,6 @@ data class Project(
     /** Clips taken out by hand: an edit of their file must not bring them back (see [resynced]). */
     val hidden: List<ProjectClip> = emptyList(),
 ) {
-    /**
-     * The clips whose range their file no longer has at all (the file was re-edited on the phone since the clip was
-     * put in): the project screen marks them «кусок убран из файла» and drops them on one tap — see the plan §7.
-     * A file [pieces] says nothing about is left alone: not knowing is not a reason to call a clip gone.
-     */
     /** The cutaways: clips pinned to a moment of the base's own time ([ProjectClip.atMs]). */
     val covers: List<ProjectClip> get() = clips.filter { it.atMs != null }
 
@@ -183,6 +178,11 @@ data class Project(
         return copy(clips = clips.map { if (it.atMs == null) seq[i++] else it })
     }
 
+    /**
+     * The clips whose range their file no longer has at all (the file was re-edited on the phone since the clip was
+     * put in): the project screen marks them «кусок убран из файла» and drops them on one tap — see the plan §7.
+     * A file [pieces] says nothing about is left alone: not knowing is not a reason to call a clip gone.
+     */
     fun staleClips(pieces: Map<String, List<Highlight>>): List<ProjectClip> = clips.filter { clip ->
         // A photo is a still, not a range of a file's pieces: it can never be «gone from the file».
         if (clip.role == ProjectClip.Role.STILL) return@filter false

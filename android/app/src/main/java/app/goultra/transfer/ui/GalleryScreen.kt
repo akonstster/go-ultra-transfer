@@ -44,7 +44,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.RadioButton
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistRemove
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -610,7 +610,7 @@ private fun FileTile(
                 Modifier.align(Alignment.TopEnd).padding(5.dp).size(18.dp)
                     .background(Color(0xCC0B6E4F), CircleShape),
                 contentAlignment = Alignment.Center,
-            ) { Icon(Icons.Filled.PlaylistAdd, tr("В проекте", "In a project"), Modifier.size(12.dp), tint = Color.White) }
+            ) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, tr("В проекте", "In a project"), Modifier.size(12.dp), tint = Color.White) }
         }
         if (selected) {
             Box(Modifier.matchParentSizeOverlay())
@@ -718,7 +718,7 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
     var picking by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
     IconButton({ vm.reloadProjects(); picking = true }) {
-        Icon(Icons.Filled.PlaylistAdd, tr("В проект", "Add to project"), tint = MaterialTheme.colorScheme.primary)
+        Icon(Icons.AutoMirrored.Filled.PlaylistAdd, tr("В проект", "Add to project"), tint = MaterialTheme.colorScheme.primary)
     }
     if (picking) {
         AlertDialog(
