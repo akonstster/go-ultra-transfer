@@ -102,6 +102,47 @@ class ProjectTest {
     }
 
     @Test
+    fun `the clips of an edited file follow its new pieces`() {
+        val p = sample()
+        // The first file was edited in the film strip: one piece, in other words.
+        val edited = mapOf("VID_20261105_211421_165.mp4" to listOf(Highlight(2_000, 5_000)))
+        val next = p.resynced(edited)
+        assertEquals(listOf(2_000L, 5_000L), listOf(next.clips[0].fromMs, next.clips[0].toMs))
+        assertTrue(next.clips[0].auto)                          // still the auto montage's piece
+        assertEquals(p.clips[1], next.clips[1])                 // the other file's clips keep their place
+        assertEquals(3, next.clips.size)
+        // The pieces are what the project takes of that file now: nothing reads as «gone from the file».
+        assertTrue(next.staleClips(edited).isEmpty())
+        // A file edited down to nothing leaves the project, and the base goes with its last clip.
+        val emptied = p.resynced(mapOf("VID_20261105_193759_162.mp4" to emptyList()))
+        assertNull(emptied.baseFile)
+        assertEquals(listOf("VID_20261105_211421_165.mp4", "VID_20261105_201500_180.mp4"), emptied.clips.map { it.file })
+    }
+
+    @Test
+    fun `a clip taken out by hand does not come back with an edit`() {
+        val p = sample().copy(clips = sample().clips + ProjectClip("VID_20261105_211421_165.mp4", 6_000, 7_000))
+        val one = p.without(p.clips[3])                         // the second piece of the first file, dropped
+        assertEquals(3, one.clips.size)
+        val next = one.resynced(
+            mapOf(
+                "VID_20261105_211421_165.mp4" to
+                    listOf(Highlight(1_000, 4_000), Highlight(2_000, 5_000), Highlight(6_000, 7_000)),
+            ),
+        )
+        // The dropped piece stays dropped; the piece the edit added arrives; the others keep their place.
+        assertEquals(
+            listOf(
+                Triple("VID_20261105_211421_165.mp4", 1_000L, 4_000L),
+                Triple("VID_20261105_211421_165.mp4", 2_000L, 5_000L),
+                Triple("VID_20261105_193759_162.mp4", 0L, 12_000L),
+                Triple("VID_20261105_201500_180.mp4", 10_000L, 12_000L),
+            ),
+            next.clips.map { Triple(it.file, it.fromMs, it.toMs) },
+        )
+    }
+
+    @Test
     fun `an unknown enum or role written by a newer build falls back`() {
         val p = Project.decode("""{"id":"1-0001","name":"Тест","scenario":"NEXT_BIG_THING","dynamics":"WARP","clips":[{"file":"a.mp4","from":0,"to":100,"role":"HOLOGRAM"}]}""")
         assertNotNull(p)

@@ -119,6 +119,8 @@ data class Project(
     val music: ProjectMusic? = null,
     /** The clip list before the last auto montage («отменить авто» in the UI); null when there was none. */
     val previous: List<ProjectClip>? = null,
+    /** Clips taken out by hand: an edit of their file must not bring them back (see [resynced]). */
+    val hidden: List<ProjectClip> = emptyList(),
 ) {
     /**
      * The clips whose range their file no longer has at all (the file was re-edited on the phone since the clip was
@@ -137,7 +139,36 @@ data class Project(
      */
     fun without(clip: ProjectClip): Project {
         val left = clips.toMutableList().also { it.remove(clip) }
-        return copy(clips = left, baseFile = baseFile?.takeIf { base -> left.any { it.file == base } })
+        // The removal is remembered: an edit of that file's pieces must not bring the clip back (see [resynced]).
+        return copy(
+            clips = left,
+            hidden = (hidden + clip).distinct(),
+            baseFile = baseFile?.takeIf { base -> left.any { it.file == base } },
+        )
+    }
+
+    /**
+     * The project with the clips of the files edited on the phone brought in line with their pieces (the plan §7): the
+     * pieces of an edited file are what the project takes of it, put where that file's clips sit in the order. Files
+     * nobody edited stay as they are — the camera's marks are not ours to re-read, and an unreachable camera says
+     * nothing. A file edited down to nothing leaves the project; a clip taken out by hand stays out ([hidden]); the
+     * base goes with its last clip, as everywhere.
+     */
+    fun resynced(edited: Map<String, List<Highlight>>): Project {
+        var next = this
+        for ((name, pieces) in edited) {
+            val mine = next.clips.filter { it.file == name }
+            if (mine.isEmpty()) continue
+            val wanted = pieces
+                .filterNot { piece -> next.hidden.any { it.file == name && it.fromMs == piece.startMs && it.toMs == (piece.endMs ?: piece.startMs) } }
+                .map { ProjectClip(name, it.startMs, it.endMs ?: it.startMs, auto = mine.first().auto, role = mine.first().role) }
+            if (mine == wanted) continue
+            val at = next.clips.indexOfFirst { it.file == name }
+            val left = next.clips.filter { it.file != name }.toMutableList()
+            left.addAll(at, wanted)
+            next = next.copy(clips = left, baseFile = next.baseFile?.takeIf { base -> left.any { it.file == base } })
+        }
+        return next
     }
 
     /**
@@ -175,6 +206,7 @@ data class Project(
             put("clips", JSONArray().apply { p.clips.forEach { put(it.toJson()) } })
             p.music?.let { put("music", it.toJson()) }
             p.previous?.let { prev -> put("previous", JSONArray().apply { prev.forEach { put(it.toJson()) } }) }
+            if (p.hidden.isNotEmpty()) put("hidden", JSONArray().apply { p.hidden.forEach { put(it.toJson()) } })
         }.toString()
 
         /** null when the text isn't a project (a broken file): the caller skips it rather than crashing. */
@@ -192,6 +224,7 @@ data class Project(
                 baseFile = o.optString("base").takeIf { it.isNotEmpty() },
                 music = o.optJSONObject("music")?.let(ProjectMusic::from),
                 previous = o.optJSONArray("previous")?.let(::clipsOf),
+                hidden = clipsOf(o.optJSONArray("hidden")),
             )
         }
 

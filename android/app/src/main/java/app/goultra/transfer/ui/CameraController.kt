@@ -3175,6 +3175,16 @@ class CameraController(private val app: Application) {
         seenProject?.let { saveProject(it.without(clip)) }
     }
 
+    /**
+     * The pieces edited in the file editor are the truth for their file: the open project takes them on the spot, so a
+     * piece added, dropped or re-cut in the film strip shows in the project at once, and a clip is never left reading
+     * «gone from the file» after its own file was edited (asked for on the phone, 07.11).
+     */
+    fun resyncProjectClips(edited: Map<String, List<Highlight>>) {
+        if (edited.isEmpty()) return
+        seenProject?.let { open -> open.resynced(edited).takeIf { it != open }?.let(::saveProject) }
+    }
+
     /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
     fun projectFile(name: String): CameraFile? =
         files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name }
@@ -3219,7 +3229,11 @@ class CameraController(private val app: Application) {
                     }
                 }
             }
-            if (added.isNotEmpty()) saveProject(p.copy(clips = p.clips + added))
+            // Added again on purpose: pieces taken out of that file by hand are welcome back.
+            if (added.isNotEmpty()) {
+                val names = added.map { it.file }.toSet()
+                saveProject(p.copy(clips = p.clips + added, hidden = p.hidden.filterNot { it.file in names }))
+            }
             message = tr("В «%s»: +%s кусков", "Into «%s»: +%s clips").format(p.name, added.size) +
                 if (skipped > 0) tr(", %s без длины пропущено", ", %s without a duration skipped").format(skipped) else ""
         }

@@ -68,6 +68,12 @@ import app.goultra.transfer.camera.MediaKind
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
 
+/** The files' pieces as they stand ([all]), and the same for the files edited on the phone ([edited]). */
+private data class FilePieces(
+    val all: Map<String, List<Highlight>>,
+    val edited: Map<String, List<Highlight>>,
+)
+
 /**
  * A project's own screen: the pieces it is made of, in the order they will play (see `memory-bank/projects-plan.md`).
  * Dragging the cards around, the base with its cutaways, the preview and the export come next; the file behind a piece
@@ -75,17 +81,23 @@ import app.goultra.transfer.camera.ProjectClip
  */
 @Composable
 fun ProjectScreen(vm: CameraController, p: Project) {
-    // The files' pieces as they stand: a clip whose range is gone from its file is marked (plan §7). Re-read on opening
-    // and after every edit in the file editor ([CameraController.piecesVersion]).
-    val pieces by produceState<Map<String, List<Highlight>>>(emptyMap(), p.id, p.clips.size, vm.piecesVersion) {
-        value = p.clips.map { it.file }.distinct().mapNotNull { name ->
-            vm.projectFile(name)?.let { f ->
-                val limit = f.durationSec?.let { (it + 1) * 1000L }
-                name to Highlights.inEffect(vm.editedPieces(f), vm.highlights(f), limit, f.durationSec?.let { it * 1000L })
-            }
-        }.toMap()
+    // The files' pieces as they stand, and the files edited on the phone apart: the project's clips follow those edits
+    // (resync below). Re-read on opening and after every edit in the film strip ([CameraController.piecesVersion]).
+    val loaded by produceState<FilePieces>(FilePieces(emptyMap(), emptyMap()), p.id, p.clips.size, vm.piecesVersion) {
+        val all = mutableMapOf<String, List<Highlight>>()
+        val edited = mutableMapOf<String, List<Highlight>>()
+        for (name in p.clips.map { it.file }.distinct()) {
+            val f = vm.projectFile(name) ?: continue
+            val limit = f.durationSec?.let { (it + 1) * 1000L }
+            val own = vm.editedPieces(f)
+            all[name] = Highlights.inEffect(own, vm.highlights(f), limit, f.durationSec?.let { it * 1000L })
+            if (own != null) edited[name] = all.getValue(name)
+        }
+        value = FilePieces(all, edited)
     }
-    val stale = remember(pieces, p.clips) { p.staleClips(pieces).toSet() }
+    // A piece added, dropped or re-cut in the film strip is what the project takes of that file from then on (§7).
+    LaunchedEffect(loaded.edited) { vm.resyncProjectClips(loaded.edited) }
+    val stale = remember(loaded.all, p.clips) { p.staleClips(loaded.all).toSet() }
     val totalMs = p.clips.sumOf { it.durationMs }
 
     Column(Modifier.fillMaxSize()) {
@@ -260,6 +272,8 @@ private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>) {
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {
+        // Pieces changing under the preview (an edit in the film strip re-cuts them) must not lose the place.
+        val at = player.currentPosition.coerceAtLeast(0L)
         player.setMediaItems(
             clips.mapNotNull { clip ->
                 val file = vm.projectFile(clip.file) ?: return@mapNotNull null
@@ -276,10 +290,12 @@ private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>) {
             },
         )
         player.prepare()
+        if (at > 0L) player.seekTo(minOf(at, maxOf(totalMs, 1L)))
     }
-    LaunchedEffect(playing) {
-        while (playing) {
-            position = player.currentPosition.toInt()
+    // The clock follows the player whether or not it plays: a seek on a pause used to snap back to the old position.
+    LaunchedEffect(player) {
+        while (true) {
+            if (dragging == null) position = player.currentPosition.toInt()
             delay(250)
         }
     }
@@ -300,7 +316,10 @@ private fun ProjectPreview(vm: CameraController, clips: List<ProjectClip>) {
                 value = dragging ?: position.toFloat(),
                 onValueChange = { dragging = it },
                 onValueChangeFinished = {
-                    dragging?.let { player.seekTo(it.toLong()) }
+                    dragging?.let {
+                        player.seekTo(it.toLong())
+                        position = it.toInt()
+                    }
                     dragging = null
                 },
                 valueRange = 0f..maxOf(totalMs, 1L).toFloat(),
