@@ -3180,6 +3180,13 @@ class CameraController(private val app: Application) {
         seenProject?.let { saveProject(it.movedSequence(from, to)) }
     }
 
+    /** A still's length in the project, set by hand from its card (the slider opens on the length of a photo). */
+    fun setClipLength(clip: ProjectClip, ms: Long) {
+        seenProject?.let { p ->
+            saveProject(p.copy(clips = p.clips.map { if (it == clip) it.copy(toMs = it.fromMs + ms) else it }))
+        }
+    }
+
     /**
      * The pieces edited in the file editor are the truth for their file: the open project takes them on the spot, so a
      * piece added, dropped or re-cut in the film strip shows in the project at once, and a clip is never left reading

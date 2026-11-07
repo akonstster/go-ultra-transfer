@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -57,7 +58,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Slider
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -68,6 +69,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -125,6 +127,23 @@ private fun HeldCard(vm: CameraController, clip: ProjectClip, file: CameraFile?,
 private val CARD_W = 150.dp
 private val CARD_GAP = 10.dp
 
+/** How much the cards recede while one is carried: five or six of them across a phone screen. */
+private const val DRAG_SCALE = 0.45f
+
+/**
+ * The stick's speed in px/s: nothing inside the middle, then the further the finger is from where the card was taken
+ * the faster the timeline slides, capped so a long move stays controllable — a transmitter stick, not a drag.
+ */
+private fun stickSpeed(offsetPx: Float): Float {
+    val dead = 24f
+    val full = 150f
+    val capped = 900f
+    val away = abs(offsetPx)
+    if (away <= dead) return 0f
+    val ramp = ((away - dead) / (full - dead)).coerceIn(0f, 1f)
+    return ramp * capped * (if (offsetPx > 0f) 1f else -1f)
+}
+
 /**
  * A project's own screen: the pieces it is made of, in the order they will play (see `memory-bank/projects-plan.md`).
  * Dragging the cards around, the base with its cutaways, the preview and the export come next; the file behind a piece
@@ -157,9 +176,24 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var heldFrom by remember(p.id) { mutableIntStateOf(-1) }
     var targetArray by remember(p.id) { mutableIntStateOf(-1) }
     var scrollPx by remember(p.id) { mutableFloatStateOf(0f) }
+    var stickPx by remember(p.id) { mutableFloatStateOf(0f) }
     var heldX by remember(p.id) { mutableFloatStateOf(0f) }
     val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
+    // The stick's own loop: near the middle nothing happens, further out the timeline slides under the card in the
+    // hand. The calls to scroll by it are kept here, so the drag itself only remembers where the finger is.
+    val dragPitch = with(LocalDensity.current) { ((CARD_W + CARD_GAP) * DRAG_SCALE).toPx() }
+    LaunchedEffect(lifted, dragPitch) {
+        while (lifted != null) {
+            val speed = stickSpeed(stickPx)
+            if (speed != 0f) {
+                val step = speed * 0.016f
+                scrollPx += step
+                targetArray = (heldFrom + (scrollPx / dragPitch).roundToInt()).coerceIn(0, p.clips.size - 1)
+                listState.scrollBy(-step)
+            }
+            delay(16)
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -206,12 +240,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                     itemsIndexed(p.clips, key = { i, c -> "$i-${c.file}-${c.fromMs}" }) { i, clip ->
                         // «The file is not on the list any more» is only said when the list is complete: with the
                         // camera away a file it holds is simply out of reach, not gone.
-                        val shrink by animateFloatAsState(if (lifted != null && lifted != clip) 0.72f else 1f)
+                        // Carried: the others recede into smaller cards (five or six to a screen) and lay themselves out
+                        // that way, so the timeline really fits the eye; the slot a card was taken from stays a ghost.
+                        val w by animateDpAsState(if (lifted != null && lifted != clip) CARD_W * DRAG_SCALE else CARD_W)
                         ClipCard(
                             vm, p, clip, vm.projectFile(clip.file),
                             stale = clip in stale,
                             missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
-                            scale = shrink,
+                            width = w,
                             alpha = if (lifted == clip) 0.25f else 1f,
                             target = lifted != null && i == targetArray,
                             // Tapping plays the piece in the preview; a photo has nothing to play, so it opens instead.
@@ -228,16 +264,15 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                                     heldFrom = i
                                     targetArray = i
                                     scrollPx = 0f
+                                    stickPx = 0f
                                     // The held card is centred under the finger, where it was taken.
                                     heldX = edge + i * pitch + localX - scrolled - cardW / 2f
                                 }
                             },
                             onDrag = { dx ->
-                                if (lifted == clip) {
-                                    scrollPx += dx
-                                    targetArray = (heldFrom + (scrollPx / pitch).roundToInt()).coerceIn(0, p.clips.size - 1)
-                                    scope.launch { listState.scrollBy(-dx) }
-                                }
+                                // The card is a transmitter stick: where the finger is (not how it moves) drives the
+                                // slide — the loop above does the moving.
+                                if (lifted == clip) stickPx += dx
                             },
                             onDragEnd = {
                                 if (lifted == clip) {
@@ -274,7 +309,7 @@ private fun ClipCard(
     file: CameraFile?,
     stale: Boolean,
     missing: Boolean,
-    scale: Float,
+    width: Dp,
     alpha: Float,
     target: Boolean,
     onTap: () -> Unit,
@@ -284,6 +319,7 @@ private fun ClipCard(
     onDragEnd: () -> Unit,
 ) {
     var confirming by remember { mutableStateOf(false) }
+    var askingLength by remember { mutableStateOf(false) }
     val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs, clip.role) {
         value = file?.let {
             // A photo is not a video with a frame at a time: it has its own tile picture.
@@ -291,10 +327,8 @@ private fun ClipCard(
         }
     }
     Column(
-        Modifier.width(CARD_W).graphicsLayer {
-            // While one card is carried, the others recede; the slot it came from keeps its place as a ghost.
-            scaleX = scale
-            scaleY = scale
+        Modifier.width(width).graphicsLayer {
+            // The slot a carried card came from keeps its place as a ghost.
             this.alpha = alpha
         },
     ) {
@@ -317,7 +351,12 @@ private fun ClipCard(
             Row(Modifier.align(Alignment.BottomStart).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     formatDuration((clip.durationMs / 1000).toInt()),
-                    Modifier.background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                    Modifier
+                        .background(Color(0x99000000), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                        // A still has neither sound nor movement to play: its length is what its card is about, and
+                        // tapping the length opens it (asked for on the phone, 07.11).
+                        .then(if (clip.role == ProjectClip.Role.STILL) Modifier.clickable { askingLength = true } else Modifier),
                     color = Color.White,
                     fontSize = 11.sp,
                 )
@@ -381,6 +420,32 @@ private fun ClipCard(
                 ) { Text(tr("Убрать", "Remove")) }
             },
             dismissButton = { TextButton({ confirming = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
+    }
+    // A photo has neither sound nor movement: how long it stays in the project is set here, from its own card.
+    if (askingLength) {
+        var seconds by remember(clip) { mutableFloatStateOf((clip.durationMs / 1000f).coerceIn(1f, 10f)) }
+        AlertDialog(
+            onDismissRequest = { askingLength = false },
+            icon = { Icon(Icons.Filled.Edit, null) },
+            title = { Text(tr("Длительность показа фото", "On screen for")) },
+            text = {
+                Column {
+                    Text(tr("%s с", "%s s").format("%.1f".format(seconds).trimEnd('0').trimEnd('.')))
+                    Slider(
+                        value = seconds,
+                        onValueChange = { seconds = it },
+                        valueRange = 1f..10f,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton({ vm.setClipLength(clip, (seconds * 1000f).toLong()); askingLength = false }) {
+                    Text(tr("Готово", "Done"))
+                }
+            },
+            dismissButton = { TextButton({ askingLength = false }) { Text(tr("Отмена", "Cancel")) } },
         )
     }
 }

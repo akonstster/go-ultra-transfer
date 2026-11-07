@@ -453,6 +453,8 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Only this piece leaves the project. The file itself stays on the camera and on the phone — nothing is deleted." to "只会把这一个片段从项目里移除。文件本身留在相机和手机上，什么也不会删除。",
     "Remove" to "移除",
     "In a project" to "已在项目中",
+    "On screen for" to "照片显示时长",
+    "%s s" to "%s 秒",
     "Rotation" to "旋转",
     "Shutter" to "快门",
     "Size" to "大小",
