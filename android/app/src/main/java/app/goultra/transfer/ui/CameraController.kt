@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.LruCache
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -3115,6 +3116,7 @@ class CameraController(private val app: Application) {
     /** [pieces] null: back to the camera's marks. */
     fun savePieces(file: CameraFile, pieces: List<Highlight>?) {
         piecePrefs.edit().apply { if (pieces == null) remove(file.name) else putString(file.name, Highlights.encode(pieces)) }.apply()
+        piecesVersion++
     }
 
     fun clipName(file: CameraFile, n: Int = 1): String = file.stem + "_HL" + (if (n > 1) "$n" else "") + ".mp4"
@@ -3135,10 +3137,37 @@ class CameraController(private val app: Application) {
     /** A new, empty project (see `memory-bank/projects-plan.md`); the tab calls [reloadProjects] before showing it. */
     fun createProject(name: String): Project = projectStore.create(name.trim()).also { reloadProjects() }
 
-    fun saveProject(p: Project) {
+    /** Saves the project and gives it back: the callers keep their own copy in step (the open project screen). */
+    fun saveProject(p: Project): Project {
         projectStore.save(p)
         reloadProjects()
+        return p
     }
+
+    /** The project open on its own screen (null: the list is showing). */
+    var seenProject by mutableStateOf<Project?>(null)
+        private set
+
+    /** Bumped by every piece edit: the open project re-reads the files' pieces and refreshes its marks (plan §7). */
+    var piecesVersion by mutableIntStateOf(0)
+        private set
+
+    fun showProject(p: Project) {
+        seenProject = p
+    }
+
+    fun closeProject() {
+        seenProject = null
+    }
+
+    /** The ✕ on a card: the clip leaves the project; the base goes with its last clip (see [Project.without]). */
+    fun removeProjectClip(clip: ProjectClip) {
+        seenProject?.let { seenProject = saveProject(it.without(clip)) }
+    }
+
+    /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
+    fun projectFile(name: String): CameraFile? =
+        files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name }
 
     fun renameProject(p: Project, name: String) {
         projectStore.rename(p, name.trim())

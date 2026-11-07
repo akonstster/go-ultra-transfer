@@ -131,6 +131,27 @@ data class Project(
     /** The clips that run one after another: the timeline of a project without a base. */
     val sequence: List<ProjectClip> get() = clips.filter { it.atMs == null }
 
+    /**
+     * The project without that clip (the ✕ on its card). The base goes too when its last clip is gone: nothing would
+     * hold the timeline then, and a base without clips is only a name.
+     */
+    fun without(clip: ProjectClip): Project {
+        val left = clips.toMutableList().also { it.remove(clip) }
+        return copy(clips = left, baseFile = baseFile?.takeIf { base -> left.any { it.file == base } })
+    }
+
+    /**
+     * The sequence with the clip at [from] moved to [to] (dragging a card along the strip); cutaways keep their
+     * moment, so they stay where they are in [clips].
+     */
+    fun movedSequence(from: Int, to: Int): Project {
+        val seq = sequence.toMutableList()
+        if (from !in seq.indices || to !in seq.indices || from == to) return this
+        seq.add(to, seq.removeAt(from))
+        var i = 0
+        return copy(clips = clips.map { if (it.atMs == null) seq[i++] else it })
+    }
+
     fun staleClips(pieces: Map<String, List<Highlight>>): List<ProjectClip> = clips.filter { clip ->
         pieces[clip.file]?.let { parts ->
             parts.none { part -> part.startMs <= clip.fromMs && clip.toMs <= (part.endMs ?: part.startMs) }

@@ -61,7 +61,7 @@ fun ProjectsTab(vm: CameraController) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(vm.projects, key = { it.id }) { p ->
-                    ProjectCard(p, onRename = { renaming = p }, onDelete = { deleting = p })
+                    ProjectCard(p, onOpen = { vm.showProject(p) }, onRename = { renaming = p }, onDelete = { deleting = p })
                 }
             }
         }
@@ -111,9 +111,14 @@ fun ProjectsTab(vm: CameraController) {
 
 /** One project in the list: its name, what it holds today, and the two things that don't need the project screen. */
 @Composable
-private fun ProjectCard(p: Project, onRename: () -> Unit, onDelete: () -> Unit) {
+private fun ProjectCard(p: Project, onOpen: () -> Unit, onRename: () -> Unit, onDelete: () -> Unit) {
     val seconds = (p.clips.sumOf { it.durationMs } / 1000).toInt()
-    Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        tonalElevation = 2.dp,
+        shape = MaterialTheme.shapes.medium,
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         Row(
             Modifier.padding(start = 16.dp, top = 8.dp, end = 4.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,

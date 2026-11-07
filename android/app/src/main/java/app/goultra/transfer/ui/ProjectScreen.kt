@@ -1,0 +1,162 @@
+package app.goultra.transfer.ui
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import app.goultra.transfer.camera.CameraFile
+import app.goultra.transfer.camera.Highlight
+import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.ProjectClip
+
+/**
+ * A project's own screen: the pieces it is made of, in the order they will play (see `memory-bank/projects-plan.md`).
+ * Dragging the cards around, the base with its cutaways, the preview and the export come next; the file behind a piece
+ * is edited in the usual film strip — the card opens it.
+ */
+@Composable
+fun ProjectScreen(vm: CameraController, p: Project) {
+    // The files' pieces as they stand: a clip whose range is gone from its file is marked (plan §7). Re-read on opening
+    // and after every edit in the file editor ([CameraController.piecesVersion]).
+    val pieces by produceState<Map<String, List<Highlight>>>(emptyMap(), p.id, p.clips.size, vm.piecesVersion) {
+        value = p.clips.map { it.file }.distinct().mapNotNull { name ->
+            vm.projectFile(name)?.let { f ->
+                val limit = f.durationSec?.let { (it + 1) * 1000L }
+                name to (vm.editedPieces(f) ?: Highlights.pieces(vm.highlights(f), limit))
+            }
+        }.toMap()
+    }
+    val stale = remember(pieces, p.clips) { p.staleClips(pieces).toSet() }
+    val totalMs = p.clips.sumOf { it.durationMs }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 4.dp, top = 4.dp, end = 16.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(vm::closeProject) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("Назад", "Back")) }
+            Column(Modifier.weight(1f)) {
+                Text(p.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    tr("%s кусков", "%s clips").format(p.clips.size) + " · " +
+                        tr("Всего %s", "%s total").format(formatDuration((totalMs / 1000).toInt())),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (p.clips.isEmpty()) {
+            Text(
+                tr(
+                    "Пусто: добавьте файлы из списка кнопкой «В проект»",
+                    "Empty: add files from the list with «Add to project»",
+                ),
+                Modifier.padding(32.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            LazyRow(
+                Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                itemsIndexed(p.clips, key = { i, c -> "$i-${c.file}-${c.fromMs}" }) { _, clip ->
+                    ClipCard(vm, p, clip, vm.projectFile(clip.file), clip in stale)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One piece of the project: its frame, how long it plays, whether the auto montage put it there, and its ✕. The card
+ * opens the file — the piece itself is edited in the usual film strip, and the project picks the edit up (§7).
+ */
+@Composable
+private fun ClipCard(vm: CameraController, p: Project, clip: ProjectClip, file: CameraFile?, stale: Boolean) {
+    val thumb by produceState<ImageBitmap?>(null, clip.file, clip.fromMs) {
+        value = file?.let { vm.timelineFrame(it, clip.fromMs) }
+    }
+    Column(Modifier.width(150.dp)) {
+        Box(
+            Modifier.fillMaxWidth().height(96.dp).clip(RoundedCornerShape(10.dp))
+                .background(Color(0x22000000))
+                .clickable(enabled = file != null) { vm.viewing = file },
+        ) {
+            thumb?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+            Text(
+                formatDuration((clip.durationMs / 1000).toInt()),
+                Modifier.align(Alignment.BottomStart).padding(4.dp)
+                    .background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                color = Color.White,
+                fontSize = 11.sp,
+            )
+            if (clip.auto) {
+                Text(
+                    tr("Авто", "Auto"),
+                    Modifier.align(Alignment.TopStart).padding(4.dp)
+                        .background(Color(0xAA0B6E4F), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                )
+            }
+            if (p.baseFile == clip.file) {
+                Text("★", Modifier.align(Alignment.BottomEnd).padding(4.dp), color = Color.White, fontSize = 14.sp)
+            }
+            IconButton({ vm.removeProjectClip(clip) }, Modifier.align(Alignment.TopEnd).size(28.dp)) {
+                Icon(Icons.Filled.Close, tr("Убрать кусок", "Remove the clip"), tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+            // The file was edited since (its piece is gone) or is not around any more: say so rather than play it.
+            if (file == null || stale) {
+                Box(Modifier.fillMaxSize().background(Color(0xAA7F1D1D)), contentAlignment = Alignment.Center) {
+                    Text(
+                        if (file == null) tr("Файла больше нет в списке", "The file is not on the list any more")
+                        else tr("Кусок убран из файла", "The file no longer has this piece"),
+                        Modifier.padding(8.dp),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(file?.stem ?: clip.file, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}

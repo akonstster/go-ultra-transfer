@@ -75,6 +75,33 @@ class ProjectTest {
     }
 
     @Test
+    fun `a removed clip goes, and the base goes with its last clip`() {
+        val p = sample()
+        // The cutaway is no part of the timeline's own length: only two clips are left.
+        assertEquals(2, p.without(p.clips.last()).clips.size)
+        // The base's clip is what holds the timeline: remove it and the base goes too.
+        val noBaseClip = p.without(p.clips[1])
+        assertNull(noBaseClip.baseFile)
+        assertEquals(listOf("VID_20261105_211421_165.mp4", "VID_20261105_201500_180.mp4"), noBaseClip.clips.map { it.file })
+    }
+
+    @Test
+    fun `the sequence moves and cutaways keep their moment`() {
+        val p = sample().copy(
+            clips = listOf(
+                ProjectClip("a.mp4", 0, 1_000),
+                ProjectClip("b.mp4", 0, 1_000),
+                ProjectClip("d.mp4", 0, 1_000),
+                ProjectClip("c.mp4", 0, 1_000, atMs = 5_000),
+            ),
+        )
+        assertEquals(listOf("b.mp4", "d.mp4", "a.mp4", "c.mp4"), p.movedSequence(0, 2).clips.map { it.file })
+        assertEquals(listOf("d.mp4", "a.mp4", "b.mp4", "c.mp4"), p.movedSequence(2, 0).clips.map { it.file })
+        assertEquals(p, p.movedSequence(9, 0))          // out of range: untouched
+        assertEquals(p, p.movedSequence(1, 1))          // no move
+    }
+
+    @Test
     fun `an unknown enum or role written by a newer build falls back`() {
         val p = Project.decode("""{"id":"1-0001","name":"Тест","scenario":"NEXT_BIG_THING","dynamics":"WARP","clips":[{"file":"a.mp4","from":0,"to":100,"role":"HOLOGRAM"}]}""")
         assertNotNull(p)
