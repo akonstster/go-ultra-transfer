@@ -41,9 +41,19 @@ object ClipMaker {
         pieces: List<Highlight>,
         write: (track: Int, clipUs: Long, sync: Boolean) -> Unit,
         onProgress: (Long) -> Unit = {},
-    ): List<Highlight> {
+    ): List<Highlight> = cutAt(src, video, pieces, 0L, write, onProgress).first
+
+    /** [cut] with the clip's time starting at [baseUs] (a source after others); also returns where the clip now ends. */
+    private fun cutAt(
+        src: Samples,
+        video: Int,
+        pieces: List<Highlight>,
+        baseUs: Long,
+        write: (track: Int, clipUs: Long, sync: Boolean) -> Unit,
+        onProgress: (Long) -> Unit,
+    ): Pair<List<Highlight>, Long> {
         val out = mutableListOf<Highlight>()
-        var base = 0L // clip time where this piece starts
+        var base = baseUs // clip time where this piece starts
         var prevEnd = -1L // source time where the previous piece ended (its first frame not taken)
         var reordered = false // B-frames seen: then a piece may only end on a key frame
         for (piece in pieces) {
@@ -93,7 +103,121 @@ object ClipMaker {
             base += cutEnd - cutStart
             prevEnd = cutEnd
         }
-        return out
+        return out to base
+    }
+
+    /** What two files must share to be joined into one clip without re-encoding: one track format for all of them. */
+    data class Signature(
+        val videoMime: String,
+        val width: Int,
+        val height: Int,
+        val rotation: Int,
+        /** The codec's own set-up (SPS/PPS…): a different one means the decoder would read the joined frames wrong. */
+        val videoSetup: String,
+        val audioMime: String?,
+        val sampleRate: Int,
+        val channels: Int,
+    )
+
+    /** Why one file cannot follow another in a clip made without re-encoding. */
+    enum class Mismatch { CODEC, SIZE, ROTATION, SETUP, SOUND }
+
+    /** Why [b] cannot follow [a] in a clip made without re-encoding (null: it can). */
+    fun mismatch(a: Signature, b: Signature): Mismatch? = when {
+        a.videoMime != b.videoMime -> Mismatch.CODEC
+        a.width != b.width || a.height != b.height -> Mismatch.SIZE
+        a.rotation != b.rotation -> Mismatch.ROTATION
+        a.videoSetup != b.videoSetup -> Mismatch.SETUP
+        a.audioMime != b.audioMime || a.sampleRate != b.sampleRate || a.channels != b.channels -> Mismatch.SOUND
+        else -> null
+    }
+
+    /** Thrown by [joinAll] when a file's formats differ from the first one's: [piece] (from 1) and why. */
+    class MismatchException(val piece: Int, val why: Mismatch) : IllegalStateException("кусок $piece: $why")
+
+    private fun MediaFormat.int(key: String) = if (containsKey(key)) getInteger(key) else 0
+
+    private fun signature(v: MediaFormat, a: MediaFormat?): Signature {
+        val setup = listOf("csd-0", "csd-1").mapNotNull { key ->
+            v.getByteBuffer(key)?.let { b -> ByteArray(b.remaining()).also { b.duplicate().get(it) }.contentHashCode() }
+        }.joinToString(":")
+        return Signature(
+            v.getString(MediaFormat.KEY_MIME).orEmpty(), v.int(MediaFormat.KEY_WIDTH), v.int(MediaFormat.KEY_HEIGHT),
+            v.int(MediaFormat.KEY_ROTATION), setup,
+            a?.getString(MediaFormat.KEY_MIME), a?.int(MediaFormat.KEY_SAMPLE_RATE) ?: 0, a?.int(MediaFormat.KEY_CHANNEL_COUNT) ?: 0,
+        )
+    }
+
+    /** One file of a clip made of several: how its extractor is set up and the pieces taken from it (sorted, apart). */
+    class Source(val open: (MediaExtractor) -> Unit, val pieces: List<Highlight>)
+
+    /**
+     * Several files' pieces, one file after another, into one mp4 without re-encoding — a project «as shot». Every file
+     * has to share the first one's formats ([mismatch]: thrown as IllegalStateException with the reason). Returns the
+     * clip's length, µs; [onProgress] gets µs of the clip so far.
+     */
+    fun joinAll(sources: List<Source>, out: FileDescriptor, withSound: Boolean = true, onProgress: (Long) -> Unit): Long {
+        var muxer: MediaMuxer? = null
+        var first: Signature? = null
+        var videoOut = -1
+        var audioOut = -1
+        var base = 0L
+        try {
+            for ((n, s) in sources.withIndex()) {
+                val ex = MediaExtractor()
+                try {
+                    s.open(ex)
+                    var video = -1
+                    var audio = -1
+                    for (i in 0 until ex.trackCount) {
+                        val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                        if (video < 0 && mime.startsWith("video/")) video = i
+                        if (audio < 0 && mime.startsWith("audio/")) audio = i
+                    }
+                    require(video >= 0) { "в файле нет видео" }
+                    val vFormat = ex.getTrackFormat(video)
+                    val aFormat = if (withSound && audio >= 0) ex.getTrackFormat(audio) else null
+                    val sig = signature(vFormat, aFormat)
+                    val m = muxer ?: MediaMuxer(out, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).also { m ->
+                        muxer = m
+                        first = sig
+                        if (vFormat.containsKey(MediaFormat.KEY_ROTATION)) m.setOrientationHint(vFormat.getInteger(MediaFormat.KEY_ROTATION))
+                        videoOut = m.addTrack(vFormat)
+                        if (aFormat != null) audioOut = m.addTrack(aFormat)
+                        m.start()
+                    }
+                    first?.let { f -> mismatch(f, sig)?.let { throw MismatchException(n + 1, it) } }
+                    ex.selectTrack(video)
+                    if (audioOut >= 0) ex.selectTrack(audio)
+                    val tracks = buildMap { put(video, videoOut); if (audioOut >= 0) put(audio, audioOut) }
+                    val maxInput = tracks.keys.maxOf { ex.getTrackFormat(it).int(MediaFormat.KEY_MAX_INPUT_SIZE) }
+                    val buf = ByteBuffer.allocateDirect(maxOf(maxInput, 8 * 1024 * 1024))
+                    val info = MediaCodec.BufferInfo()
+                    val samples = object : Samples {
+                        override val track get() = ex.sampleTrackIndex
+                        override val timeUs get() = ex.sampleTime
+                        override val isSync get() = ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+                        override fun seek(us: Long) = ex.seekTo(us, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                        override fun advance() { ex.advance() }
+                    }
+                    base = cutAt(samples, video, s.pieces, base, { track, clipUs, sync ->
+                        buf.clear()
+                        val size = ex.readSampleData(buf, 0)
+                        if (size > 0) {
+                            info.set(0, size, clipUs, if (sync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
+                            m.writeSampleData(tracks.getValue(track), buf, info)
+                        }
+                    }, onProgress).second
+                } finally {
+                    ex.release()
+                }
+            }
+            check(base > 0) { "ни одного куска" }
+            muxer?.stop()
+            return base
+        } finally {
+            runCatching { muxer?.release() }
+        }
     }
 
     /**

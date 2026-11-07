@@ -43,6 +43,7 @@ import app.goultra.transfer.camera.StorageEvent
 import app.goultra.transfer.camera.PbWriter
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
+import app.goultra.transfer.camera.ProjectExport
 import app.goultra.transfer.camera.Projects
 import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
@@ -3135,6 +3136,15 @@ class CameraController(private val app: Application) {
         // The open project is read from the same store: a save made elsewhere (Add to project, from the gallery) must
         // show up in it too — otherwise the file sits in the store but not on the screen until it is opened again.
         seenProject?.let { open -> seenProject = projects.firstOrNull { it.id == open.id } }
+        pruneFrames(projects)
+    }
+
+    /** Card frames no project refers to any more (a piece removed, re-cut or its project deleted) leave the disk. */
+    private fun pruneFrames(all: List<Project>) {
+        val kept = all.flatMap { p -> p.clips.map { "${it.file}@${it.fromMs}.jpg" } }.toSet() + "_black.jpg"
+        scope.launch(Dispatchers.IO) {
+            frameDir.listFiles()?.forEach { if (it.name !in kept && !it.name.endsWith(".tmp")) it.delete() }
+        }
     }
 
     /**
@@ -3635,6 +3645,196 @@ class CameraController(private val app: Application) {
         }
     }
 
+    // ---------- a project into one video ----------
+
+    /** The pieces of [p] whose file can't be read now: not on the list, or on the camera while it is away. */
+    fun projectUnreachable(p: Project): Int = p.clips.count { c ->
+        val f = projectFile(c.file)
+        f == null || (!f.isOnPhone && conn != ConnState.Connected)
+    }
+
+    /** Why the files of a project can't be joined as shot, in words. */
+    private fun mismatchText(why: ClipMaker.Mismatch) = when (why) {
+        ClipMaker.Mismatch.CODEC -> tr("разные кодеки", "different codecs")
+        ClipMaker.Mismatch.SIZE -> tr("разные размеры кадра", "different frame sizes")
+        ClipMaker.Mismatch.ROTATION -> tr("разный поворот кадра", "different rotation")
+        ClipMaker.Mismatch.SETUP -> tr("разные режимы съёмки", "different shooting modes")
+        ClipMaker.Mismatch.SOUND -> tr("разный звук", "different sound")
+    }
+
+    /** The project's file name in the gallery: its own name, then …2, …3 if taken. */
+    private suspend fun projectSaveName(p: Project): String {
+        val stem = ProjectExport.fileStem(p.name)
+        var n = 1
+        while (nameTaken(stem + (if (n > 1) "$n" else "") + ".mp4")) n++
+        return stem + (if (n > 1) "$n" else "") + ".mp4"
+    }
+
+    /**
+     * [p] into one video in the gallery. Not [precise]: as shot — the pieces copied without re-encoding, each starting
+     * on its key frame; only for video pieces of one format (a photo, or files shot differently, need [precise]).
+     * [precise]: re-encoded, each piece cut exactly, photos held for their length. Every piece's file has to be at
+     * hand: a camera file needs the camera.
+     */
+    fun exportProject(p: Project, precise: Boolean, sound: Boolean) {
+        if (isDownloading || exportJob?.isActive == true || batchJob?.isActive == true || p.clips.isEmpty()) return
+        val away = projectUnreachable(p)
+        if (away > 0) {
+            message = tr("Не сохранить: %s кусков без файла — подключите камеру", "Can't save: %s clips without their file — connect the camera").format(away)
+            return
+        }
+        val files = p.clips.map { it.file }.distinct().associateWith { projectFile(it)!! }
+        if (!precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound) else encodeProject(p, files, sound)
+    }
+
+    /** The project as shot: one extractor per run of pieces ([ProjectExport.runs]), all into one muxer ([ClipMaker.joinAll]). */
+    private fun copyProject(p: Project, files: Map<String, CameraFile>, sound: Boolean) {
+        val runs = ProjectExport.runs(p.clips)
+        val wantedUs = p.clips.sumOf { it.durationMs } * 1000
+        // Progress in bytes, as for downloads: each piece's share of its file's size.
+        val estimate = p.clips.sumOf { c ->
+            val f = files.getValue(c.file)
+            f.size?.let { size -> f.durationSec?.takeIf { it > 0 }?.let { size * c.durationMs / (it * 1000L) } } ?: 0L
+        }
+        val fromCamera = files.values.any { !it.isOnPhone }
+        downloadJob = scope.launch {
+            val name = projectSaveName(p)
+            download = DownloadProgress(name, 1, 1, 0, estimate, 0)
+            try {
+                val sources = withContext(Dispatchers.IO) {
+                    runs.map { run ->
+                        val file = files.getValue(run.file)
+                        val local = file.localUri
+                        val open: (android.media.MediaExtractor) -> Unit = if (local == null) {
+                            val camera = session.clipSource(file);
+                            { ex -> ex.setDataSource(camera) }
+                        } else {
+                            val uri = android.net.Uri.parse(local);
+                            { ex -> ex.setDataSource(app, uri, null) }
+                        }
+                        ClipMaker.Source(open, run.pieces)
+                    }
+                }
+                var lengthUs = 0L
+                withContext(Dispatchers.IO) {
+                    val job = coroutineContext[Job]
+                    var reportedAt = 0L
+                    Downloader.saveClip(app, name, System.currentTimeMillis()) { fd ->
+                        lengthUs = ClipMaker.joinAll(sources, fd, sound) { us ->
+                            if (job?.isActive == false) throw CancellationException("остановлено")
+                            val now = System.currentTimeMillis()
+                            if (now - reportedAt >= 250) {
+                                reportedAt = now
+                                val done = if (wantedUs > 0) estimate * minOf(us, wantedUs) / wantedUs else 0L
+                                scope.launch { download = DownloadProgress(name, 1, 1, done, maxOf(estimate, done), 0) }
+                            }
+                        }
+                    }
+                }
+                lastResult = tr("Проект сохранён: %s · ", "Project saved: %s · ").format(name) + "%.1f ".format(lengthUs / 1e6) + tr("с", "s")
+                log("проект $name как снято: ${runs.size} отрезков, ${p.clips.size} кусков, %.1f с".format(lengthUs / 1e6))
+                forgetThumbnail(name)
+                lastSaveOk = true
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Проект не сохранён: остановлено", "Project not saved: stopped")
+                throw e
+            } catch (e: ClipMaker.MismatchException) {
+                log("проект как снято: кусок ${e.piece} — ${e.why}")
+                lastResult = tr(
+                    "Куски сняты по-разному (%s, кусок %s) — сохраните точно, с перекодированием",
+                    "The clips were shot differently (%s, clip %s) — save precisely, re-encoding",
+                ).format(mismatchText(e.why), e.piece)
+            } catch (e: Exception) {
+                log("проект как снято: ${e.javaClass.simpleName}: ${e.message}")
+                lastResult = tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+            } finally {
+                download = null
+                message = lastResult
+                touch()
+            }
+        }
+        if (fromCamera) CameraService.start(app)
+    }
+
+    /**
+     * The project re-encoded: one sequence — each video piece clipped exactly, each photo held for its length — at the
+     * first video's frame size (the others fitted into it) and its codec and bitrate, as a save with colour keeps them.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    private fun encodeProject(p: Project, files: Map<String, CameraFile>, sound: Boolean) {
+        val fromCamera = files.values.any { !it.isOnPhone }
+        exportJob = scope.launch {
+            val name = projectSaveName(p)
+            export = ExportProgress(name, 0)
+            val tmp = java.io.File(app.cacheDir, "export.mp4")
+            val startedAt = System.currentTimeMillis()
+            try {
+                val camera = if (fromCamera) previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera")) else null
+                if (fromCamera) CameraService.start(app)
+                fun uriOf(f: CameraFile) = f.localUri ?: previewUrlOf(f)
+                // The look of the copy is the first video's: its codec, its bitrate, its frame.
+                val firstVideo = p.clips.firstOrNull { it.role != ProjectClip.Role.STILL }?.let { files.getValue(it.file) }
+                val source = firstVideo?.let { f ->
+                    withContext(Dispatchers.IO) {
+                        val index = if (f.localUri == null) session.indexSource(f) else null
+                        exportSource(f.size) { ex -> if (index != null) ex.setDataSource(index) else ex.setDataSource(app, android.net.Uri.parse(f.localUri!!), null) }
+                    }
+                } ?: ExportSource(androidx.media3.common.MimeTypes.VIDEO_H264, 20_000_000, 1080, 0)
+                val w = firstVideo?.width ?: 1920
+                val h = firstVideo?.height ?: 1080
+                val items = p.clips.map { c ->
+                    val f = files.getValue(c.file)
+                    if (c.role == ProjectClip.Role.STILL) {
+                        val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f)).setImageDurationMs(c.durationMs).build()
+                        androidx.media3.transformer.EditedMediaItem.Builder(media)
+                            .setDurationUs(c.durationMs * 1000)
+                            .setFrameRate(30)
+                            .build()
+                    } else {
+                        val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f))
+                            .setClippingConfiguration(
+                                androidx.media3.common.MediaItem.ClippingConfiguration.Builder()
+                                    .setStartPositionMs(c.fromMs)
+                                    .setEndPositionMs(c.toMs)
+                                    .build(),
+                            ).build()
+                        androidx.media3.transformer.EditedMediaItem.Builder(media).setRemoveAudio(!sound).build()
+                    }
+                }
+                val fit = androidx.media3.effect.Presentation.createForWidthAndHeight(w, h, androidx.media3.effect.Presentation.LAYOUT_SCALE_TO_FIT)
+                val composition = androidx.media3.transformer.Composition.Builder(androidx.media3.transformer.EditedMediaItemSequence(items))
+                    .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf(fit)))
+                    // A photo has no sound: silence stands in for it, so the pieces around it keep theirs.
+                    .experimentalSetForceAudioTrack(sound)
+                    .build()
+                tmp.delete()
+                runComposition(composition, tmp, source, null, camera) { export = ExportProgress(name, it) }
+                withContext(Dispatchers.IO) {
+                    Downloader.saveClip(app, name, System.currentTimeMillis()) { fd ->
+                        java.io.FileInputStream(tmp).use { input -> java.io.FileOutputStream(fd).use { input.copyTo(it, 1 shl 20) } }
+                    }
+                }
+                log("проект $name точно: ${items.size} кусков, ${w}×$h, ${source.mime}, ${bitrateText(source.bitrate)}, ${(System.currentTimeMillis() - startedAt) / 1000} с")
+                lastResult = tr("Проект сохранён: %s", "Project saved: %s").format(name)
+                forgetThumbnail(name)
+                lastSaveOk = true
+                loadPhoneFiles()
+            } catch (e: CancellationException) {
+                lastResult = tr("Проект не сохранён: остановлено", "Project not saved: stopped")
+                throw e
+            } catch (e: Exception) {
+                log("проект точно: ${e.javaClass.simpleName}: ${e.message} ${e.cause?.message ?: ""}")
+                lastResult = tr("Не удалось сохранить проект", "Couldn't save the project") + (e.message?.let { ": $it" } ?: "")
+            } finally {
+                tmp.delete()
+                export = null
+                message = lastResult
+                touch()
+            }
+        }
+    }
+
     /** A batch save: which video of how many. */
     data class BatchProgress(val index: Int, val count: Int)
 
@@ -3791,44 +3991,8 @@ class CameraController(private val app: Application) {
         gopSeconds: Float?,
         sound: Boolean,
         onPercent: (Int) -> Unit,
-    ) = kotlinx.coroutines.coroutineScope {
-        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
-            .setRequestedVideoEncoderSettings(encoderSettings(source, gopSeconds))
-            .setEnableFallback(true)
-            .build()
-        val builder = androidx.media3.transformer.Transformer.Builder(app)
-            .setVideoMimeType(source.mime)
-            .setEncoderFactory(encoders)
-        if (fromCamera) {
-            val camera = previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera"))
-            builder.setAssetLoaderFactory(
-                androidx.media3.transformer.DefaultAssetLoaderFactory(
-                    app,
-                    androidx.media3.transformer.DefaultDecoderFactory.Builder(app).build(),
-                    androidx.media3.common.util.Clock.DEFAULT,
-                    // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
-                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(camera),
-                    androidx.media3.datasource.DataSourceBitmapLoader(app),
-                ),
-            )
-        }
-        val t = builder
-            .addListener(object : androidx.media3.transformer.Transformer.Listener {
-                override fun onCompleted(composition: androidx.media3.transformer.Composition, exportResult: androidx.media3.transformer.ExportResult) {
-                    done.complete(Unit)
-                }
-
-                override fun onError(
-                    composition: androidx.media3.transformer.Composition,
-                    exportResult: androidx.media3.transformer.ExportResult,
-                    exportException: androidx.media3.transformer.ExportException,
-                ) {
-                    done.completeExceptionally(exportException)
-                }
-            })
-            .build()
-        exporter = t
+    ) {
+        val camera = if (fromCamera) previewSource() ?: error(tr("нет связи с камерой по Wi-Fi", "no Wi-Fi link to the camera")) else null
         // A piece: the media item clipped to it, its picture only — the sound of pieces is joined with crossfades
         // afterwards (ClipAudio), which the transformer can't do.
         fun item(piece: Highlight?): androidx.media3.transformer.EditedMediaItem {
@@ -3850,6 +4014,63 @@ class CameraController(private val app: Application) {
         val composition = androidx.media3.transformer.Composition.Builder(
             androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
         ).build()
+        runComposition(composition, out, source, gopSeconds, camera, onPercent)
+    }
+
+    /**
+     * Runs the transformer on [composition] on the main thread until it is done; [onPercent] twice a second. [camera]:
+     * the camera's data source, under the stock one — items may then be the camera's files over Wi-Fi as well as the
+     * phone's own. Photos are taken in at half their size: a 50 MP photo whole does not fit in memory, and the video it
+     * goes into is no bigger than 4K.
+     */
+    @androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
+    private suspend fun runComposition(
+        composition: androidx.media3.transformer.Composition,
+        out: java.io.File,
+        source: ExportSource,
+        gopSeconds: Float?,
+        camera: androidx.media3.datasource.DataSource.Factory?,
+        onPercent: (Int) -> Unit,
+    ) = kotlinx.coroutines.coroutineScope {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val encoders = androidx.media3.transformer.DefaultEncoderFactory.Builder(app)
+            .setRequestedVideoEncoderSettings(encoderSettings(source, gopSeconds))
+            .setEnableFallback(true)
+            .build()
+        val data = if (camera != null) androidx.media3.datasource.DefaultDataSource.Factory(app, camera)
+        else androidx.media3.datasource.DefaultDataSource.Factory(app)
+        val t = androidx.media3.transformer.Transformer.Builder(app)
+            .setVideoMimeType(source.mime)
+            .setEncoderFactory(encoders)
+            .setAssetLoaderFactory(
+                androidx.media3.transformer.DefaultAssetLoaderFactory(
+                    app,
+                    androidx.media3.transformer.DefaultDecoderFactory.Builder(app).build(),
+                    androidx.media3.common.util.Clock.DEFAULT,
+                    // Not ProgressiveMediaSource.Factory: that ignores the items' clipping (the whole picture came out).
+                    androidx.media3.exoplayer.source.DefaultMediaSourceFactory(data),
+                    androidx.media3.datasource.DataSourceBitmapLoader(
+                        androidx.media3.datasource.DataSourceBitmapLoader.DEFAULT_EXECUTOR_SERVICE.get(),
+                        data,
+                        android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 },
+                    ),
+                ),
+            )
+            .addListener(object : androidx.media3.transformer.Transformer.Listener {
+                override fun onCompleted(composition: androidx.media3.transformer.Composition, exportResult: androidx.media3.transformer.ExportResult) {
+                    done.complete(Unit)
+                }
+
+                override fun onError(
+                    composition: androidx.media3.transformer.Composition,
+                    exportResult: androidx.media3.transformer.ExportResult,
+                    exportException: androidx.media3.transformer.ExportException,
+                ) {
+                    done.completeExceptionally(exportException)
+                }
+            })
+            .build()
+        exporter = t
         val ticker = launch {
             val holder = androidx.media3.transformer.ProgressHolder()
             while (true) {
