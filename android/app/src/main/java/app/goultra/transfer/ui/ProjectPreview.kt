@@ -1,7 +1,6 @@
 package app.goultra.transfer.ui
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -56,7 +55,6 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.image.BitmapFactoryImageDecoder
-import androidx.media3.exoplayer.image.ImageDecoderException
 import androidx.media3.exoplayer.image.ImageOutput
 import androidx.media3.exoplayer.image.ImageRenderer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -117,32 +115,11 @@ internal fun seekPoint(lengths: List<Long>, atMs: Long): Pair<Int, Long> {
     return lengths.lastIndex to 0L
 }
 
-/** The long side of a photo as the preview decodes it: more than a phone screen needs, little enough to keep in hand. */
+/**
+ * The long side of a photo as the preview decodes it: more than a phone screen needs, little enough to keep in hand ?
+ * media3's own decoder samples a 50 MP photo down to it instead of taking it whole.
+ */
 private const val STILL_SIDE = 1280
-
-/**
- * How many times a side has to be halved to fit [maxSide] — the same rule the viewer decodes photos by, so a photo is
- * never taken into memory whole (the phone's camera takes 12–50 MP, a screen asks for one or two).
- */
-internal fun sampleFor(width: Int, height: Int, maxSide: Int): Int {
-    if (width <= 0 || height <= 0 || maxSide <= 0) return 1
-    var sample = 1
-    while (maxOf(width, height) / (sample * 2) >= maxSide) sample *= 2
-    return sample
-}
-
-/**
- * A photo of the playlist, decoded small on purpose: media3's own decoder takes the picture whole, which a 50 MP photo
- * does not survive. Bounds first, then a sampled decode, both straight from the bytes the source has delivered.
- */
-@androidx.annotation.OptIn(UnstableApi::class)
-private fun decodePhoto(data: ByteArray, length: Int): Bitmap {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(data, 0, length, bounds)
-    val sample = sampleFor(bounds.outWidth, bounds.outHeight, STILL_SIDE)
-    return BitmapFactory.decodeByteArray(data, 0, length, BitmapFactory.Options().apply { inSampleSize = sample })
-        ?: throw ImageDecoderException("not a picture: $length bytes, ${bounds.outWidth}×${bounds.outHeight}")
-}
 
 /**
  * Where the player puts the picture of a still. The player waits while it is not here (a still's length starts only
@@ -216,7 +193,7 @@ internal fun ProjectPreview(
         // that takes it, so a renderer added at the end never saw a photo (the stock one decoded it whole, to nowhere).
         val renderers = object : DefaultRenderersFactory(context) {
             override fun buildImageRenderers(out: java.util.ArrayList<Renderer>) {
-                out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory { data, length -> decodePhoto(data, length) }, photo))
+                out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory(context).setMaxOutputSize(STILL_SIDE), photo))
             }
         }
         ExoPlayer.Builder(context, factory)

@@ -3882,7 +3882,7 @@ class CameraController(private val app: Application) {
                     }
                 }
                 val fit = androidx.media3.effect.Presentation.createForWidthAndHeight(w, h, androidx.media3.effect.Presentation.LAYOUT_SCALE_TO_FIT)
-                val composition = androidx.media3.transformer.Composition.Builder(androidx.media3.transformer.EditedMediaItemSequence(items))
+                val composition = androidx.media3.transformer.Composition.Builder(androidx.media3.transformer.EditedMediaItemSequence.Builder(items).build())
                     .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf(fit)))
                     // A photo has no sound: silence stands in for it, so the pieces around it keep theirs.
                     .experimentalSetForceAudioTrack(sound)
@@ -4045,7 +4045,7 @@ class CameraController(private val app: Application) {
         if (source.bitrate > 0) {
             b.setBitrate(source.bitrate)
         } else {
-            b.experimentalSetEnableHighQualityTargeting(true)
+            // media3 1.11 has no high-quality targeting any more: the encoder's own default rate.
         }
         if (source.mime == androidx.media3.common.MimeTypes.VIDEO_H264 && source.profile != 0) {
             b.setEncodingProfileLevel(source.profile, source.level.takeIf { it != 0 } ?: androidx.media3.transformer.EncoderUtil.LEVEL_UNSET)
@@ -4096,7 +4096,7 @@ class CameraController(private val app: Application) {
                 .build()
         }
         val composition = androidx.media3.transformer.Composition.Builder(
-            androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
+            androidx.media3.transformer.EditedMediaItemSequence.Builder(parts?.map { item(it) } ?: listOf(item(null))).build(),
         ).build()
         runComposition(composition, out, source, gopSeconds, camera, onPercent)
     }
