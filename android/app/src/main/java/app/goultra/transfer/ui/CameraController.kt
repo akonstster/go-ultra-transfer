@@ -3175,6 +3175,11 @@ class CameraController(private val app: Application) {
         seenProject?.let { saveProject(it.without(clip)) }
     }
 
+    /** Dragging a card along the strip: the piece takes another place in the project's order (see [Project.movedSequence]). */
+    fun moveProjectClip(from: Int, to: Int) {
+        seenProject?.let { saveProject(it.movedSequence(from, to)) }
+    }
+
     /**
      * The pieces edited in the file editor are the truth for their file: the open project takes them on the spot, so a
      * piece added, dropped or re-cut in the film strip shows in the project at once, and a clip is never left reading
