@@ -3739,7 +3739,8 @@ class CameraController(private val app: Application) {
                 return@launch
             }
             delay(2_000)
-            exportProject(seenProject?.takeIf { it.id == p.id } ?: p, precise, sound, retried = true)
+            // The project as it was when Save was pressed: edits made since belong to the next save.
+            exportProject(p, precise, sound, retried = true)
         }
         return true
     }
