@@ -465,6 +465,8 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                         coloured = file.kind == MediaKind.VIDEO && vm.hasLook(file),
                         phoneOnly = file.isOnPhone && !vm.showsPhone,
                         added = file.isAdded,
+                        // Already in a project (by name — the camera's file and its phone copy are the same shot).
+                        inProject = file.name in vm.projectFiles,
                         // With the video's own colour on it; drawn again when a colour changes.
                         loadThumbnail = vm::tileImage,
                         colourKey = if (file.kind == MediaKind.VIDEO || vm.canColourPhoto(file)) vm.lookKeys[file.name] else null,
@@ -513,6 +515,7 @@ private fun FileTile(
     coloured: Boolean,
     phoneOnly: Boolean,
     added: Boolean,
+    inProject: Boolean,
     loadThumbnail: suspend (CameraFile) -> ImageBitmap?,
     colourKey: String?,
     onClick: () -> Unit,
@@ -596,6 +599,15 @@ private fun FileTile(
                     .background(Color(0xFF2E7D32), CircleShape),
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Filled.Check, tr("Скачано", "Downloaded"), Modifier.size(13.dp), tint = Color.White) }
+        }
+        if (inProject) {
+            // Taken into a project (any of them): the mark shows while scrolling, so a file already used is not added
+            // a second time. The same green the auto montage's badge wears on a project's cards.
+            Box(
+                Modifier.align(Alignment.TopEnd).padding(5.dp).size(18.dp)
+                    .background(Color(0xCC0B6E4F), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Icons.Filled.PlaylistAdd, tr("В проекте", "In a project"), Modifier.size(12.dp), tint = Color.White) }
         }
         if (selected) {
             Box(Modifier.matchParentSizeOverlay())

@@ -452,6 +452,7 @@ internal val TEXT_ES: Map<String, String> = mapOf(
     "Remove the clip from the project?" to "¿Quitar el trozo del proyecto?",
     "Only this piece leaves the project. The file itself stays on the camera and on the phone — nothing is deleted." to "Solo este trozo sale del proyecto. El archivo sigue en la cámara y en el teléfono — no se borra nada.",
     "Remove" to "Quitar",
+    "In a project" to "En un proyecto",
     "Rotation" to "Rotación",
     "Shutter" to "Obturador",
     "Size" to "Tamaño",

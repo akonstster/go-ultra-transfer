@@ -3132,7 +3132,16 @@ class CameraController(private val app: Application) {
 
     fun reloadProjects() {
         projects = projectStore.list()
+        // The open project is read from the same store: a save made elsewhere (Add to project, from the gallery) must
+        // show up in it too — otherwise the file sits in the store but not on the screen until it is opened again.
+        seenProject?.let { open -> seenProject = projects.firstOrNull { it.id == open.id } }
     }
+
+    /**
+     * The files any project holds: the gallery marks them, so a file already taken into a project is visible as such
+     * and the same clip is not added twice (asked for on the phone, 07.11).
+     */
+    val projectFiles: Set<String> by derivedStateOf { projects.flatMap { p -> p.clips.map { it.file } }.toSet() }
 
     /** A new, empty project (see `memory-bank/projects-plan.md`); the tab calls [reloadProjects] before showing it. */
     fun createProject(name: String): Project = projectStore.create(name.trim()).also { reloadProjects() }
@@ -3162,7 +3171,8 @@ class CameraController(private val app: Application) {
 
     /** The ✕ on a card: the clip leaves the project; the base goes with its last clip (see [Project.without]). */
     fun removeProjectClip(clip: ProjectClip) {
-        seenProject?.let { seenProject = saveProject(it.without(clip)) }
+        // [saveProject] reloads the list, and the open project comes with it.
+        seenProject?.let { saveProject(it.without(clip)) }
     }
 
     /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
