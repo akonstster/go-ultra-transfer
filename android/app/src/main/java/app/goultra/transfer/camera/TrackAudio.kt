@@ -25,16 +25,14 @@ object TrackAudio {
     internal const val BUCKET_MS = 25
 
     /**
-     * How much of a long track is listened to for the grid and the profile: four minutes is most tracks, and the beats
-     * past it go on with the last period (a tempo that drifts is followed inside this share, not averaged over it).
+     * How much of a track is listened to for the grid and the profile. A quarter of an hour covers the projects this app
+     * makes whole; the old four-minute share silently cut every longer track, so its grid and its drops stopped there. The
+     * beats past this share still go on with the last period, so the grid covers the whole track.
      */
-    internal const val ANALYSED_MS = 240_000
+    internal const val ANALYSIS_LIMIT_MS = 15L * 60_000L
 
     /** Read from the decoder at a time, in decoded frames. */
     private const val CHUNK = 8_192
-
-    /** A file that does not say how long it is is read no further than this. */
-    private const val UNKNOWN_LIMIT_MS = 15L * 60_000L
 
     /**
      * What a track gives: the wave 0…1 ([peaks], one per [BUCKET_MS] along the whole track — the lane shows the share the
@@ -71,9 +69,11 @@ object TrackAudio {
             val rate = (reader.rate / step).coerceAtLeast(1) // the mono rate, ~[RATE]
             val perBucket = (rate.toLong() * BUCKET_MS / 1000).toInt().coerceAtLeast(1)
             val said = reader.durationMs
-            val leftToRead = (if (said > 0L) said else UNKNOWN_LIMIT_MS) * reader.rate / 1000
-            // The share the grid is taken from, one channel at [rate]: a minute and a half is a few megabytes.
-            val heard = FloatArray((rate.toLong() * ANALYSED_MS / 1000).toInt().coerceAtLeast(0))
+            // The whole track (up to the safety limit), not the old four-minute share: a long project's grid and drops
+            // must not simply stop a third of the way in.
+            val leftToRead = framesToRead(said, reader.rate)
+            // The share the grid is taken from, one channel at [rate].
+            val heard = FloatArray((leftToRead / step).toInt().coerceAtLeast(0))
             var heardAt = 0
             val peaks = ArrayList<Float>(1024) // one per [BUCKET_MS]: a few thousand for a whole track
             var bucket = 0f
@@ -130,6 +130,17 @@ object TrackAudio {
         } finally {
             reader.release()
         }
+    }
+
+    /**
+     * The decoded frames [analyse] reads from a file that says it is [saidMs] long (0 — it says nothing): the whole
+     * track, cut only at the safety limit. Kept apart from the decoder so the end of the four-minute cut can be pinned
+     * in a JVM test — it was invisible until a 5:45 project had no grid past 4:00.
+     */
+    internal fun framesToRead(saidMs: Long, rate: Int): Long {
+        if (rate <= 0) return 0L
+        val ms = if (saidMs > 0L) minOf(saidMs, ANALYSIS_LIMIT_MS) else ANALYSIS_LIMIT_MS
+        return ms.coerceAtLeast(0L) * rate / 1000
     }
 
     /**

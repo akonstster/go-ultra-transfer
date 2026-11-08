@@ -143,7 +143,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 2)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 3)
     }
 
     @Test
@@ -237,7 +237,26 @@ class BeatGridTest {
     }
 
     @Test
-    fun `the drop is where the energy leaps out of a quiet stretch`() {
+    fun `every return after a quiet stretch is a drop, and it opens on the next beat`() {
+        // Quiet, loud, a real breakdown, loud again: two returns, not one. On a grid whose beats stand half a second
+        // apart and start at 300 ms, each drop is the first beat of the returning loud part — the old «beat before if the
+        // next one is far» put it on the last beat of the quiet passage.
+        val energy = FloatArray(600) { i ->
+            val t = i * 100L
+            when {
+                t < 10_000L -> 0.15f
+                t < 20_000L -> 0.85f
+                t < 30_000L -> 0.15f
+                else -> 0.95f
+            }
+        }
+        assertEquals(listOf(10_000L, 30_000L), BeatGrid.dropsOf(energy, BeatGrid.LOUD_STEP_MS))
+        val beats = (300L..40_000L step 500L).toList()
+        assertEquals(listOf(10_300L, 30_300L), BeatGrid.dropsOf(energy, BeatGrid.LOUD_STEP_MS, beats))
+    }
+
+    @Test
+    fun `a drop is where the energy leaps out of a quiet stretch`() {
         val quietThenLoud = FloatArray(20) { if (it < 8) 0.2f else 0.9f }
         assertEquals(8_000L, BeatGrid.dropOf(quietThenLoud))
         assertNull(BeatGrid.dropOf(FloatArray(20) { 0.5f }))

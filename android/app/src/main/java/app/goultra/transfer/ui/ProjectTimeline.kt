@@ -316,11 +316,16 @@ private fun Lane(
                 drawLine(tick.copy(alpha = tick.alpha * 0.45f), Offset(x, 0f), Offset(x, videoH), strokeWidth = 1.5f)
                 drawLine(tick, Offset(x, musicTop), Offset(x, musicTop + musicH), strokeWidth = 1.5f)
             }
-            // The drop: a mark of its own over the music band.
-            music.dropMs?.let { drop ->
+            // The drops: every place the energy returns, the active one solid and the rest faint.
+            music.drops.forEach { drop ->
                 val x = g.x(drop - trackOffset, at)
                 if (x in -2f..(size.width + 2f)) {
-                    drawRect(bar, Offset(x - 2f, musicTop), Size(4f, musicH))
+                    val active = drop == music.activeDropMs
+                    drawRect(
+                        if (active) bar else bar.copy(alpha = 0.45f),
+                        Offset(x - (if (active) 2f else 1f), musicTop),
+                        Size(if (active) 4f else 2f, musicH),
+                    )
                 }
             }
         }

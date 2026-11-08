@@ -29,9 +29,11 @@ class ProjectTest {
         ),
         music = ProjectMusic(
             uri = "content://media/external/audio/media/1", name = "track.mp3",
-            offsetMs = 3_000, volume = 0.8, videoVolume = 0.5, beats = listOf(0L, 500L, 1_000L), dropMs = 32_000,
-            lengthMs = 180_000,
+            offsetMs = 3_000, beats = listOf(0L, 500L, 1_000L),
+            drops = listOf(8_000L, 32_000L), activeDropMs = 32_000L, lengthMs = 180_000,
         ),
+        musicVolume = 0.8,
+        videoVolume = 0.5,
         previous = listOf(ProjectClip(file = "VID_20261105_211421_165.mp4", fromMs = 1_200, toMs = 4_000)),
     )
 
@@ -43,36 +45,65 @@ class ProjectTest {
     }
 
     @Test
-    fun `an older project's ducking flag reads as the video's level under the music`() {
-        fun music(json: String) = ProjectMusic.from(org.json.JSONObject(json))!!.videoVolume
-        assertEquals(ProjectMusic.UNDER_MUSIC, music("""{"uri":"u","duck":true}"""), 0.0)
-        assertEquals(1.0, music("""{"uri":"u","duck":false}"""), 0.0)
-        assertEquals(ProjectMusic.UNDER_MUSIC, music("""{"uri":"u"}"""), 0.0)
-        assertEquals(0.6, music("""{"uri":"u","video":0.6,"duck":false}"""), 0.0) // the slider wins
+    fun `an older project's levels move from the track to the project`() {
+        fun levels(json: String): Pair<Double, Double> {
+            val p = Project.decode(json)!!
+            return p.musicVolume to p.videoVolume
+        }
+        // The mix used to live on the track: volume and video.
+        assertEquals(0.6 to 0.7, levels("""{"id":"1-0001","name":"Old","music":{"uri":"u","volume":0.6,"video":0.7}}"""))
+        // Format 1 also wrote project-level copies, but refreshed them only on remove/pick: after the sliders moved the
+        // copy was stale, so the track's own level is what the user heard and must win.
+        assertEquals(
+            0.27 to 0.83,
+            levels("""{"version":1,"id":"1-0001","name":"Old","musicLevel":1.0,"videoLevel":0.35,"music":{"uri":"u","volume":0.27,"video":0.83}}"""),
+        )
+        // Even earlier it was a «duck» flag: on means UNDER_MUSIC, off means the recorded level.
+        assertEquals(1.0 to ProjectMusic.UNDER_MUSIC, levels("""{"id":"1-0001","name":"Old","music":{"uri":"u","duck":true}}"""))
+        assertEquals(1.0 to 1.0, levels("""{"id":"1-0001","name":"Old","music":{"uri":"u","duck":false}}"""))
+        // From format 2 the project owns the mix, so its keys win over anything still written on the track.
+        assertEquals(
+            0.4 to 0.2,
+            levels("""{"version":2,"id":"1-0001","name":"Old","musicLevel":0.4,"videoLevel":0.2,"music":{"uri":"u","volume":0.6,"video":0.7}}"""),
+        )
+    }
+
+    @Test
+    fun `an old single drop is read as the list and stays active`() {
+        val p = Project.decode("""{"id":"1-0001","name":"Old","music":{"uri":"u","drop":1234}}""")!!
+        assertEquals(listOf(1_234L), p.music!!.drops)
+        assertEquals(1_234L, p.music!!.activeDropMs)
     }
 
     @Test
     fun `the mix survives removing a track, a restart and adding another`() {
-        val mixed = sample().let { p -> p.copy(music = p.music!!.copy(volume = 0.27, videoVolume = 0.83)) }
+        val mixed = sample().copy(musicVolume = 0.27, videoVolume = 0.83)
         val gone = mixed.withoutMusic()
         assertNull("the track is gone", gone.music)
-        assertEquals(0.27, gone.musicLevels().first, 0.0)
-        assertEquals(0.83, gone.musicLevels().second, 0.0)
+        assertEquals(0.27, gone.musicVolume, 0.0)
+        assertEquals(0.83, gone.videoVolume, 0.0)
         // A restart is nothing but JSON: the levels are kept apart from the track, so they come back with it.
         val afterRestart = Project.decode(Project.encode(gone))!!
         val added = afterRestart.withMusic("content://media/external/audio/media/2", "another.mp3")
-        assertEquals(0.27, added.music!!.volume, 0.0)
-        assertEquals(0.83, added.music!!.videoVolume, 0.0)
+        assertEquals(0.27, added.musicVolume, 0.0)
+        assertEquals(0.83, added.videoVolume, 0.0)
         assertEquals("the new track gets its own grid", emptyList<Long>(), added.music!!.beats)
+        assertEquals("and its own drops", emptyList<Long>(), added.music!!.drops)
+        // The mix belongs to one project only: a new project starts from the defaults, not from the neighbour's sliders.
+        val other = Project(id = "1-0002", name = "Другой")
+        assertEquals(1.0, other.musicVolume, 0.0)
+        assertEquals(ProjectMusic.UNDER_MUSIC, other.videoVolume, 0.0)
     }
 
     @Test
     fun `zero is a real level and is kept too`() {
-        val silent = sample().let { p -> p.copy(music = p.music!!.copy(volume = 0.0, videoVolume = 0.0)) }
+        val silent = sample().copy(musicVolume = 0.0, videoVolume = 0.0)
         val back = Project.decode(Project.encode(silent.withoutMusic()))!!
+        assertEquals(0.0, back.musicVolume, 0.0)
+        assertEquals(0.0, back.videoVolume, 0.0)
         val added = back.withMusic("content://media/external/audio/media/3", "quiet.mp3")
-        assertEquals(0.0, added.music!!.volume, 0.0)
-        assertEquals(0.0, added.music!!.videoVolume, 0.0)
+        assertEquals(0.0, added.musicVolume, 0.0)
+        assertEquals(0.0, added.videoVolume, 0.0)
     }
 
     @Test

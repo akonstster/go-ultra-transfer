@@ -33,7 +33,13 @@ private const val MUSIC_NUDGE = 0.03f
  * touches this file alone: its input is the two values below.
  */
 @Composable
-internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Boolean, heard: MusicClock) {
+internal fun ProjectMusicSound(
+    music: ProjectMusic?,
+    musicVolume: Double,
+    timeMs: Long,
+    playing: Boolean,
+    heard: MusicClock,
+) {
     if (music == null) return
     val context = LocalContext.current
     val player = remember {
@@ -53,7 +59,7 @@ internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Bool
         player.setMediaItem(MediaItem.fromUri(music.uri))
         player.prepare()
     }
-    LaunchedEffect(music.volume) { player.volume = music.volume.toFloat().coerceIn(0f, 1f) }
+    LaunchedEffect(musicVolume) { player.volume = musicVolume.toFloat().coerceIn(0f, 1f) }
     // The one input: where the project is, and whether it plays. The track stands at its own offset + that time, playing
     // or not (a jump made while paused is still a jump), and it plays or pauses exactly as the picture does — a carried
     // card, or a piece waiting on the camera's Wi-Fi, stops both.

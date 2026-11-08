@@ -138,6 +138,8 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
                 carrying = carrying,
                 music = p.music,
+                videoVolume = p.videoVolume,
+                musicVolume = p.musicVolume,
                 onClock = { ms, plays ->
                     clockMs = ms
                     clockPlaying = plays

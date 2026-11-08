@@ -93,7 +93,7 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
         }
     }
     when (sheet) {
-        Sheet.SOUND -> SoundSheet(vm, music, onPick = { pick.launch(arrayOf("audio/*")) }, onDismiss = { sheet = Sheet.NONE })
+        Sheet.SOUND -> SoundSheet(vm, p, onPick = { pick.launch(arrayOf("audio/*")) }, onDismiss = { sheet = Sheet.NONE })
         Sheet.TEMPO -> music?.let { TempoSheet(vm, it, clockMs, onDismiss = { sheet = Sheet.NONE }) }
         Sheet.NONE -> Unit
     }
@@ -111,7 +111,8 @@ private fun Tool(name: String, icon: ImageVector, onClick: () -> Unit) {
 /** All the sound there is: the track (picked, replaced, taken off) and the two levels under it. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SoundSheet(vm: CameraController, music: ProjectMusic?, onPick: () -> Unit, onDismiss: () -> Unit) {
+private fun SoundSheet(vm: CameraController, project: Project, onPick: () -> Unit, onDismiss: () -> Unit) {
+    val music = project.music
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
@@ -133,7 +134,8 @@ private fun SoundSheet(vm: CameraController, music: ProjectMusic?, onPick: () ->
                     IconButton(vm::removeProjectMusic) { Icon(Icons.Filled.Close, tr("Убрать трек", "Remove the track")) }
                 }
             }
-            if (music != null) MusicSound(vm, music)
+            // The mix is the project's own: it stays adjustable while no track is picked, and a new track inherits it.
+            MusicSound(vm, project)
         }
     }
 }
@@ -185,12 +187,7 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
                 Switch(AppPrefs.metronome, { AppPrefs.chooseMetronome(it) })
             }
             ClickNudge(AppPrefs.metronome)
-            FilledTonalButton(
-                onClick = { vm.updateProjectMusic { m -> m.copy(dropMs = clockMs + m.offsetMs) } },
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            ) {
-                Text(tr("Дроп", "Drop") + (music.dropMs?.let { " · " + formatDuration((it / 1000).toInt()) } ?: ""))
-            }
+            DropControls(vm, music, clockMs)
             Text(
                 tr(
                     "Дроп — место, где энергия трека скачет: сюда автомонтаж поставит акцент",
@@ -201,6 +198,40 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
+    }
+}
+/**
+ * All the drops the analysis found, one active at a time: ⇠/⇢ choose which the montage will accent; the button with the
+ * clock puts a drop where the film stands, for a track the analysis could not read (that hand mark is never replaced).
+ */
+@Composable
+private fun DropControls(vm: CameraController, music: ProjectMusic, clockMs: Long) {
+    val drops = music.drops
+    val active = music.activeDropMs
+    val at = drops.indexOf(active).takeIf { it >= 0 } ?: 0
+    if (drops.isNotEmpty()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(tr("Дроп", "Drop"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            IconButton(enabled = at > 0, onClick = { vm.activateProjectDrop(drops[at - 1]) }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null)
+            }
+            Text(
+                "${at + 1} / ${drops.size} · " + formatDuration(((active ?: drops[at]) / 1000).toInt()),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            IconButton(enabled = at < drops.lastIndex, onClick = { vm.activateProjectDrop(drops[at + 1]) }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
+            }
+        }
+    }
+    val here = (clockMs + music.offsetMs).coerceAtLeast(0L)
+    FilledTonalButton(
+        onClick = { vm.putProjectDropAt(here) },
+        modifier = Modifier.fillMaxWidth().padding(top = if (drops.isEmpty()) 8.dp else 0.dp),
+    ) {
+        Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(tr("Дроп", "Drop") + " · " + formatDuration((here / 1000).toInt()))
     }
 }
 /**
@@ -304,11 +335,14 @@ private fun TrackState(peaks: FloatArray?, failed: Boolean) {
     )
 }
 
-/** Two levels, one under the other: the music's, and the video's own sound under it (0 — music only, 100 — recorded). */
+/**
+ * Two levels, one under the other: the music's, and the video's own sound under it (0 — music only, 100 — recorded).
+ * Both belong to the project, not to the picked file: removing the track and picking another leaves them as they were.
+ */
 @Composable
-private fun MusicSound(vm: CameraController, music: ProjectMusic) {
-    Level(tr("Музыка", "Music"), music.volume, music.uri) { v -> vm.updateProjectMusic { m -> m.copy(volume = v) } }
-    Level(tr("Звук роликов", "Clips' sound"), music.videoVolume, music.uri) { v -> vm.updateProjectMusic { m -> m.copy(videoVolume = v) } }
+private fun MusicSound(vm: CameraController, project: Project) {
+    Level(tr("Музыка", "Music"), project.musicVolume, "music") { v -> vm.setProjectMusicVolume(v) }
+    Level(tr("Звук роликов", "Clips' sound"), project.videoVolume, "video") { v -> vm.setProjectVideoVolume(v) }
 }
 
 /** One level: its name, a slider over the rest of the row, and its percent. Kept when the finger lets go. */

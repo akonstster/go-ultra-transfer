@@ -164,6 +164,10 @@ internal fun ProjectPreview(
     onPlaying: (Int?) -> Unit,
     carrying: Boolean,
     music: ProjectMusic? = null,
+    /** The project's own level for the clips' sound under the music (0 — music only, 1 — as recorded). */
+    videoVolume: Double = ProjectMusic.UNDER_MUSIC,
+    /** The project's own music level: it is kept whether a track is picked or not. */
+    musicVolume: Double = 1.0,
     /** The project's own clock, told out every tick: where the film is, and whether it plays (the timeline draws by it). */
     onClock: (timeMs: Long, playing: Boolean) -> Unit = { _, _ -> },
     /** A jump asked from outside (a tap on the timeline), in project ms; [onSeeked] says it has been taken. */
@@ -261,14 +265,14 @@ internal fun ProjectPreview(
     LaunchedEffect(carrying) {
         if (carrying) player.pause()
     }
-    // The video's own sound under the music: at its own slider's level while there is music (P2).
-    LaunchedEffect(music?.uri, music?.videoVolume) {
-        player.volume = music?.videoVolume?.toFloat()?.coerceIn(0f, 1f) ?: 1f
+    // The video's own sound under the music: at the project's level while there is music (P2).
+    LaunchedEffect(music?.uri, videoVolume) {
+        player.volume = if (music == null) 1f else videoVolume.toFloat().coerceIn(0f, 1f)
     }
     // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
     // sound need not. Its own reading of that time is what the click keeps time with: what is heard, not what is drawn.
     val heard = remember { MusicClock() }
-    ProjectMusicSound(music, shown, playing, heard)
+    ProjectMusicSound(music, musicVolume, shown, playing, heard)
     // And the click on the grid, when it is asked for.
     ProjectMetronome(music, shown, playing, heard, vm::log)
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the

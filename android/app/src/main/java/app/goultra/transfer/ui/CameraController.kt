@@ -3314,14 +3314,48 @@ class CameraController(private val app: Application) {
         next.music?.let(::analyseMusic)
     }
 
-    /** The music's settings changed (volume, ducking): the project keeps them, and the sound follows them everywhere. */
+    /** The music's settings changed (the track's grid, offset, drops): the project keeps them, and the sound follows. */
     fun updateProjectMusic(change: (ProjectMusic) -> ProjectMusic) {
         val p = seenProject ?: return
         val music = p.music ?: return
         val next = change(music)
         saveProject(p.copy(music = next))
-        // Another track needs analysing; volume and ducking alone need nothing.
+        // Another track needs analysing; the grid and drops alone need nothing.
         if (next.uri != music.uri) analyseMusic(next)
+    }
+
+    /** The project's own music level: it survives removing the track, just as the track's sound under it does. */
+    fun setProjectMusicVolume(value: Double) {
+        val p = seenProject ?: return
+        val level = value.coerceIn(0.0, 1.0)
+        if (level != p.musicVolume) saveProject(p.copy(musicVolume = level))
+    }
+
+    /** The project's own level for the clips' sound under the music (0 — music only, 1 — as recorded). */
+    fun setProjectVideoVolume(value: Double) {
+        val p = seenProject ?: return
+        val level = value.coerceIn(0.0, 1.0)
+        if (level != p.videoVolume) saveProject(p.copy(videoVolume = level))
+    }
+
+    /** Which of the found drops the montage accents: the marks stay as the analysis found them. */
+    fun activateProjectDrop(dropMs: Long) {
+        val p = seenProject ?: return
+        val music = p.music ?: return
+        val drops = (music.drops + dropMs).distinct().sorted()
+        saveProject(p.copy(music = music.copy(drops = drops, activeDropMs = dropMs)))
+    }
+
+    /**
+     * A drop put where the project's clock stands: the hand's own answer when the analysis found none, or found the
+     * wrong place. It joins the marks and becomes the active one; a later analysis keeps it as it is.
+     */
+    fun putProjectDropAt(trackMs: Long) {
+        val p = seenProject ?: return
+        val music = p.music ?: return
+        val at = trackMs.coerceAtLeast(0L).let { if (music.lengthMs > 0L) it.coerceAtMost(music.lengthMs) else it }
+        val drops = (music.drops + at).distinct().sorted()
+        saveProject(p.copy(music = music.copy(drops = drops, activeDropMs = at, dropsEdited = true)))
     }
 
     /** The ✕ on the lane: the project has no music (the track itself stays on the phone). */
@@ -3381,7 +3415,7 @@ class CameraController(private val app: Application) {
                 "DEBUG музыка ${file.name}: %.1f BPM, уверенность %.3f, ударов %d, первый %d, последний %d, начало-шаг %s, дроп %s, длина %d, за %d мс".format(
                     found.bpm, found.confidence, beats.size, beats.firstOrNull() ?: -1L,
                     beats.lastOrNull() ?: -1L, firstGap?.toString() ?: "нет",
-                    found.profile?.dropMs?.toString() ?: "нет", found.lengthMs, took,
+                    found.profile?.drops?.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "нет", found.lengthMs, took,
                 ),
             )
         }
@@ -3419,7 +3453,7 @@ class CameraController(private val app: Application) {
                         found.bpm, found.beats.size, found.beats.firstOrNull() ?: -1L,
                         if (found.beats.isEmpty()) "сетки нет" else "сетка v${BeatGrid.ANALYSIS_VERSION}",
                         found.confidence,
-                        found.profile?.dropMs?.toString() ?: "нет", found.lengthMs, found.delayMs,
+                        found.profile?.drops?.takeIf { it.isNotEmpty() }?.joinToString(",") ?: "нет", found.lengthMs, found.delayMs,
                     ),
                 )
                 musicFailed = musicFailed - music.uri
@@ -3432,12 +3466,18 @@ class CameraController(private val app: Application) {
                         (m.beats.isEmpty() || m.lengthMs == 0L || m.gridVersion < BeatGrid.ANALYSIS_VERSION)
                 }.forEach { held ->
                     val m = held.music ?: return@forEach
+                    // Marks put in by hand are never overwritten; an automatic drop from an older detector is replaced
+                    // by the whole set the new one found. An active mark that still exists stays active.
+                    val drops = if (m.dropsEdited) m.drops else found.profile?.drops.orEmpty()
+                    val active = if (m.dropsEdited) m.activeDropMs
+                    else m.activeDropMs?.takeIf { it in drops } ?: drops.firstOrNull()
                     saveProject(
                         held.copy(
                             music = m.copy(
                                 beats = found.beats,
                                 lengthMs = found.lengthMs,
-                                dropMs = m.dropMs ?: found.profile?.dropMs,
+                                drops = drops,
+                                activeDropMs = active,
                                 gridVersion = BeatGrid.ANALYSIS_VERSION,
                                 gridConfidence = found.confidence,
                             ),
@@ -4031,11 +4071,11 @@ class CameraController(private val app: Application) {
                         val track = android.net.Uri.parse(music.uri)
                         val mixed = ProjectSound.mix(
                             parts,
-                            music.videoVolume.toFloat(),
+                            p.videoVolume.toFloat(),
                             ProjectSound.Music(
                                 { ex -> ex.setDataSource(app, track, null) },
                                 music.offsetMs.coerceAtLeast(0L),
-                                music.volume.toFloat(),
+                                p.musicVolume.toFloat(),
                                 // The track may start after the picture does: silence first, then the music.
                                 (-music.offsetMs).coerceAtLeast(0L),
                             ),
@@ -4050,7 +4090,7 @@ class CameraController(private val app: Application) {
                 }
                 lastResult = tr("Проект сохранён: %s · ", "Project saved: %s · ").format(name) + "%.1f ".format(lengthUs / 1e6) + tr("с", "s")
                 log("проект $name как снято: ${runs.size} отрезков, ${p.clips.size} кусков, %.1f с".format(lengthUs / 1e6) +
-                    (p.music?.takeIf { sound }?.let { m -> ", музыка ${(m.volume * 100).toInt()} %, ролики ${(m.videoVolume * 100).toInt()} %" } ?: ""))
+                    (p.music?.takeIf { sound }?.let { m -> ", музыка ${(p.musicVolume * 100).toInt()} %, ролики ${(p.videoVolume * 100).toInt()} %" } ?: ""))
                 forgetThumbnail(name)
                 lastSaveOk = true
                 loadPhoneFiles()
@@ -4123,8 +4163,8 @@ class CameraController(private val app: Application) {
                 // The music plays under the picture, and the video's own sound stays at its own slider's level:
                 // media3 mixes the sequences' sound, each item with a gain of its own.
                 val music = p.music
-                val under = if (music != null && sound && music.videoVolume < 1.0) {
-                    listOf<androidx.media3.common.audio.AudioProcessor>(gain(music.videoVolume.toFloat()))
+                val under = if (music != null && sound && p.videoVolume < 1.0) {
+                    listOf<androidx.media3.common.audio.AudioProcessor>(gain(p.videoVolume.toFloat()))
                 } else {
                     emptyList()
                 }
@@ -4171,7 +4211,7 @@ class CameraController(private val app: Application) {
                         .build()
                     val track = androidx.media3.transformer.EditedMediaItem.Builder(media)
                         .setRemoveVideo(true)
-                        .setEffects(androidx.media3.transformer.Effects(listOf<androidx.media3.common.audio.AudioProcessor>(gain(music.volume.toFloat())), emptyList()))
+                        .setEffects(androidx.media3.transformer.Effects(listOf<androidx.media3.common.audio.AudioProcessor>(gain(p.musicVolume.toFloat())), emptyList()))
                         .build()
                     sequences += if ((-music.offsetMs).coerceAtLeast(0L) > 0L) {
                         // The track starts after the picture: a gap of silence leads into it.

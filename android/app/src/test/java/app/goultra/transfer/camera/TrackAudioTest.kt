@@ -59,6 +59,18 @@ class TrackAudioTest {
     }
 
     @Test
+    fun `a long track is read to its end, not cut at four minutes`() {
+        // The old analysis listened to 240 s of every track: a 5:45 project had no grid and no drops past 4:00. The frame
+        // count is what the decoder is asked for, so it can be pinned without a phone decoder.
+        val rate = 44_100
+        assertEquals(345L * rate, TrackAudio.framesToRead(345_000L, rate))
+        assertTrue(TrackAudio.ANALYSIS_LIMIT_MS > 240_000L)
+        // A file that does not say how long it is is still read up to the safety limit, and a shorter one to its end.
+        assertEquals(TrackAudio.ANALYSIS_LIMIT_MS * rate / 1000, TrackAudio.framesToRead(0L, rate))
+        assertEquals(20L * rate, TrackAudio.framesToRead(20_000L, rate))
+    }
+
+    @Test
     fun `the grid runs on to the end of the track at the period it was found with`() {
         val grid = BeatGrid.Grid(bpm = 120.0, offsetMs = 0L, beats = listOf(0L, 500L, 1000L), confidence = 0.9)
         assertEquals(listOf(0L, 500L, 1000L, 1500L, 2000L), TrackAudio.beatsOver(grid, 2500L))
