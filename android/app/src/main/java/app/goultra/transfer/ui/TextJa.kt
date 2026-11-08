@@ -575,7 +575,7 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "variable %.1f–%.1f" to "可変 %.1f–%.1f",
     "The tempo changes along the track — only the whole grid can be shifted" to "曲の途中でテンポが変わります — グリッド全体のずらしだけができます",
     "Click" to "クリック",
-    "The click goes through the phone's mixer: trails — ⇠, leads — ⇢" to "クリックは端末のミキサーを通ります：遅れる — ⇠、早まる — ⇢",
+    "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer." to "「⇠」— 早める、「⇢」— 遅らせる。クリックは端末のミキサーを通ります。",
     "No music" to "音楽なし",
     "No track" to "曲なし",
     "The drop is where the track's energy leaps: the montage will put an accent there" to "ドロップは曲のエネルギーが跳ね上がる場所です：自動編集はそこにアクセントを置きます",

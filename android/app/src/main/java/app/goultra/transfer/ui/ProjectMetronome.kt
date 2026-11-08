@@ -8,11 +8,8 @@ import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalContext
 import app.goultra.transfer.camera.ProjectMusic
 import java.io.File
@@ -20,9 +17,9 @@ import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.math.sin
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** How long the click sounds, and how quickly it dies away — a tick, not a note. */
 private const val CLICK_MS = 25
@@ -33,6 +30,18 @@ private const val CLICK_HZ = 1_400.0
  * plays them through. No phone tells it; this is the allowance that took the click from "after the beat" to the beat.
  */
 private const val CLICK_QUEUE_MS = 30L
+
+/**
+ * What the click keeps time with, read afresh by the one scheduler loop: the project's moment, whether it plays, whether
+ * the metronome is on, and the two numbers of the timing — the phone's own delay and the ear's signed shift.
+ */
+private data class ClickInput(
+    val timeMs: Long,
+    val playing: Boolean,
+    val on: Boolean,
+    val latencyMs: Long,
+    val shiftMs: Long,
+)
 
 /**
  * The click on the grid (P3): every beat of the track sounds where its red line stands, so a grid found by the analysis
@@ -57,40 +66,97 @@ internal fun ProjectMetronome(
     val beats = music?.beats.orEmpty()
     if (music == null || beats.isEmpty()) return
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val click = remember { Click(context) }
     DisposableEffect(click) { onDispose { click.release() } }
     // What the phone takes to sound a click: the click must be *heard* on the beat, so it is queued that much earlier.
     val latency = remember(click) { outputLatencyMs(context) }
     // The ear may take the last few tenths either way (no phone tells how long its mixer holds a click).
     val nudge = AppPrefs.clickNudge
+    val log = rememberUpdatedState(onLog)
     LaunchedEffect(latency, nudge) {
-        onLog("клик: задержка вывода $latency мс, подстройка $nudge мс, всего ${(latency + nudge).coerceAtLeast(0L)} мс")
+        val where = when {
+            nudge > 0 -> "позже"
+            nudge < 0 -> "раньше"
+            else -> "по биту"
+        }
+        val signed = if (nudge > 0) "+$nudge" else "$nudge"
+        log.value("клик: задержка вывода $latency мс, сдвиг $signed мс ($where)")
     }
-    val schedule = remember(beats, music.offsetMs) { MetronomeSchedule(beats, music.offsetMs) }
-    var pending by remember(schedule) { mutableStateOf<Job?>(null) }
     val on = AppPrefs.metronome
-    LaunchedEffect(schedule, timeMs, playing, on, nudge) {
-        val at = SystemClock.elapsedRealtime()
-        // Where the click is due is where the *music* stands; the picture's own clock is only the stand-in for a track that
-        // is not heard yet (still loading, or the film has not reached its start).
-        val base = heard.now(at) ?: timeMs
-        if (schedule.told(base, at, playing && on)) {
-            pending?.cancel()
-            pending = null
+    // One scheduler lives through the whole playback: a click waiting for its moment is not a job per tick, and a tick
+    // that comes late changes nothing it has already promised.
+    val input = rememberUpdatedState(ClickInput(timeMs, playing, on, latency, nudge.toLong()))
+    val schedule = remember(beats, music.offsetMs) { MetronomeSchedule(beats, music.offsetMs) }
+    val signal = remember(schedule) { Channel<Unit>(Channel.CONFLATED) }
+    // Every tick of the project's clock wakes the scheduler: a beat may have come due, or the music may have paused.
+    LaunchedEffect(signal, timeMs, playing, on, latency, nudge) { signal.trySend(Unit) }
+    LaunchedEffect(schedule, click, signal) {
+        var waitingBeat = Long.MIN_VALUE
+        var targetAt = 0L
+        var waitedShift = 0L
+        var waitedLatency = 0L
+        var complained = false
+        fun play(beat: Long): Boolean {
+            val ok = click.play()
+            if (!ok && !complained) {
+                log.value("клик: SoundPool не принял удар $beat (ещё загружается или отказал)")
+                complained = true
+            }
+            if (ok) complained = false
+            return ok
         }
-        if (!playing || !on) return@LaunchedEffect
-        val due = schedule.due(at, CLICK_LEAD_MS, (latency + nudge).coerceAtLeast(0L)) ?: return@LaunchedEffect
-        if (due.inMs <= 0L) {
-            // On the beat: the click goes at once, and only once (a tick that comes late does not repeat it).
-            if (click.play()) schedule.fired(due.beat) else schedule.released()
-            return@LaunchedEffect
-        }
-        // A beat a moment away: waited for, so the click is not up to a tick early or late.
-        pending?.cancel()
-        pending = scope.launch {
-            delay(due.inMs)
-            if (click.play()) schedule.fired(due.beat) else schedule.released()
+        while (isActive) {
+            val at = SystemClock.elapsedRealtime()
+            val now = input.value
+            // Where the click is due is where the *music* stands; the picture's own clock is only the stand-in for a track
+            // that is not heard yet (still loading, or the film has not reached its start).
+            val base = heard.now(at) ?: now.timeMs
+            val lateBefore = schedule.lateBeat
+            if (schedule.told(base, at, now.playing && now.on)) {
+                if (waitingBeat != Long.MIN_VALUE) {
+                    log.value("клик: часы сдвинулись — удар $waitingBeat снят")
+                }
+                waitingBeat = Long.MIN_VALUE
+            }
+            if (!now.playing || !now.on) {
+                waitingBeat = Long.MIN_VALUE
+                signal.receive()
+                continue
+            }
+            if (waitingBeat != Long.MIN_VALUE && (now.shiftMs != waitedShift || now.latencyMs != waitedLatency)) {
+                // The ear moved the click: put the same beat back into the plan with its new moment, never a second one.
+                schedule.released()
+                waitingBeat = Long.MIN_VALUE
+                continue
+            }
+            if (waitingBeat != Long.MIN_VALUE) {
+                val left = targetAt - at
+                if (left > 0L) {
+                    // Wait for the moment, or for a tick that may have paused the music or moved the click.
+                    withTimeoutOrNull(left) { signal.receive() }
+                    continue
+                }
+                if (play(waitingBeat)) schedule.fired(waitingBeat) else schedule.released()
+                waitingBeat = Long.MIN_VALUE
+                continue
+            }
+            val due = schedule.due(at, CLICK_LEAD_MS, now.latencyMs, now.shiftMs)
+            if (schedule.lateBeat != lateBefore) {
+                log.value("клик: удар ${schedule.lateBeat} пропущен — опоздал на ${schedule.lateByMs} мс")
+            }
+            if (due == null) {
+                signal.receive()
+                continue
+            }
+            if (due.inMs <= 0L) {
+                // On the beat: the click goes at once, and only once (a tick that comes late does not repeat it).
+                if (play(due.beat)) schedule.fired(due.beat) else schedule.released()
+                continue
+            }
+            waitingBeat = due.beat
+            targetAt = at + due.inMs
+            waitedShift = now.shiftMs
+            waitedLatency = now.latencyMs
         }
     }
 }
@@ -113,7 +179,7 @@ private fun outputLatencyMs(context: Context): Long {
 /** The tick itself: a short, quickly dying tone, made once and kept in the cache — a metronome must sound the same always. */
 private class Click(context: Context) {
     private val pool = SoundPool.Builder()
-        .setMaxStreams(2)
+        .setMaxStreams(4)
         .setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)

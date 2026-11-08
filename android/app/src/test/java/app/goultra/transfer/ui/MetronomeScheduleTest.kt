@@ -102,4 +102,75 @@ class MetronomeScheduleTest {
         assertEquals(900L, second.beat)
         assertEquals(0L, second.inMs)
     }
+
+    @Test
+    fun `the ear's shift moves the click either way, with no dead end`() {
+        // What the phone adds is compensated apart from the ear's shift. Across the whole ±120 ms the moment of the click
+        // must follow every five-ms step; folding the two numbers together and cutting the result at zero lost the end.
+        var previous: Long? = null
+        for (shift in -120L..120L step 5) {
+            val expected = 1_000L - 50L + shift
+            val now = expected - 50L
+            val s = MetronomeSchedule(listOf(1_000L), offsetMs = 0L)
+            s.told(now, atMs = now, playing = true)
+            val due = s.due(now, leadMs = 60L, latencyMs = 50L, shiftMs = shift)!!
+            val heardAt = now + due.inMs
+            assertEquals("shift $shift", expected, heardAt)
+            previous?.let { assertEquals("shift $shift must move by five ms", 5L, heardAt - it) }
+            previous = heardAt
+        }
+    }
+
+    @Test
+    fun `a tick that comes late does not lose a beat`() {
+        val s = MetronomeSchedule(listOf(500L, 1_000L), offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        var clicked = 0
+        // The project's clock is told only every 120 ms, twice as slowly as usual: every beat must still be clicked.
+        for (at in 0L..1_080L step 120L) {
+            val due = s.due(at, leadMs = 60L, latencyMs = 50L)
+            if (due != null) {
+                s.fired(due.beat)
+                clicked++
+            }
+        }
+        assertEquals(2, clicked)
+        assertEquals(Long.MIN_VALUE, s.lateBeat)
+    }
+
+    @Test
+    fun `a waiting click is moved by the ear, not clicked twice`() {
+        val s = MetronomeSchedule(beats, offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        // The beat at 500 is queued at 450: at 400 it is fifty ms away.
+        val first = s.due(400L, leadMs = 60L, latencyMs = 50L, shiftMs = 0L)!!
+        assertEquals(50L, first.inMs)
+        // The ear asks for it ten ms later, then twenty: the same beat is put back into the plan at its new moment.
+        s.released()
+        assertNull(s.due(400L, leadMs = 60L, latencyMs = 50L, shiftMs = 20L))
+        val moved = s.due(420L, leadMs = 60L, latencyMs = 50L, shiftMs = 20L)!!
+        assertEquals(500L, moved.beat)
+        assertEquals(50L, moved.inMs)
+        s.fired(moved.beat)
+        assertNull(s.due(420L, leadMs = 60L, latencyMs = 50L, shiftMs = 20L))
+    }
+
+    @Test
+    fun `a beat missed by more than the late limit is logged, not clicked into the next one`() {
+        val s = MetronomeSchedule(listOf(500L, 1_000L), offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        assertNull(s.due(620L, leadMs = 0L, latencyMs = 50L))
+        assertEquals(500L, s.lateBeat)
+        assertEquals(170L, s.lateByMs)
+    }
+
+    @Test
+    fun `a stutter of the clock is not a jump`() {
+        val s = MetronomeSchedule(beats, offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        // A movement of 120 ms — a late tick, not a seek — keeps the plan.
+        assertFalse(s.told(120L, atMs = 0L, playing = true))
+        // Past a quarter of a second the clock has really moved: the clicks it promised are taken back.
+        assertTrue(s.told(500L, atMs = 0L, playing = true))
+    }
 }

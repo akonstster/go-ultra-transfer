@@ -575,7 +575,7 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "variable %.1f–%.1f" to "速度变化 %.1f–%.1f",
     "The tempo changes along the track — only the whole grid can be shifted" to "整首曲子的速度在变 — 只能整体移动网格",
     "Click" to "咔嗒",
-    "The click goes through the phone's mixer: trails — ⇠, leads — ⇢" to "咔嗒声要经过手机混音器：偏晚 — ⇠，偏早 — ⇢",
+    "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer." to "“⇠” — 更早，“⇢” — 更晚。咔嗒声要经过手机混音器。",
     "No music" to "没有音乐",
     "No track" to "没有曲目",
     "The drop is where the track's energy leaps: the montage will put an accent there" to "高潮点是曲目能量跃升之处：自动剪辑会在那里加一个重音",

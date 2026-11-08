@@ -246,9 +246,10 @@ private fun GridRow(vm: CameraController, music: ProjectMusic) {
 }
 
 /**
- * The click a little earlier or later than the phone's own buffers promise: a click goes through the phone's mixer, and no
- * phone tells how long that takes — so the ear has the last tenths. «⇠» puts the click earlier (a click that trails the
- * beat), «⇢» later (one that leads it). Kept between launches, so it is set once.
+ * The click a little earlier or later than the beat: a click goes through the phone's mixer, and no phone tells how long
+ * that takes — so the ear has the last tenths. «⇠» moves it earlier, «⇢» later, and the number keeps the sign (+ later,
+ * − earlier). The hardware latency stays compensated on its own, so the whole ±[AppPrefs.CLICK_NUDGE_LIMIT] really moves
+ * the sound. Kept between launches, so it is set once.
  */
 @Composable
 private fun ClickNudge(enabled: Boolean) {
@@ -256,19 +257,19 @@ private fun ClickNudge(enabled: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(tr("Клик", "Click"), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
         IconButton(
-            { AppPrefs.chooseClickNudge(nudge + AppPrefs.CLICK_NUDGE_STEP) },
-            enabled = enabled && nudge < AppPrefs.CLICK_NUDGE_LIMIT,
+            { AppPrefs.chooseClickNudge(nudge - AppPrefs.CLICK_NUDGE_STEP) },
+            enabled = enabled && nudge > -AppPrefs.CLICK_NUDGE_LIMIT,
         ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null) }
         Text((if (nudge > 0) "+$nudge" else "$nudge") + " ms", style = MaterialTheme.typography.bodySmall)
         IconButton(
-            { AppPrefs.chooseClickNudge(nudge - AppPrefs.CLICK_NUDGE_STEP) },
-            enabled = enabled && nudge > -AppPrefs.CLICK_NUDGE_LIMIT,
+            { AppPrefs.chooseClickNudge(nudge + AppPrefs.CLICK_NUDGE_STEP) },
+            enabled = enabled && nudge < AppPrefs.CLICK_NUDGE_LIMIT,
         ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) }
     }
     Text(
         tr(
-            "Клик идёт через микшер телефона: отстаёт — ⇠, спешит — ⇢",
-            "The click goes through the phone's mixer: trails — ⇠, leads — ⇢",
+            "«⇠» — раньше, «⇢» — позже. Клик проходит через микшер телефона.",
+            "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer.",
         ),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
