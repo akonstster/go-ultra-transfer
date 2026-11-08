@@ -143,7 +143,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 5)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 6)
     }
 
     @Test
@@ -346,6 +346,36 @@ class BeatGridTest {
         assertEquals(listOf(15_000L), shortDrops)
         assertEquals(1, fullDrops.size)
         assertTrue("the drop after 20 s is on the full grid: $fullDrops", fullDrops.single() in 20_000L..20_500L)
+    }
+
+    @Test
+    fun `a track whose notes run at twice the beat keeps the beat, not the eighth notes`() {
+        // A kick every 500 ms with an extra quieter hit between them: the strongest repeat is at 250 ms, and the walk back
+        // over a long quiet introduction used to shrink the period by 15 % a step until the grid doubled (252 BPM on a
+        // 126 BPM track). The beat itself must survive the extra notes.
+        val seconds = 40
+        val out = FloatArray(rate * seconds) { i -> (0.05 * sin(2 * PI * 220 * i / rate)).toFloat() }
+        val rnd = Random(31)
+        var at = 0.25 * rate
+        var k = 0
+        while (at < out.size) {
+            val loud = if (k % 2 == 0) 0.85f else 0.20f
+            val start = at.toInt()
+            for (n in 0 until 900) {
+                if (start + n >= out.size) break
+                out[start + n] += ((rnd.nextFloat() * 2 - 1) * loud * exp(-n / 160.0)).toFloat()
+            }
+            at += 0.25 * rate
+            k++
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertEquals("the beat, not its double", 120.0, g!!.bpm, 2.5)
+        assertTrue("grid begins at the track: ${g.offsetMs}", g.offsetMs < 1_000L)
+        assertTrue(
+            "beats: ${g.beats.take(8)}",
+            g.beats.take(8).zipWithNext { a, b -> b - a }.all { abs(it - 500) <= 25 },
+        )
     }
 
     @Test

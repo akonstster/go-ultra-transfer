@@ -112,7 +112,7 @@ object BeatGrid {
     private const val MIN_STARTS = 8
 
     /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
-    const val ANALYSIS_VERSION = 5
+    const val ANALYSIS_VERSION = 6
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
@@ -324,7 +324,11 @@ object BeatGrid {
             val snapped = snapExact(onset, expected, window)
             val at = if (abs(snapped - expected) <= window + 0.5) snapped else expected
             before += at
-            step = localPeriod(onset, at, step, fps)
+            // A tempo may drift, but not by a sixth from one beat to the next: unclamped, the local reading could shrink
+            // by 15 % at every step and the walk back to the beginning arrived at half the period (252 BPM on a 126 BPM
+            // track). The reading still follows a real drift, just a few per cent at a time.
+            val local = localPeriod(onset, at, step, fps)
+            step = local.coerceIn(step * 0.92, step * 1.08)
             predicted = at
         }
         before.reverse()
