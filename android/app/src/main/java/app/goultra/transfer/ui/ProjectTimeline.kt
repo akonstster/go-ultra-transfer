@@ -306,17 +306,15 @@ private fun Lane(
                     }
                 }
             }
-            music.beats.forEachIndexed { n, beat ->
+            // Every beat the same: which one opens a bar the analysis does not know, and a guessed accent would be a lie.
+            music.beats.forEach { beat ->
                 val projectMs = beat - trackOffset
-                if (projectMs < 0L || projectMs > g.totalMs) return@forEachIndexed
+                if (projectMs < 0L || projectMs > g.totalMs) return@forEach
                 val x = g.x(projectMs, at)
-                if (x < -2f || x > size.width + 2f) return@forEachIndexed
-                val strong = n % TIMELINE_BAR_EVERY == 0
-                val stroke = if (strong) 2.5f else 1.5f
-                val colour = if (strong) bar else tick
+                if (x < -2f || x > size.width + 2f) return@forEach
                 // Faintly through the picture too: a joint that lands on a beat is seen at once.
-                drawLine(colour.copy(alpha = colour.alpha * 0.45f), Offset(x, 0f), Offset(x, videoH), strokeWidth = stroke)
-                drawLine(colour, Offset(x, musicTop), Offset(x, musicTop + musicH), strokeWidth = stroke)
+                drawLine(tick.copy(alpha = tick.alpha * 0.45f), Offset(x, 0f), Offset(x, videoH), strokeWidth = 1.5f)
+                drawLine(tick, Offset(x, musicTop), Offset(x, musicTop + musicH), strokeWidth = 1.5f)
             }
             // The drop: a mark of its own over the music band.
             music.dropMs?.let { drop ->

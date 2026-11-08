@@ -270,6 +270,8 @@ internal fun ProjectPreview(
     // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
     // sound need not.
     ProjectMusicSound(music, shown, playing)
+    // And the click on the grid, when it is asked for.
+    ProjectMetronome(music, shown, playing)
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {

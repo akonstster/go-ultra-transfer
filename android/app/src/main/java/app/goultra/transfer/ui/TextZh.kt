@@ -567,9 +567,13 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Remove the track" to "移除曲目",
     "The track could not be read" to "无法读取曲目",
     "Analysing the track…" to "正在分析曲目…",
-    "Beat: %s BPM" to "节拍：%s BPM",
-"Grid" to "节拍网格",
     "Tap" to "敲击",
     "Drop" to "高潮点",
+"Sound" to "声音",
+    "Tempo" to "速度",
+    "Metronome" to "节拍器",
+    "No music" to "没有音乐",
+    "No track" to "没有曲目",
+    "The drop is where the track's energy leaps: the montage will put an accent there" to "高潮点是曲目能量跃升之处：自动剪辑会在那里加一个重音",
 )
 

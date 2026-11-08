@@ -567,9 +567,13 @@ internal val TEXT_IT: Map<String, String> = mapOf(
     "Remove the track" to "Rimuovi la traccia",
     "The track could not be read" to "Impossibile leggere la traccia",
     "Analysing the track…" to "Analisi della traccia…",
-    "Beat: %s BPM" to "Battito: %s BPM",
-"Grid" to "Griglia",
     "Tap" to "Tocca",
     "Drop" to "Drop",
+"Sound" to "Audio",
+    "Tempo" to "Tempo",
+    "Metronome" to "Metronomo",
+    "No music" to "Nessuna musica",
+    "No track" to "Nessuna traccia",
+    "The drop is where the track's energy leaps: the montage will put an accent there" to "Il drop è dove l'energia della traccia salta: il montaggio ci metterà un accento",
 )
 

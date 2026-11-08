@@ -567,9 +567,13 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Remove the track" to "曲を外す",
     "The track could not be read" to "曲を読み取れません",
     "Analysing the track…" to "曲を解析しています…",
-    "Beat: %s BPM" to "ビート：%s BPM",
-"Grid" to "グリッド",
     "Tap" to "タップ",
     "Drop" to "ドロップ",
+"Sound" to "サウンド",
+    "Tempo" to "テンポ",
+    "Metronome" to "メトロノーム",
+    "No music" to "音楽なし",
+    "No track" to "曲なし",
+    "The drop is where the track's energy leaps: the montage will put an accent there" to "ドロップは曲のエネルギーが跳ね上がる場所です：自動編集はそこにアクセントを置きます",
 )
 

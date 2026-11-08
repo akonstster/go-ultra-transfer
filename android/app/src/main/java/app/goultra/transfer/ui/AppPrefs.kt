@@ -66,11 +66,21 @@ object AppPrefs {
     var language by mutableStateOf(LanguageMode.SYSTEM)
         private set
 
+    /** The click on every beat in a project's preview: on or off, kept between launches. */
+    var metronome by mutableStateOf(false)
+        private set
+
     fun init(context: Context) {
         this.context = context.applicationContext
         val prefs = context.getSharedPreferences(FILE, 0)
         theme = runCatching { ThemeMode.valueOf(prefs.getString("theme", null)!!) }.getOrDefault(ThemeMode.SYSTEM)
         language = runCatching { LanguageMode.valueOf(prefs.getString("language", null)!!) }.getOrDefault(LanguageMode.SYSTEM)
+        metronome = prefs.getBoolean("metronome", false)
+    }
+
+    fun chooseMetronome(on: Boolean) {
+        metronome = on
+        context?.getSharedPreferences(FILE, 0)?.edit()?.putBoolean("metronome", on)?.apply()
     }
 
     fun chooseTheme(mode: ThemeMode) {

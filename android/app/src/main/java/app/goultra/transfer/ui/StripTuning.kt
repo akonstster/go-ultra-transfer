@@ -58,9 +58,6 @@ internal const val TIMELINE_FOLLOW_SHARE = 1f / 3f
 /** How long after a touch the timeline stops following the clock, ms. */
 internal const val TIMELINE_FOLLOW_PAUSE_MS = 1500L
 
-/** Every fourth beat opens a bar: a thicker line, the same count as on the music track. */
-internal const val TIMELINE_BAR_EVERY = 4
-
 /** The music's offset may not come closer to the track's end than this, ms: a sliver of a track is no use. */
 internal const val TIMELINE_OFFSET_TAIL_MS = 1000L
 

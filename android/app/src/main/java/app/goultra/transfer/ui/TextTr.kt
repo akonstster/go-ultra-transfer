@@ -567,9 +567,13 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Remove the track" to "Parçayı kaldır",
     "The track could not be read" to "Parça okunamıyor",
     "Analysing the track…" to "Parça çözümleniyor…",
-    "Beat: %s BPM" to "Ritim: %s BPM",
-"Grid" to "Izgara",
     "Tap" to "Dokun",
     "Drop" to "Drop",
+"Sound" to "Ses",
+    "Tempo" to "Tempo",
+    "Metronome" to "Metronom",
+    "No music" to "Müzik yok",
+    "No track" to "Parça yok",
+    "The drop is where the track's energy leaps: the montage will put an accent there" to "Drop, parçanın enerjisinin sıçradığı yerdir: otomatik kurgu oraya bir vurgu koyacak",
 )
 
