@@ -74,11 +74,13 @@ internal fun startsOf(clips: List<ProjectClip>): List<Long> {
 }
 
 /**
- * The music's offset after a drag of [dxPx] at [pxPerMs]: the finger to the right brings the track earlier in the
- * project (the offset shrinks), to the left — later; kept inside 0…[maxOffsetMs].
+ * The music's offset after a drag of [dxPx] at [pxPerMs]: the finger to the right brings the track later than the
+ * picture (its start moves right, silence before it — that is a negative offset), to the left — earlier in the track
+ * (the head is cut off); kept inside [minOffsetMs]…[maxOffsetMs].
  */
-internal fun draggedOffset(offsetMs: Long, dxPx: Float, pxPerMs: Float, maxOffsetMs: Long): Long {
-    val limit = maxOffsetMs.coerceAtLeast(0L)
-    if (pxPerMs <= 0f) return offsetMs.coerceIn(0L, limit)
-    return (offsetMs - (dxPx / pxPerMs).roundToLong()).coerceIn(0L, limit)
+internal fun draggedOffset(offsetMs: Long, dxPx: Float, pxPerMs: Float, maxOffsetMs: Long, minOffsetMs: Long = 0L): Long {
+    val high = maxOffsetMs.coerceAtLeast(0L)
+    val low = minOffsetMs.coerceAtMost(0L).coerceAtMost(high)
+    if (pxPerMs <= 0f) return offsetMs.coerceIn(low, high)
+    return (offsetMs - (dxPx / pxPerMs).roundToLong()).coerceIn(low, high)
 }

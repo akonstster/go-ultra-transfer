@@ -101,4 +101,13 @@ class TimelineGeometryTest {
         assertMs(700L, draggedOffset(700L, dxPx = 400f, pxPerMs = 0f, maxOffsetMs = 20_000L), delta = 0L)
         assertMs(0L, draggedOffset(-50L, dxPx = 0f, pxPerMs = 0f, maxOffsetMs = 20_000L), delta = 0L)
     }
+
+    @Test
+    fun `the music may also start later than the picture, and that is bounded too`() {
+        // A hundred pixels to the right are a second off the picture's start — the track then begins later.
+        assertMs(-1000L, draggedOffset(0L, dxPx = 100f, pxPerMs = 0.1f, maxOffsetMs = 20_000L, minOffsetMs = -3_000L), delta = 0L)
+        assertMs(-3_000L, draggedOffset(-2_500L, dxPx = 10_000f, pxPerMs = 0.1f, maxOffsetMs = 20_000L, minOffsetMs = -3_000L), delta = 0L)
+        // Without a lower limit it stops at the picture's own start, as before.
+        assertMs(0L, draggedOffset(0L, dxPx = 500f, pxPerMs = 0.1f, maxOffsetMs = 20_000L), delta = 0L)
+    }
 }

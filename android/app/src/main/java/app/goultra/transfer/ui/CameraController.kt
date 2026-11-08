@@ -3937,7 +3937,13 @@ class CameraController(private val app: Application) {
                         val mixed = ProjectSound.mix(
                             parts,
                             music.videoVolume.toFloat(),
-                            ProjectSound.Music({ ex -> ex.setDataSource(app, track, null) }, music.offsetMs, music.volume.toFloat()),
+                            ProjectSound.Music(
+                                { ex -> ex.setDataSource(app, track, null) },
+                                music.offsetMs.coerceAtLeast(0L),
+                                music.volume.toFloat(),
+                                // The track may start after the picture does: silence first, then the music.
+                                (-music.offsetMs).coerceAtLeast(0L),
+                            ),
                             soundTmp,
                         ) { job?.isActive == false }
                         Downloader.saveClip(app, name, System.currentTimeMillis()) { fd -> ClipAudio.mux(videoTmp, mixed, fd) }
@@ -4055,13 +4061,16 @@ class CameraController(private val app: Application) {
                 val sequences = mutableListOf(androidx.media3.transformer.EditedMediaItemSequence.Builder(items).build())
                 val lengthMs = p.clips.sumOf { it.durationMs }
                 if (music != null && sound && lengthMs > 0L) {
+                    // Where the track is heard: from its own start (or from [from] in it, when its head is cut off) for
+                    // as long as the film runs — never longer, or the track would stretch the film past its last piece.
                     val from = music.offsetMs.coerceAtLeast(0L)
+                    val to = (lengthMs + music.offsetMs).coerceAtLeast(from + 1L)
                     val media = androidx.media3.common.MediaItem.Builder()
                         .setUri(music.uri)
                         .setClippingConfiguration(
                             androidx.media3.common.MediaItem.ClippingConfiguration.Builder()
                                 .setStartPositionMs(from)
-                                .setEndPositionMs(from + lengthMs)
+                                .setEndPositionMs(to)
                                 .build(),
                         )
                         .build()
@@ -4069,7 +4078,15 @@ class CameraController(private val app: Application) {
                         .setRemoveVideo(true)
                         .setEffects(androidx.media3.transformer.Effects(listOf<androidx.media3.common.audio.AudioProcessor>(gain(music.volume.toFloat())), emptyList()))
                         .build()
-                    sequences += androidx.media3.transformer.EditedMediaItemSequence.Builder(listOf(track)).build()
+                    sequences += if ((-music.offsetMs).coerceAtLeast(0L) > 0L) {
+                        // The track starts after the picture: a gap of silence leads into it.
+                        androidx.media3.transformer.EditedMediaItemSequence.Builder()
+                            .addGap(-music.offsetMs * 1000L) // µs
+                            .addItem(track)
+                            .build()
+                    } else {
+                        androidx.media3.transformer.EditedMediaItemSequence.Builder(listOf(track)).build()
+                    }
                 }
                 val composition = androidx.media3.transformer.Composition.Builder(sequences)
                     .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf(fit)))

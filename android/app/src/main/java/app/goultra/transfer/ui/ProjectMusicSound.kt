@@ -56,7 +56,14 @@ internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Bool
     // or not (a jump made while paused is still a jump), and it plays or pauses exactly as the picture does — a carried
     // card, or a piece waiting on the camera's Wi-Fi, stops both.
     LaunchedEffect(timeMs, playing, music.uri, music.offsetMs) {
-        val want = (music.offsetMs + timeMs).coerceAtLeast(0L)
+        val want = music.offsetMs + timeMs
+        if (want < 0L) {
+            // The track starts after the picture does: it waits at its own beginning, silent, until the film reaches it.
+            if (player.currentPosition > 0L) player.seekTo(0L)
+            if (player.playbackParameters.speed != 1f) player.setPlaybackSpeed(1f)
+            player.playWhenReady = false
+            return@LaunchedEffect
+        }
         val off = player.currentPosition - want
         val speed = musicSpeed(off, playing)
         if (speed == null) player.seekTo(want)

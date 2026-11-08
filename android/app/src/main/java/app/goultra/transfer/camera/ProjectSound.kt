@@ -20,8 +20,11 @@ object ProjectSound {
     /** One file's pieces as the picture really took them (source ms); [open] sets an extractor on the file. */
     class Part(val open: (MediaExtractor) -> Unit, val pieces: List<Highlight>)
 
-    /** The music: its file, where in it the project starts (ms), and its level. */
-    class Music(val open: (MediaExtractor) -> Unit, val fromMs: Long, val gain: Float)
+    /**
+     * The music: its file, where in it the project starts (ms), its level, and how long the picture runs before the
+     * track begins ([delayMs]) — a track may start after the film does.
+     */
+    class Music(val open: (MediaExtractor) -> Unit, val fromMs: Long, val gain: Float, val delayMs: Long = 0L)
 
     /**
      * The clips' sound at [clipsGain] under [music] into [file] as AAC; as long as the pieces together. [cancelled] is
@@ -29,7 +32,7 @@ object ProjectSound {
      */
     fun mix(parts: List<Part>, clipsGain: Float, music: Music?, file: java.io.File, cancelled: () -> Boolean): ClipAudio.Encoded {
         val writer = ClipAudio.AacWriter(RATE, CHANNELS, file)
-        val track = music?.let { m -> runCatching { ClipAudio.openPcm(m.open) }.getOrNull()?.let { Feed(it, m.fromMs) } }
+        val track = music?.let { m -> runCatching { ClipAudio.openPcm(m.open) }.getOrNull()?.let { Feed(it, m.fromMs, m.delayMs) } }
         try {
             val clip = FloatArray(CHUNK * CHANNELS)
             val tune = FloatArray(CHUNK * CHANNELS)
@@ -68,15 +71,24 @@ object ProjectSound {
      * A source read on from [fromMs] and given out at [RATE] stereo: linear interpolation between its own frames (the
      * reader is asked for whole chunks one after another — a read anywhere else is a seek, and a seek is a click).
      */
-    private class Feed(private val reader: ClipAudio.PcmReader, fromMs: Long) {
+    private class Feed(private val reader: ClipAudio.PcmReader, fromMs: Long, delayMs: Long = 0L) {
         private val step = reader.rate.toDouble() / RATE
         private var pos = fromMs * reader.rate / 1000.0
         private var start = floor(pos).toLong()
         private var frames = ShortArray(0)
         private var carry = ShortArray(CHANNELS) // the frame just before [start], to interpolate across a chunk's edge
+        /** Frames of the picture that still pass before the track begins (the music starts later than the film). */
+        private var delay = (delayMs.coerceAtLeast(0L) * RATE / 1000).toInt()
 
         fun take(n: Int, out: FloatArray) {
-            for (i in 0 until n) {
+            var done = 0
+            while (delay > 0 && done < n) {
+                val quiet = minOf(delay, n - done)
+                out.fill(0f, done * CHANNELS, (done + quiet) * CHANNELS)
+                delay -= quiet
+                done += quiet
+            }
+            for (i in done until n) {
                 val f = floor(pos).toLong()
                 val t = (pos - f).toFloat()
                 for (c in 0 until CHANNELS) {

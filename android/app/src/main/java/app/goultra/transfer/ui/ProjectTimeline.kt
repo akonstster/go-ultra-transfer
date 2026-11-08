@@ -6,7 +6,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
@@ -35,9 +35,11 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -48,6 +50,7 @@ import app.goultra.transfer.camera.TrackAudio
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * The project as a film strip in time (see `memory-bank/task-timeline.md`): the pieces as wide as they last, the track
@@ -97,17 +100,21 @@ internal fun ProjectTimeline(
     fun zoomNow(): Float = (fitZoom(totalNow, width, edge) * zoomMul).coerceIn(0f, TIMELINE_MAX_PX_PER_MS)
     fun geomNow(): TimelineGeometry = TimelineGeometry(startsNow, totalNow, zoomNow(), edge, width)
     fun maxOffsetNow(): Long = (musicNow?.lengthMs?.minus(TIMELINE_OFFSET_TAIL_MS) ?: 0L).coerceAtLeast(0L)
+    // The other way: the track may start after the picture (silence first), but never so late that less than a second
+    // of the film is left for it.
+    fun minOffsetNow(): Long = -(totalNow - TIMELINE_OFFSET_TAIL_MS).coerceAtLeast(0L)
     fun shownOffset(): Long {
         val track = musicNow ?: return 0L
-        return if (shifting) draggedOffset(track.offsetMs, shiftPx, zoomNow(), maxOffsetNow()) else track.offsetMs
+        return if (shifting) draggedOffset(track.offsetMs, shiftPx, zoomNow(), maxOffsetNow(), minOffsetNow())
+        else track.offsetMs
     }
 
     val scrollState = rememberScrollableState { delta ->
-        val next = (scroll + delta).coerceIn(0f, geomNow().maxScroll)
-        val used = next - scroll
-        scroll = next
+        // As the card strip has it: the page moves against the finger, and what is reported back is what was used.
+        val old = scroll
+        scroll = (scroll - delta).coerceIn(0f, geomNow().maxScroll)
         touchedAt = System.currentTimeMillis()
-        used
+        old - scroll
     }
     // A zoom, a shorter project or another screen width may leave the lane scrolled past its end.
     LaunchedEffect(zoomMul, width, totalMs) { scroll = scroll.coerceIn(0f, geomNow().maxScroll) }
@@ -185,16 +192,21 @@ internal fun ProjectTimeline(
                 .pointerInput(p.id, p.clips) { detectTapGestures { at -> seekNow(geomNow().msAt(at.x, scroll)) } },
         )
         if (music != null) {
+            val haptic = LocalHapticFeedback.current
             Box(
                 Modifier.fillMaxWidth().height(TIMELINE_MUSIC_H).align(Alignment.BottomCenter)
                     .pointerInput(p.id, music.uri) {
-                        detectHorizontalDragGestures(
+                        // A long press takes the track, as it takes a card: a plain swipe must still scroll the lane.
+                        detectDragGesturesAfterLongPress(
                             onDragStart = {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 shifting = true
                                 shiftPx = 0f
                             },
                             onDragEnd = {
-                                val offset = draggedOffset(musicNow?.offsetMs ?: 0L, shiftPx, zoomNow(), maxOffsetNow())
+                                val offset = draggedOffset(
+                                    musicNow?.offsetMs ?: 0L, shiftPx, zoomNow(), maxOffsetNow(), minOffsetNow(),
+                                )
                                 shifting = false
                                 shiftPx = 0f
                                 // One write for the whole gesture, never one per pixel.
@@ -204,9 +216,9 @@ internal fun ProjectTimeline(
                                 shifting = false
                                 shiftPx = 0f
                             },
-                        ) { change, dx ->
+                        ) { change, drag ->
                             change.consume()
-                            shiftPx += dx
+                            shiftPx += drag.x
                             touchedAt = System.currentTimeMillis()
                         }
                     },
@@ -238,8 +250,9 @@ private fun Lane(
     val background = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
     val gap = MaterialTheme.colorScheme.surface
     val wave = MaterialTheme.colorScheme.primary
-    val tick = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
-    val bar = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+    // The grid is red on purpose: over the frames and the wave it must be the one thing seen at a glance.
+    val tick = Color(0xFFE53935).copy(alpha = 0.75f)
+    val bar = Color(0xFFD50000)
     val line = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f)
     val placeholder = MaterialTheme.colorScheme.surfaceVariant
     val offlineDim = Color(0x66000000)
@@ -269,19 +282,22 @@ private fun Lane(
         if (music != null) {
             val trackOffset = offset()
             if (peaks != null && peaks.isNotEmpty() && g.pxPerMs > 0f) {
-                val columns = TrackAudio.window(
-                    peaks,
-                    g.msAt(0f, at) + trackOffset,
-                    g.msAt(size.width, at) + trackOffset,
-                    (size.width / 3f).toInt().coerceAtLeast(1),
-                )
-                if (columns.isNotEmpty()) {
-                    val step = size.width / columns.size
-                    val middle = musicTop + musicH / 2f
-                    columns.forEachIndexed { i, v ->
-                        val h = (v.coerceIn(0f, 1f) * (musicH / 2f - 1f)).coerceAtLeast(0.5f)
-                        val x = i * step + step / 2f
-                        drawLine(wave, Offset(x, middle - h), Offset(x, middle + h), strokeWidth = max(1f, step * 0.6f))
+                // The visible share of the project in the track's own time: a track moment t stands at the project's
+                // t - offset, so a track that begins after the picture leaves the head of the lane empty.
+                val trackFrom = maxOf(g.msAt(0f, at) + trackOffset, 0L)
+                val trackTo = g.msAt(size.width, at) + trackOffset
+                if (trackTo > trackFrom) {
+                    val columns = TrackAudio.window(peaks, trackFrom, trackTo, (size.width / 3f).toInt().coerceAtLeast(1))
+                    if (columns.isNotEmpty()) {
+                        val perMs = (trackTo - trackFrom).toDouble() / columns.size
+                        val middle = musicTop + musicH / 2f
+                        val step = (perMs * g.pxPerMs).toFloat()
+                        columns.forEachIndexed { i, v ->
+                            val x = g.x((trackFrom + (i + 0.5) * perMs).roundToLong() - trackOffset, at)
+                            if (x < -2f || x > size.width + 2f) return@forEachIndexed
+                            val h = (v.coerceIn(0f, 1f) * (musicH / 2f - 1f)).coerceAtLeast(0.5f)
+                            drawLine(wave, Offset(x, middle - h), Offset(x, middle + h), strokeWidth = max(1f, step * 0.6f))
+                        }
                     }
                 }
             }
@@ -291,7 +307,7 @@ private fun Lane(
                 val x = g.x(projectMs, at)
                 if (x < -2f || x > size.width + 2f) return@forEachIndexed
                 val strong = n % TIMELINE_BAR_EVERY == 0
-                val stroke = if (strong) 1.5f else 1f
+                val stroke = if (strong) 2.5f else 1.5f
                 val colour = if (strong) bar else tick
                 // Faintly through the picture too: a joint that lands on a beat is seen at once.
                 drawLine(colour.copy(alpha = colour.alpha * 0.45f), Offset(x, 0f), Offset(x, videoH), strokeWidth = stroke)
