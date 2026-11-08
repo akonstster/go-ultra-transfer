@@ -318,17 +318,18 @@ object BeatGrid {
         val window = (step * 0.12).roundToInt().coerceAtLeast(1)
         val before = ArrayList<Double>()
         var predicted = path.first()
+        // The period the path itself was walked at: the introduction may bend a little around it, never halve it. A
+        // per-step limit alone still accumulates (8 % a beat reaches half the period in seven beats), which turned a
+        // 126 BPM track into a 252 BPM grid.
+        val anchor = step
         while (predicted - step >= 0.0) {
             val expected = predicted - step
             // A start near the expected moment is the truth; otherwise the grid itself is the best statement we have.
             val snapped = snapExact(onset, expected, window)
             val at = if (abs(snapped - expected) <= window + 0.5) snapped else expected
             before += at
-            // A tempo may drift, but not by a sixth from one beat to the next: unclamped, the local reading could shrink
-            // by 15 % at every step and the walk back to the beginning arrived at half the period (252 BPM on a 126 BPM
-            // track). The reading still follows a real drift, just a few per cent at a time.
             val local = localPeriod(onset, at, step, fps)
-            step = local.coerceIn(step * 0.92, step * 1.08)
+            step = local.coerceIn(anchor * 0.85, anchor * 1.15)
             predicted = at
         }
         before.reverse()
