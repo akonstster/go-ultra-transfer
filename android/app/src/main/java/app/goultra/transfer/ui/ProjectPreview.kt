@@ -64,6 +64,7 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.ProjectClip
+import app.goultra.transfer.camera.ProjectMusic
 
 /**
  * One piece as a media3 item: its file's URI, cut to its range. A still has no range to cut — it is one picture, and
@@ -164,6 +165,7 @@ internal fun ProjectPreview(
     onPlayed: () -> Unit,
     onPlaying: (Int?) -> Unit,
     carrying: Boolean,
+    music: ProjectMusic? = null,
 ) {
     val context = LocalContext.current
     // Every piece with its file: the real one, or — out of reach — a stand-in played as its card's frame.
@@ -254,6 +256,13 @@ internal fun ProjectPreview(
     LaunchedEffect(carrying) {
         if (carrying) player.pause()
     }
+    // The video's own sound under the music: at its own slider's level while there is music (P2).
+    LaunchedEffect(music?.uri, music?.videoVolume) {
+        player.volume = music?.videoVolume?.toFloat()?.coerceIn(0f, 1f) ?: 1f
+    }
+    // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
+    // sound need not.
+    ProjectMusicSound(music, shown, playing)
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {

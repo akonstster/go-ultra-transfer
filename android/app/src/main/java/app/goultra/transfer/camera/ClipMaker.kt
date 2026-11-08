@@ -152,17 +152,22 @@ object ClipMaker {
     /** One file of a clip made of several: how its extractor is set up and the pieces taken from it (sorted, apart). */
     class Source(val open: (MediaExtractor) -> Unit, val pieces: List<Highlight>)
 
+    /** What [joinAll] made: the clip's length (µs) and, per source, its pieces as really cut (source ms). */
+    class Joined(val lengthUs: Long, val cuts: List<List<Highlight>>)
+
     /**
      * Several files' pieces, one file after another, into one mp4 without re-encoding — a project «as shot». Every file
      * has to share the first one's formats ([mismatch]: thrown as IllegalStateException with the reason). Returns the
-     * clip's length, µs; [onProgress] gets µs of the clip so far.
+     * clip's length and the pieces as cut — a sound made anew must follow them, not the marks; [onProgress] gets µs of
+     * the clip so far.
      */
-    fun joinAll(sources: List<Source>, out: FileDescriptor, withSound: Boolean = true, onProgress: (Long) -> Unit): Long {
+    fun joinAll(sources: List<Source>, out: FileDescriptor, withSound: Boolean = true, onProgress: (Long) -> Unit): Joined {
         var muxer: MediaMuxer? = null
         var first: Signature? = null
         var videoOut = -1
         var audioOut = -1
         var base = 0L
+        val cuts = mutableListOf<List<Highlight>>()
         try {
             for ((n, s) in sources.withIndex()) {
                 val ex = MediaExtractor()
@@ -201,21 +206,23 @@ object ClipMaker {
                         override fun seek(us: Long) = ex.seekTo(us, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
                         override fun advance() { ex.advance() }
                     }
-                    base = cutAt(samples, video, s.pieces, base, { track, clipUs, sync ->
+                    val (cut, end) = cutAt(samples, video, s.pieces, base, { track, clipUs, sync ->
                         buf.clear()
                         val size = ex.readSampleData(buf, 0)
                         if (size > 0) {
                             info.set(0, size, clipUs, if (sync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
                             m.writeSampleData(tracks.getValue(track), buf, info)
                         }
-                    }, onProgress).second
+                    }, onProgress)
+                    base = end
+                    cuts += cut
                 } finally {
                     ex.release()
                 }
             }
             check(base > 0) { "ни одного куска" }
             muxer?.stop()
-            return base
+            return Joined(base, cuts)
         } finally {
             runCatching { muxer?.release() }
         }

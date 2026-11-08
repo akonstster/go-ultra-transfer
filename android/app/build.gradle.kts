@@ -1,4 +1,4 @@
-﻿import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.TaskAction
 import java.util.Properties
@@ -36,8 +36,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.17-alpha4"
+        versionCode = 21
+        versionName = "0.17-alpha5"
     }
 
     signingConfigs {

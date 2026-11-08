@@ -454,6 +454,7 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Remove" to "Çıkar",
     "In a project" to "Bir projede",
     "On screen for" to "Fotoğrafın ekranda kalma süresi",
+    "Clips' sound" to "Parçaların sesi",
     "The camera seems to have run flat (%s %%) — charge it and save the project again" to "Kameranın şarjı bitmiş görünüyor (%s %%) — şarj edip projeyi yeniden kaydedin",
     "The camera's link dropped — saving again once it is back" to "Kamera bağlantısı koptu — geri gelince yeniden kaydedilecek",
     "The camera didn't come back — save the project again" to "Kamera geri gelmedi — projeyi yeniden kaydedin",
@@ -559,5 +560,13 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Checking for updates…" to "Güncellemeler denetleniyor…",
     "Couldn't check for updates — the internet is needed." to "Denetlenemedi — internet gerekli.",
     "No updates — you're on the latest version." to "Güncelleme yok — en son sürümdesiniz.",
+"Music" to "Müzik",
+    "Choose a track" to "Bir parça seç",
+    "The track" to "Parça",
+    "Replace the track" to "Parçayı değiştir",
+    "Remove the track" to "Parçayı kaldır",
+    "The track could not be read" to "Parça okunamıyor",
+    "Analysing the track…" to "Parça çözümleniyor…",
+    "Beat: %s BPM" to "Ritim: %s BPM",
 )
 

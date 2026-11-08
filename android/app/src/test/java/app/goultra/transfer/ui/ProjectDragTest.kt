@@ -92,6 +92,16 @@ class ProjectDragTest {
     }
 
     @Test
+    fun `the music is eased back while it plays and seeks only on a jump`() {
+        assertEquals(1f, musicSpeed(20, playing = true)!!, 0f) // close enough
+        assertTrue(musicSpeed(150, playing = true)!! < 1f) // ahead: slower
+        assertTrue(musicSpeed(-150, playing = true)!! > 1f) // behind: faster
+        assertEquals(null, musicSpeed(900, playing = true)) // a jump: seek
+        assertEquals(null, musicSpeed(150, playing = false)) // paused: put it exactly there
+        assertEquals(1f, musicSpeed(10, playing = false)!!, 0f)
+    }
+
+    @Test
     fun `the preview's clock counts every piece before the one playing`() {
         val lengths = listOf(3000L, 5000L, 2000L)
         assertEquals(1200L, clockAt(lengths, 0, 1200L))

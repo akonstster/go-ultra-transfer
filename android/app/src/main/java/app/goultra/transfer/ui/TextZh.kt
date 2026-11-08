@@ -454,6 +454,7 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Remove" to "移除",
     "In a project" to "已在项目中",
     "On screen for" to "照片显示时长",
+    "Clips' sound" to "片段原声",
     "The camera seems to have run flat (%s %%) — charge it and save the project again" to "相机似乎没电了（%s %%）— 请充电后重新保存项目",
     "The camera's link dropped — saving again once it is back" to "与相机的连接中断 — 恢复后将重新保存",
     "The camera didn't come back — save the project again" to "相机没有恢复连接 — 请重新保存项目",
@@ -559,5 +560,13 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Checking for updates…" to "正在检查更新…",
     "Couldn't check for updates — the internet is needed." to "无法检查更新 — 需要联网。",
     "No updates — you're on the latest version." to "没有更新 — 您已是最新版本。",
+"Music" to "音乐",
+    "Choose a track" to "选择曲目",
+    "The track" to "曲目",
+    "Replace the track" to "更换曲目",
+    "Remove the track" to "移除曲目",
+    "The track could not be read" to "无法读取曲目",
+    "Analysing the track…" to "正在分析曲目…",
+    "Beat: %s BPM" to "节拍：%s BPM",
 )
 

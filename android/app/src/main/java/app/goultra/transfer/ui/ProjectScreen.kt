@@ -131,8 +131,12 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 onPlaying = { playingNow = it },
                 // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
                 carrying = carrying,
+                music = p.music,
             )
         }
+        // The project's music: the picked track, its wave and the grid over it, its volume and ducking (P2 — the sound
+        // of it in the preview and at save time follows).
+        ProjectMusicLane(vm, p)
         if (p.clips.isEmpty()) {
             Text(
                 tr(
