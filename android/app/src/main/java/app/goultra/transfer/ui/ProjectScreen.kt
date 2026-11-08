@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -74,6 +75,10 @@ fun ProjectScreen(vm: CameraController, p: Project) {
 
     var carrying by remember(p.id) { mutableStateOf(false) }
     var saving by remember(p.id) { mutableStateOf(false) }
+    // The film's own clock, told out by the preview and drawn by the timeline; and a jump the timeline asks for.
+    var clockMs by remember(p.id) { mutableLongStateOf(0L) }
+    var clockPlaying by remember(p.id) { mutableStateOf(false) }
+    var seekTo by remember(p.id) { mutableStateOf<Long?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -132,11 +137,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
                 carrying = carrying,
                 music = p.music,
+                onClock = { ms, plays ->
+                    clockMs = ms
+                    clockPlaying = plays
+                },
+                seek = seekTo,
+                onSeeked = { seekTo = null },
             )
         }
-        // The project's music: the picked track, its wave and the grid over it, its volume and ducking (P2 — the sound
-        // of it in the preview and at save time follows).
-        ProjectMusicLane(vm, p)
         if (p.clips.isEmpty()) {
             Text(
                 tr(
@@ -148,7 +156,11 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             )
         } else {
             ProjectStrip(vm, p, stale, playingNow, onPlay = { play = it }, onCarrying = { carrying = it })
+            // The same pieces in time: as wide as they last, the track under them, one line for the clock.
+            ProjectTimeline(vm, p, clockMs, clockPlaying, onSeek = { seekTo = it })
         }
+        // The music itself: the picked track, the two levels, the tempo (its wave and grid are on the timeline).
+        ProjectMusicLane(vm, p)
     }
 }
 /**

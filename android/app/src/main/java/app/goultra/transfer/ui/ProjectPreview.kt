@@ -166,6 +166,11 @@ internal fun ProjectPreview(
     onPlaying: (Int?) -> Unit,
     carrying: Boolean,
     music: ProjectMusic? = null,
+    /** The project's own clock, told out every tick: where the film is, and whether it plays (the timeline draws by it). */
+    onClock: (timeMs: Long, playing: Boolean) -> Unit = { _, _ -> },
+    /** A jump asked from outside (a tap on the timeline), in project ms; [onSeeked] says it has been taken. */
+    seek: Long? = null,
+    onSeeked: () -> Unit = {},
 ) {
     val context = LocalContext.current
     // Every piece with its file: the real one, or — out of reach — a stand-in played as its card's frame.
@@ -177,6 +182,8 @@ internal fun ProjectPreview(
     // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
     val itemsNow by rememberUpdatedState(items)
     val onPlayingNow by rememberUpdatedState(onPlaying)
+    val onClockNow by rememberUpdatedState(onClock)
+    val onSeekedNow by rememberUpdatedState(onSeeked)
     // The camera's own data source (its Wi-Fi is bound to this app) under the stock one: content and file URIs keep
     // going to the phone's own readers. A photo is a plain JPEG by content, and the stock JPEG reader takes a JPEG for
     // a motion photo — the flag is what makes it a picture the playlist can show.
@@ -295,7 +302,10 @@ internal fun ProjectPreview(
             now.getOrNull(player.currentMediaItemIndex)?.let { resume = it.clip to player.currentPosition.coerceAtLeast(0L) }
             // Told to the screen: its card is marked in the strip and the strip follows it.
             onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.at?.index)
-            delay(250)
+            // And the project's own clock, for the timeline: the line it draws must move with the picture, so the loop
+            // is quick while the film plays and slow while it stands.
+            onClockNow(shown, player.isPlaying)
+            delay(if (player.isPlaying) 50 else 250)
         }
     }
     // A card tapped: the preview jumps to that piece — video or photo alike — and plays on from it.
@@ -306,6 +316,15 @@ internal fun ProjectPreview(
             player.play()
         }
         if (play != null) onPlayed()
+    }
+    // A jump asked from outside — a tap on the timeline — by the very arithmetic the slider uses, so a tap lands where
+    // the strip's own seek would. The film does not start by itself: the tap moves the picture, it does not press play.
+    LaunchedEffect(seek, signature) {
+        val ms = seek ?: return@LaunchedEffect
+        if (inPlayer.isEmpty()) return@LaunchedEffect
+        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.clip }), ms)
+        player.seekTo(i, at)
+        onSeekedNow()
     }
 
     Column(Modifier.fillMaxWidth()) {

@@ -2,16 +2,12 @@ package app.goultra.transfer.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LibraryMusic
@@ -29,14 +25,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectMusic
-import app.goultra.transfer.camera.TrackAudio
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
@@ -81,72 +74,25 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project) {
             }
         }
         if (music != null) {
-            Wave(peaks, music, failed, p.clips.sumOf { it.durationMs })
+            TrackState(peaks, failed)
             MusicSound(vm, music)
         }
     }
 }
- 
+
 /**
- * The share of the track the project plays — from its offset, as long as the project — as a wave with the beat grid
- * over it: every beat a thin tick, the first of each bar of four a stronger one. The whole track would be minutes on a
- * phone's width, a beat every two pixels: the grid was there and could not be seen.
+ * How the track stands: its wave and its grid are on the timeline now, under the picture — here only whether it is
+ * being read, or not readable at all.
  */
 @Composable
-private fun Wave(peaks: FloatArray?, music: ProjectMusic, failed: Boolean, projectMs: Long) {
-    val wave = MaterialTheme.colorScheme.primary
-    val tick = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f)
-    val bar = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-    val shape = RoundedCornerShape(6.dp)
-    // Nothing in the project yet: half a minute of the track, so there is still something to look at.
-    val fromMs = music.offsetMs.coerceAtLeast(0L)
-    val toMs = fromMs + (if (projectMs > 0L) projectMs else 30_000L)
-    Box(
-        Modifier.fillMaxWidth().height(46.dp).background(MaterialTheme.colorScheme.surfaceVariant, shape),
-        contentAlignment = Alignment.Center,
-    ) {
-        when {
-            peaks != null && peaks.isNotEmpty() -> Canvas(Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 4.dp)) {
-                val middle = size.height / 2f
-                val span = (toMs - fromMs).toFloat()
-                // One column per three pixels, each the loudest of its share.
-                val columns = TrackAudio.window(peaks, fromMs, toMs, (size.width / 3f).toInt().coerceAtLeast(1))
-                val column = size.width / columns.size
-                columns.forEachIndexed { i, v ->
-                    val h = (v * middle).coerceAtLeast(0.5f)
-                    val x = i * column + column / 2f
-                    drawLine(wave, Offset(x, middle - h), Offset(x, middle + h), strokeWidth = max(1f, column * 0.6f))
-                }
-                // The grid over the wave, in the track's own time; the bars counted from the first beat found.
-                music.beats.forEachIndexed { n, beat ->
-                    if (beat < fromMs || beat > toMs) return@forEachIndexed
-                    val x = size.width * (beat - fromMs) / span
-                    val strong = n % 4 == 0
-                    drawLine(if (strong) bar else tick, Offset(x, 0f), Offset(x, size.height), strokeWidth = if (strong) 2f else 1f)
-                }
-            }
-            failed -> Text(
-                tr("Трек не читается", "The track could not be read"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-            else -> Text(
-                tr("Анализируем трек…", "Analysing the track…"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    // Which share it is: the eye needs to know the lane is not the whole track.
-    if (music.lengthMs > 0L) {
-        Text(
-            formatDuration((fromMs / 1000).toInt()) + "–" + formatDuration((toMs / 1000).toInt()) + " / " +
-                formatDuration((music.lengthMs / 1000).toInt()),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 2.dp, top = 2.dp),
-        )
-    }
+private fun TrackState(peaks: FloatArray?, failed: Boolean) {
+    if (peaks != null && peaks.isNotEmpty()) return
+    Text(
+        if (failed) tr("Трек не читается", "The track could not be read")
+        else tr("Анализируем трек…", "Analysing the track…"),
+        style = MaterialTheme.typography.bodySmall,
+        color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**
