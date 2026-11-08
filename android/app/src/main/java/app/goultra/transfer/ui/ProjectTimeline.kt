@@ -256,8 +256,8 @@ private fun Lane(
     val gap = MaterialTheme.colorScheme.surface
     val wave = MaterialTheme.colorScheme.primary
     // The grid is red on purpose: over the frames and the wave it must be the one thing seen at a glance.
-    val tick = Color(0xFFE53935).copy(alpha = 0.75f)
-    val bar = Color(0xFFD50000)
+    val tick = Color(0xFFFF5252).copy(alpha = 0.90f)
+    val dropMark = Color(0xFF00E5FF)
     val line = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f)
     val placeholder = MaterialTheme.colorScheme.surfaceVariant
     val offlineDim = Color(0x66000000)
@@ -313,18 +313,20 @@ private fun Lane(
                 val x = g.x(projectMs, at)
                 if (x < -2f || x > size.width + 2f) return@forEach
                 // Faintly through the picture too: a joint that lands on a beat is seen at once.
-                drawLine(tick.copy(alpha = tick.alpha * 0.45f), Offset(x, 0f), Offset(x, videoH), strokeWidth = 1.5f)
-                drawLine(tick, Offset(x, musicTop), Offset(x, musicTop + musicH), strokeWidth = 1.5f)
+                drawLine(tick.copy(alpha = tick.alpha * 0.55f), Offset(x, 0f), Offset(x, videoH), strokeWidth = 2f)
+                drawLine(tick, Offset(x, musicTop), Offset(x, musicTop + musicH), strokeWidth = 2.5f)
             }
-            // The drops: every place the energy returns, the active one solid and the rest faint.
+            // The drops: every place the energy returns, in their own colour and thicker than the beats. The active one is
+            // solid through the whole lane; the others stay clearly visible but lighter.
             music.drops.forEach { drop ->
                 val x = g.x(drop - trackOffset, at)
                 if (x in -2f..(size.width + 2f)) {
                     val active = drop == music.activeDropMs
-                    drawRect(
-                        if (active) bar else bar.copy(alpha = 0.45f),
-                        Offset(x - (if (active) 2f else 1f), musicTop),
-                        Size(if (active) 4f else 2f, musicH),
+                    drawLine(
+                        if (active) dropMark else dropMark.copy(alpha = 0.65f),
+                        Offset(x, 0f),
+                        Offset(x, musicTop + musicH),
+                        strokeWidth = if (active) 6f else 4f,
                     )
                 }
             }

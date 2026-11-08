@@ -143,7 +143,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 3)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 4)
     }
 
     @Test
@@ -256,6 +256,30 @@ class BeatGridTest {
     }
 
     @Test
+    fun `a rise inside the loud part before a pause is not a drop, and every later pause returns`() {
+        // The real failure: after the first drop the track grew a little louder again just before a breakdown, and that
+        // small rise became the second marker while the actual returns after the breakdown and after the next pause were
+        // lost. Three quiet passages here must give three drops — at 5, 30 and 50 s — and never at 15 s (a rise inside a
+        // loud part with no pause behind it) or 20/40 s (the falls into the pauses).
+        val energy = FloatArray(700) { i ->
+            val t = i * 100L
+            when {
+                t < 5_000L -> 0.15f
+                t < 15_000L -> 0.80f
+                t < 20_000L -> 0.82f // louder inside the same loud part: a rise, not a return
+                t < 30_000L -> 0.15f
+                t < 40_000L -> 0.85f
+                t < 50_000L -> 0.20f
+                t < 60_000L -> 0.90f
+                else -> 0.30f
+            }
+        }
+        assertEquals(listOf(5_000L, 30_000L, 50_000L), BeatGrid.dropsOf(energy, BeatGrid.LOUD_STEP_MS))
+        val beats = (200L..70_000L step 500L).toList()
+        assertEquals(listOf(5_200L, 30_200L, 50_200L), BeatGrid.dropsOf(energy, BeatGrid.LOUD_STEP_MS, beats))
+    }
+
+    @Test
     fun `a drop is where the energy leaps out of a quiet stretch`() {
         val quietThenLoud = FloatArray(20) { if (it < 8) 0.2f else 0.9f }
         assertEquals(8_000L, BeatGrid.dropOf(quietThenLoud))
@@ -302,6 +326,26 @@ class BeatGridTest {
         // On the grid it is the beat that opens the loud part.
         val beats = (0L..40_000L step 500L).toList()
         assertEquals(20_000L, BeatGrid.dropOf(track, BeatGrid.LOUD_STEP_MS, beats))
+    }
+
+    @Test
+    fun `a drop after the detector's short grid lands on the full grid, not on its last beat`() {
+        // The grid the detector builds can stop where its path earned most (on a real track it ended at 30.8 s of 1:53),
+        // while the lane draws the same period on to the end. The profile must use that full grid: otherwise every later
+        // drop is put on the short grid's last beat — the «second drop before the pause» seen on the phone.
+        val seconds = 40
+        val samples = FloatArray(rate * seconds) { i ->
+            val t = i * 1000.0 / rate
+            val amp = if (t < 20_000.0) 0.02 else 0.4
+            (amp * sin(2 * PI * 220 * i / rate)).toFloat()
+        }
+        val short = BeatGrid.Grid(120.0, 0L, (0L..15_000L step 500L).toList(), 0.9)
+        val full = (0L..40_000L step 500L).toList()
+        val shortDrops = BeatGrid.profile(samples, rate, short, short.beats)?.drops.orEmpty()
+        val fullDrops = BeatGrid.profile(samples, rate, short, full)?.drops.orEmpty()
+        assertEquals(listOf(15_000L), shortDrops)
+        assertEquals(1, fullDrops.size)
+        assertTrue("the drop after 20 s is on the full grid: $fullDrops", fullDrops.single() in 20_000L..20_500L)
     }
 
     @Test

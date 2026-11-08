@@ -118,13 +118,16 @@ object TrackAudio {
             val seen = heard.copyOf(heardAt)
             // The tempo is followed where it drifts, and the same envelope says what kind of piece it is.
             val grid = BeatGrid.detectDrifting(seen, rate)
+            // The same full grid the lane draws: the detector's own path can end early (it stops where it earned most),
+            // and the drops after that end must land on their real beats, never all on its last one.
+            val beats = if (grid == null) emptyList() else beatsOver(grid, lengthMs)
             return Found(
                 peaks = FloatArray(peaks.size) { peaks[it].coerceIn(0f, 1f) },
-                beats = if (grid == null) emptyList() else beatsOver(grid, lengthMs),
+                beats = beats,
                 bpm = grid?.bpm ?: 0.0,
                 confidence = grid?.confidence ?: 0.0,
                 lengthMs = lengthMs,
-                profile = BeatGrid.profile(seen, rate, grid),
+                profile = BeatGrid.profile(seen, rate, grid, beats),
                 delayMs = reader.delayFrames * 1000L / reader.rate.coerceAtLeast(1),
             )
         } finally {
