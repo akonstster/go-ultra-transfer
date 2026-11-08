@@ -318,6 +318,13 @@ private fun Lane(
                 drawLine(colour.copy(alpha = colour.alpha * 0.45f), Offset(x, 0f), Offset(x, videoH), strokeWidth = stroke)
                 drawLine(colour, Offset(x, musicTop), Offset(x, musicTop + musicH), strokeWidth = stroke)
             }
+            // The drop: a mark of its own over the music band.
+            music.dropMs?.let { drop ->
+                val x = g.x(drop - trackOffset, at)
+                if (x in -2f..(size.width + 2f)) {
+                    drawRect(bar, Offset(x - 2f, musicTop), Size(4f, musicH))
+                }
+            }
         }
         val now = g.x(clockMs, at)
         if (now in -1f..(size.width + 1f)) {

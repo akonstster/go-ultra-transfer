@@ -568,5 +568,8 @@ internal val TEXT_ES: Map<String, String> = mapOf(
     "The track could not be read" to "No se puede leer la pista",
     "Analysing the track…" to "Analizando la pista…",
     "Beat: %s BPM" to "Ritmo: %s BPM",
+"Grid" to "Rejilla",
+    "Tap" to "Tocar",
+    "Drop" to "Drop",
 )
 

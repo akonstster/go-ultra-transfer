@@ -3325,6 +3325,20 @@ class CameraController(private val app: Application) {
     }
 
     /**
+     * The music's grid edited by hand (a tap tempo, a nudge, a shift, a halved or doubled pace): [change] gets the beats
+     * as they stand and the track's length, and gives the new grid. Nothing is written when the change gives the same
+     * beats back — a hand-made grid is kept as it was made.
+     */
+    fun editMusicGrid(change: (beats: List<Long>, lengthMs: Long) -> List<Long>) {
+        val p = seenProject ?: return
+        val music = p.music ?: return
+        val length = music.lengthMs.coerceAtLeast(music.beats.lastOrNull() ?: 0L)
+        val next = change(music.beats, length)
+        if (next.isEmpty() || next == music.beats) return
+        saveProject(p.copy(music = music.copy(beats = next)))
+    }
+
+    /**
      * The wave and the grid of [music] in the background: the wave to a small file on the phone, the grid into the
      * project's JSON (a cut snaps to it, P3). A track already analysed is not decoded again.
      */
@@ -3347,10 +3361,15 @@ class CameraController(private val app: Application) {
             }
             musicFailed = musicFailed - music.uri
             musicVersion++
-            // The grid goes into whichever project still holds this track: it may have been replaced meanwhile. Only the
-            // start of a track is analysed; its grid already runs on to the track's end (TrackAudio.beatsOver).
+            // The grid and the profile go into whichever project still holds this track: it may have been replaced
+            // meanwhile. The drop comes along only when the track's own was not moved by hand.
             projects.filter { it.music?.uri == music.uri && (it.music?.beats?.isEmpty() == true || it.music?.lengthMs == 0L) }.forEach { held ->
-                saveProject(held.copy(music = held.music?.copy(beats = found.beats, lengthMs = found.lengthMs)))
+                val m = held.music ?: return@forEach
+                saveProject(held.copy(music = m.copy(
+                    beats = found.beats,
+                    lengthMs = found.lengthMs,
+                    dropMs = m.dropMs ?: found.profile?.dropMs,
+                )))
             }
         }
     }

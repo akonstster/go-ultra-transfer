@@ -568,5 +568,8 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "The track could not be read" to "无法读取曲目",
     "Analysing the track…" to "正在分析曲目…",
     "Beat: %s BPM" to "节拍：%s BPM",
+"Grid" to "节拍网格",
+    "Tap" to "敲击",
+    "Drop" to "高潮点",
 )
 

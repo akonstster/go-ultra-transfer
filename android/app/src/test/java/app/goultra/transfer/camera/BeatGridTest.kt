@@ -74,4 +74,45 @@ class BeatGridTest {
         assertEquals(1000L, BeatGrid.nearest(g, 760))
         assertEquals(42L, BeatGrid.nearest(g.copy(beats = emptyList()), 42))
     }
+
+    @Test
+    fun `a tempo that drifts is followed, not averaged away`() {
+        // 100 BPM speeding up to 125 over twenty seconds, and the clicks' own moments kept for the check.
+        val out = FloatArray(rate * 20)
+        val rnd = Random(3)
+        val clicks = ArrayList<Long>()
+        var at = 0.2 * rate
+        while (at < out.size) {
+            clicks += (at / rate * 1000).toLong()
+            val bpm = 100.0 + 25.0 * (at / out.size)
+            val start = at.toInt()
+            for (k in 0 until 1500) {
+                if (start + k >= out.size) break
+                out[start + k] += ((rnd.nextFloat() * 2 - 1) * 0.8 * exp(-k / 250.0)).toFloat()
+            }
+            at += 60.0 / bpm * rate
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        // The gaps get shorter toward the end: that is the drift the one-tempo grid could not hold.
+        val gaps = g!!.beats.zipWithNext { a, b -> b - a }
+        assertTrue("gaps: ${gaps.first()} -> ${gaps.last()}", gaps.last() < gaps.first() - 40)
+        // And every beat found is near a click of its own: none more than a sixth of a beat away, and most within ~2 frames.
+        var j = 0
+        val errors = ArrayList<Long>()
+        for (beat in g.beats) {
+            while (j + 1 < clicks.size && abs(clicks[j + 1] - beat) <= abs(clicks[j] - beat)) j++
+            errors += abs(clicks[j] - beat)
+        }
+        assertTrue("worst beat ${errors.max()}", errors.max() <= 90)
+        assertTrue("mean error ${errors.average()}", errors.average() <= 35.0)
+    }
+
+    @Test
+    fun `the drop is where the energy leaps out of a quiet stretch`() {
+        val quietThenLoud = FloatArray(20) { if (it < 8) 0.2f else 0.9f }
+        assertEquals(8_000L, BeatGrid.dropOf(quietThenLoud))
+        assertNull(BeatGrid.dropOf(FloatArray(20) { 0.5f }))
+        assertNull(BeatGrid.dropOf(FloatArray(3) { 0f }))
+    }
 }

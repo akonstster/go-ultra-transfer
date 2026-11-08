@@ -160,7 +160,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             ProjectTimeline(vm, p, clockMs, clockPlaying, onSeek = { seekTo = it })
         }
         // The music itself: the picked track, the two levels, the tempo (its wave and grid are on the timeline).
-        ProjectMusicLane(vm, p)
+        ProjectMusicLane(vm, p, clockMs)
     }
 }
 /**

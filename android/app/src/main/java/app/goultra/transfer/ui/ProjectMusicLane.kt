@@ -9,8 +9,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.MusicGrid
 import app.goultra.transfer.camera.ProjectMusic
 import kotlin.math.roundToInt
 
@@ -39,7 +44,7 @@ import kotlin.math.roundToInt
  * itself is not here yet: the preview's player and the save's mix come next.
  */
 @Composable
-internal fun ProjectMusicLane(vm: CameraController, p: Project) {
+internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 0L) {
     // SAF: the app keeps a lasting link to the track (no copy) — the same way files are added to the list.
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.setProjectMusic(uri)
@@ -76,6 +81,51 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project) {
         if (music != null) {
             TrackState(peaks, failed)
             MusicSound(vm, music)
+            GridRow(vm, music, clockMs)
+        }
+    }
+}
+
+/**
+ * The grid by hand (P3, plan §1): a beat a minute slower or faster, the pace halved or doubled, the whole grid shifted a
+ * few ms, a tap tempo against what the analysis found, and the drop put where the clock's line stands.
+ */
+@Composable
+private fun GridRow(vm: CameraController, music: ProjectMusic, clockMs: Long) {
+    val bpm = MusicGrid.bpm(music.beats)
+    // Taps: a few quick ones give the beat; two seconds of silence start them over.
+    var taps by remember(music.uri) { mutableStateOf(emptyList<Long>()) }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            tr("Сетка", "Grid"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton({
+            val now = System.currentTimeMillis()
+            val next = if (now - (taps.lastOrNull() ?: 0L) > 2_000L) listOf(now) else taps + now
+            taps = next
+            vm.editMusicGrid { b, len -> MusicGrid.fromTap(b.firstOrNull() ?: 0L, next, len) }
+        }) { Text(tr("Тап", "Tap")) }
+        IconButton(
+            { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm - 1.0).coerceAtLeast(1.0), len) } },
+            enabled = bpm > 2.0,
+        ) { Icon(Icons.Filled.Remove, null) }
+        Text(if (bpm > 0.0) "${bpm.roundToInt()} BPM" else "—", style = MaterialTheme.typography.bodySmall)
+        IconButton(
+            { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm + 1.0), len) } },
+            enabled = bpm > 0.0,
+        ) { Icon(Icons.Filled.Add, null) }
+        TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 0.5, len) } }) { Text("×2") }
+        TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 2.0, len) } }) { Text("÷2") }
+        IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, -5L) } }) {
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null)
+        }
+        IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, 5L) } }) {
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
+        }
+        TextButton({ vm.updateProjectMusic { m -> m.copy(dropMs = clockMs + m.offsetMs) } }) {
+            Text(tr("Дроп", "Drop") + (music.dropMs?.let { " " + formatDuration((it / 1000).toInt()) } ?: ""))
         }
     }
 }

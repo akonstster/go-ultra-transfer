@@ -568,5 +568,8 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "The track could not be read" to "曲を読み取れません",
     "Analysing the track…" to "曲を解析しています…",
     "Beat: %s BPM" to "ビート：%s BPM",
+"Grid" to "グリッド",
+    "Tap" to "タップ",
+    "Drop" to "ドロップ",
 )
 

@@ -22,8 +22,11 @@ object TrackAudio {
     /** The width of one decoded peak, ms: the lane's columns are made of a few of them. */
     internal const val BUCKET_MS = 25
 
-    /** How much of a long track is listened to for the grid: a minute and a half settles tempo and phase alike. */
-    internal const val ANALYSED_MS = 90_000
+    /**
+     * How much of a long track is listened to for the grid and the profile: four minutes is most tracks, and the beats
+     * past it go on with the last period (a tempo that drifts is followed inside this share, not averaged over it).
+     */
+    internal const val ANALYSED_MS = 240_000
 
     /** Read from the decoder at a time, in decoded frames. */
     private const val CHUNK = 8_192
@@ -33,9 +36,17 @@ object TrackAudio {
 
     /**
      * What a track gives: the wave 0…1 ([peaks], one per [BUCKET_MS] along the whole track — the lane shows the share the
-     * project plays, so it needs the fine one), the grid, and how long the track is.
+     * project plays, so it needs the fine one), the grid with its tempo followed where it drifts, the profile of the
+     * piece (stability, drive, energy, drop), and how long the track is.
      */
-    class Found(val peaks: FloatArray, val beats: List<Long>, val bpm: Double, val confidence: Double, val lengthMs: Long)
+    class Found(
+        val peaks: FloatArray,
+        val beats: List<Long>,
+        val bpm: Double,
+        val confidence: Double,
+        val lengthMs: Long,
+        val profile: BeatGrid.Profile?,
+    )
 
     /**
      * The track at [uri] decoded and measured; null when it is not a sound the phone can read. Blocking — seconds of
@@ -83,13 +94,17 @@ object TrackAudio {
             if (bucket > 0f) peaks += bucket
             if (peaks.isEmpty()) return null
             val lengthMs = if (said > 0L) said else heardAt.toLong() * 1000 / rate
-            val grid = BeatGrid.detect(heard.copyOf(heardAt), rate)
+            if (heardAt > 0 && peaks.isEmpty()) return null
+            val seen = heard.copyOf(heardAt)
+            // The tempo is followed where it drifts, and the same envelope says what kind of piece it is.
+            val grid = BeatGrid.detectDrifting(seen, rate)
             return Found(
                 peaks = FloatArray(peaks.size) { peaks[it].coerceIn(0f, 1f) },
                 beats = if (grid == null) emptyList() else beatsOver(grid, lengthMs),
                 bpm = grid?.bpm ?: 0.0,
                 confidence = grid?.confidence ?: 0.0,
                 lengthMs = lengthMs,
+                profile = BeatGrid.profile(seen, rate, grid),
             )
         } finally {
             reader.release()
