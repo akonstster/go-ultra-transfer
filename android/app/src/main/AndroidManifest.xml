@@ -37,6 +37,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- A tick of the phone's own vibration when a card or the track is taken: LocalHapticFeedback alone is a no-op on
+         some phones (EMUI among them). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
         android:name=".GoUltraApp"

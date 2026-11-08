@@ -69,6 +69,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -155,6 +156,8 @@ internal fun ProjectStrip(
     val risePx = with(density) { LIFT_RISE.toPx() }
     val maxYpx = with(density) { LIFT_MAX_Y.toPx() }
     val haptic = LocalHapticFeedback.current
+    // The phone's own vibration as well: `LocalHapticFeedback` goes nowhere on some phones (EMUI among them).
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val count = p.clips.size
 
@@ -274,6 +277,7 @@ internal fun ProjectStrip(
         // Cutaways are pinned to the base's time (P3): they are not carried along the order.
         if (project.clips.getOrNull(i)?.atMs != null) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        tick(context)
         heldIdx = i
         target = i
         heldKey = cards[i]

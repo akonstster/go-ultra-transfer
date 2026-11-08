@@ -38,6 +38,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
@@ -71,6 +72,7 @@ internal fun ProjectTimeline(
 ) {
     if (p.clips.isEmpty()) return
     val density = LocalDensity.current
+    val context = LocalContext.current
     val edge = with(density) { TIMELINE_EDGE.toPx() }
     val joint = with(density) { TIMELINE_JOINT.toPx() }
     val videoH = with(density) { TIMELINE_VIDEO_H.toPx() }
@@ -185,6 +187,7 @@ internal fun ProjectTimeline(
             geometry = ::geomNow,
             offset = ::shownOffset,
             scroll = { scroll },
+            taken = shifting,
         )
         // A tap on the picture is a jump in the film. Not on the music track: a press there moves the track itself.
         Box(
@@ -200,6 +203,7 @@ internal fun ProjectTimeline(
                         detectDragGesturesAfterLongPress(
                             onDragStart = {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                tick(context)
                                 shifting = true
                                 shiftPx = 0f
                             },
@@ -246,6 +250,7 @@ private fun Lane(
     geometry: () -> TimelineGeometry,
     offset: () -> Long,
     scroll: () -> Float,
+    taken: Boolean,
 ) {
     val background = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
     val gap = MaterialTheme.colorScheme.surface
@@ -317,6 +322,10 @@ private fun Lane(
         val now = g.x(clockMs, at)
         if (now in -1f..(size.width + 1f)) {
             drawLine(line, Offset(now, 0f), Offset(now, musicTop + musicH), strokeWidth = thin)
+        }
+        // Taken by a long press: the track's band says so, so the shift is not guessed at.
+        if (taken) {
+            drawRect(wave, Offset(0f, musicTop), Size(size.width, musicH), style = Stroke(width = thin * 1.5f))
         }
     }
 }
