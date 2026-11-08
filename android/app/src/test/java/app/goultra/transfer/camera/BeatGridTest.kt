@@ -143,7 +143,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 6)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 7)
     }
 
     @Test

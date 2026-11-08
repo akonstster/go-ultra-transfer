@@ -112,7 +112,7 @@ object BeatGrid {
     private const val MIN_STARTS = 8
 
     /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
-    const val ANALYSIS_VERSION = 6
+    const val ANALYSIS_VERSION = 7
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
