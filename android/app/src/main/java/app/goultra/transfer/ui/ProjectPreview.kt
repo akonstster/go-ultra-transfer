@@ -270,7 +270,7 @@ internal fun ProjectPreview(
     val heard = remember { MusicClock() }
     ProjectMusicSound(music, shown, playing, heard)
     // And the click on the grid, when it is asked for.
-    ProjectMetronome(music, shown, playing, heard)
+    ProjectMetronome(music, shown, playing, heard, vm::log)
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {

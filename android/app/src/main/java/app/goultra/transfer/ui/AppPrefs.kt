@@ -55,6 +55,10 @@ object AppPrefs {
     private const val FILE = "ui"
     private var context: Context? = null
 
+    /** How far the ear may move the click either way, ms, and by how much one tap moves it. */
+    const val CLICK_NUDGE_LIMIT = 120
+    const val CLICK_NUDGE_STEP = 5
+
     /** Languages with a text table of their own (the rest fall back to English). */
     private val SUPPORTED = setOf("ru", "en", "fr", "it", "es", "de", "pt", "tr", "zh", "ja")
 
@@ -70,18 +74,37 @@ object AppPrefs {
     var metronome by mutableStateOf(false)
         private set
 
+    /**
+     * How much earlier than the beat the click is put on the queue, ms, on top of what the phone says of its own buffers:
+     * the click goes through the phone's mixer before it is heard, and no phone tells how long that takes — so the ear
+     * sets the last few tenths (`CLICK_NUDGE_LIMIT` either way). Kept between launches.
+     */
+    var clickNudge by mutableStateOf(0)
+        private set
+
     fun init(context: Context) {
         this.context = context.applicationContext
         val prefs = context.getSharedPreferences(FILE, 0)
         theme = runCatching { ThemeMode.valueOf(prefs.getString("theme", null)!!) }.getOrDefault(ThemeMode.SYSTEM)
         language = runCatching { LanguageMode.valueOf(prefs.getString("language", null)!!) }.getOrDefault(LanguageMode.SYSTEM)
         metronome = prefs.getBoolean("metronome", false)
+        clickNudge = clampNudge(prefs.getInt("clickNudge", 0))
     }
 
     fun chooseMetronome(on: Boolean) {
         metronome = on
         context?.getSharedPreferences(FILE, 0)?.edit()?.putBoolean("metronome", on)?.apply()
     }
+
+    /** The click a little earlier (positive) or later (negative) than the phone's own buffers say, ms. */
+    fun chooseClickNudge(ms: Int) {
+        val next = clampNudge(ms)
+        clickNudge = next
+        context?.getSharedPreferences(FILE, 0)?.edit()?.putInt("clickNudge", next)?.apply()
+    }
+
+    /** The nudge kept inside what is worth trying: further and the click is not a click on the beat any more. */
+    fun clampNudge(ms: Int): Int = ms.coerceIn(-CLICK_NUDGE_LIMIT, CLICK_NUDGE_LIMIT)
 
     fun chooseTheme(mode: ThemeMode) {
         theme = mode

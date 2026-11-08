@@ -171,6 +171,7 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
                 Text(tr("Метроном", "Metronome"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 Switch(AppPrefs.metronome, { AppPrefs.chooseMetronome(it) })
             }
+            ClickNudge(AppPrefs.metronome)
             FilledTonalButton(
                 onClick = { vm.updateProjectMusic { m -> m.copy(dropMs = clockMs + m.offsetMs) } },
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -242,6 +243,36 @@ private fun GridRow(vm: CameraController, music: ProjectMusic) {
             )
         }
     }
+}
+
+/**
+ * The click a little earlier or later than the phone's own buffers promise: a click goes through the phone's mixer, and no
+ * phone tells how long that takes — so the ear has the last tenths. «⇠» puts the click earlier (a click that trails the
+ * beat), «⇢» later (one that leads it). Kept between launches, so it is set once.
+ */
+@Composable
+private fun ClickNudge(enabled: Boolean) {
+    val nudge = AppPrefs.clickNudge
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(tr("Клик", "Click"), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        IconButton(
+            { AppPrefs.chooseClickNudge(nudge + AppPrefs.CLICK_NUDGE_STEP) },
+            enabled = enabled && nudge < AppPrefs.CLICK_NUDGE_LIMIT,
+        ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null) }
+        Text((if (nudge > 0) "+$nudge" else "$nudge") + " ms", style = MaterialTheme.typography.bodySmall)
+        IconButton(
+            { AppPrefs.chooseClickNudge(nudge - AppPrefs.CLICK_NUDGE_STEP) },
+            enabled = enabled && nudge > -AppPrefs.CLICK_NUDGE_LIMIT,
+        ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) }
+    }
+    Text(
+        tr(
+            "Клик идёт через микшер телефона: отстаёт — ⇠, спешит — ⇢",
+            "The click goes through the phone's mixer: trails — ⇠, leads — ⇢",
+        ),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /**

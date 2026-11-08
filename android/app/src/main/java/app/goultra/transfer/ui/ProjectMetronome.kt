@@ -29,6 +29,12 @@ private const val CLICK_MS = 25
 private const val CLICK_HZ = 1_400.0
 
 /**
+ * What SoundPool itself holds before a click reaches the mixer, ms: its own sample buffers and the sonification track it
+ * plays them through. No phone tells it; this is the allowance that took the click from "after the beat" to the beat.
+ */
+private const val CLICK_QUEUE_MS = 30L
+
+/**
  * The click on the grid (P3): every beat of the track sounds where its red line stands, so a grid found by the analysis
  * or set by hand can be *heard*, not only seen. On every beat of the project's own clock, no accents — which beat of the
  * bar it is, is not something the analysis knows, and a guessed accent would be a lie.
@@ -40,7 +46,14 @@ private const val CLICK_HZ = 1_400.0
  * one click, and a jump of the clock takes the clicks it promised with it.
  */
 @Composable
-internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boolean, heard: MusicClock) {
+internal fun ProjectMetronome(
+    music: ProjectMusic?,
+    timeMs: Long,
+    playing: Boolean,
+    heard: MusicClock,
+    /** The app's own log: what the phone says of its sound path, so a nudge that was needed is on record. */
+    onLog: (String) -> Unit = {},
+) {
     val beats = music?.beats.orEmpty()
     if (music == null || beats.isEmpty()) return
     val context = LocalContext.current
@@ -49,10 +62,15 @@ internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boole
     DisposableEffect(click) { onDispose { click.release() } }
     // What the phone takes to sound a click: the click must be *heard* on the beat, so it is queued that much earlier.
     val latency = remember(click) { outputLatencyMs(context) }
+    // The ear may take the last few tenths either way (no phone tells how long its mixer holds a click).
+    val nudge = AppPrefs.clickNudge
+    LaunchedEffect(latency, nudge) {
+        onLog("клик: задержка вывода $latency мс, подстройка $nudge мс, всего ${(latency + nudge).coerceAtLeast(0L)} мс")
+    }
     val schedule = remember(beats, music.offsetMs) { MetronomeSchedule(beats, music.offsetMs) }
     var pending by remember(schedule) { mutableStateOf<Job?>(null) }
     val on = AppPrefs.metronome
-    LaunchedEffect(schedule, timeMs, playing, on) {
+    LaunchedEffect(schedule, timeMs, playing, on, nudge) {
         val at = SystemClock.elapsedRealtime()
         // Where the click is due is where the *music* stands; the picture's own clock is only the stand-in for a track that
         // is not heard yet (still loading, or the film has not reached its start).
@@ -62,7 +80,7 @@ internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boole
             pending = null
         }
         if (!playing || !on) return@LaunchedEffect
-        val due = schedule.due(at, CLICK_LEAD_MS, latency) ?: return@LaunchedEffect
+        val due = schedule.due(at, CLICK_LEAD_MS, (latency + nudge).coerceAtLeast(0L)) ?: return@LaunchedEffect
         if (due.inMs <= 0L) {
             // On the beat: the click goes at once, and only once (a tick that comes late does not repeat it).
             if (click.play()) schedule.fired(due.beat) else schedule.released()
@@ -78,17 +96,18 @@ internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boole
 }
 
 /**
- * What the phone adds between a click put on the queue and being heard, ms: its own output buffer, a frame per sample of
- * its own output rate. It is not the whole truth (a Bluetooth headset adds tens of ms more, and nothing on the phone can
- * know it), but it is the part the phone does say — and a click queued that much before its beat is heard nearer the
- * line than one queued on it.
+ * What the phone adds between a click put on the queue and being heard, ms: its own buffer, a frame per sample of its own
+ * output rate, and [CLICK_QUEUE_MS] for what SoundPool itself holds before the click reaches the mixer. The phone tells
+ * the buffer and nothing else — a click queued exactly on the beat was heard *after* it, which is the lag that was left —
+ * so the rest is a fair allowance, and the ear takes the last tenths with the nudge in the Tempo sheet.
  */
 private fun outputLatencyMs(context: Context): Long {
     val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return CLICK_LATENCY_MS
     val frames = audio.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toLongOrNull()
     val rate = audio.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toLongOrNull()
-    if (frames == null || rate == null || frames <= 0L || rate <= 0L) return CLICK_LATENCY_MS
-    return (frames * 1000 / rate).coerceIn(0L, 200L)
+    val buffer = if (frames == null || rate == null || frames <= 0L || rate <= 0L) 0L
+    else (frames * 1000 / rate).coerceIn(0L, 200L)
+    return (buffer + CLICK_QUEUE_MS).coerceIn(0L, 300L)
 }
 
 /** The tick itself: a short, quickly dying tone, made once and kept in the cache — a metronome must sound the same always. */
