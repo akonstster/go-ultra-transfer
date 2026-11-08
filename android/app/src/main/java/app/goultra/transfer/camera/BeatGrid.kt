@@ -87,12 +87,13 @@ object BeatGrid {
         var at = opening.phase.toDouble()
         var period = opening.period
         val snap = (SNAP_MS * fps / 1000).toInt().coerceAtLeast(1)
-        var lastFrame = -1
+        var last = -1.0
         while (frameMs(at, sampleRate) < lengthMs) {
-            // The walk gives the tempo, the sound gives the moment: every beat sits on the strongest start near it.
-            val frame = snapTo(onset, at.roundToInt(), snap).coerceAtLeast(lastFrame + 1)
-            lastFrame = frame
-            beats += frameMs(frame.toDouble(), sampleRate)
+            // The walk gives the tempo, the sound gives the moment: every beat sits on the strongest start near it — and
+            // stays between frames, or the beats jump in whole steps of 23 ms and a steady 120 reads as 118.
+            val exact = snapExact(onset, at, snap).coerceAtLeast(last + 0.01)
+            last = exact
+            beats += frameMs(exact, sampleRate)
             period = localPeriod(onset, at, period, fps)
             at += period
         }
@@ -199,24 +200,23 @@ object BeatGrid {
             stability = steady,
             drive = energy.average().coerceIn(0.0, 1.0),
             energy = energy,
-            dropMs = dropOf(energy),
+            dropMs = dropOf(energy, grid?.beats.orEmpty()),
             confidence = grid?.confidence ?: 0.0,
         )
     }
 
-    /** Where the energy leaps out of a quiet stretch: the biggest rise over the four seconds before it, if it is one. */
-    internal fun dropOf(energy: FloatArray): Long? {
-        var best = 0f
-        var at: Long? = null
+    /** Where the energy first leaps out of a quiet stretch: the first second well above the quiet four before it, put on
+     *  the beat that opens it ([beats] in track ms) — a drop is heard on a beat, not between two. */
+    internal fun dropOf(energy: FloatArray, beats: List<Long> = emptyList()): Long? {
         for (i in 4 until energy.size) {
-            val quiet = (i - 4 until i).minOf { energy[it] }
+            val quiet = (i - 4 until i).maxOf { energy[it] }
+            if (quiet > 0.45f) continue
             val rise = energy[i] - quiet
-            if (rise > best && rise > 0.25f) {
-                best = rise
-                at = i * ENERGY_STEP_MS
-            }
+            if (rise < 0.35f) continue
+            val at = i * ENERGY_STEP_MS
+            return beats.firstOrNull { it >= at } ?: at
         }
-        return at
+        return null
     }
 
     /** The middle gap between the beats, ms (0 when there are fewer than two). */
@@ -226,18 +226,27 @@ object BeatGrid {
         return gaps[gaps.size / 2].toDouble()
     }
 
-    /** The strongest start within [window] frames of [frame]: the walk gives the tempo, the sound gives the moment. */
-    private fun snapTo(onset: FloatArray, frame: Int, window: Int): Int {
-        if (onset.isEmpty()) return 0
-        var best = frame.coerceIn(0, onset.size - 1)
-        var top = onset[best]
-        for (f in (frame - window).coerceAtLeast(0)..(frame + window).coerceAtMost(onset.size - 1)) {
+    /**
+     * The strongest start within [window] frames of [frame], between frames: the walk gives the tempo, the sound gives
+     * the moment, and the peak's parabola gives the moment finer than one frame (23 ms of a frame would put a steady
+     * 120 at 118).
+     */
+    private fun snapExact(onset: FloatArray, frame: Double, window: Int): Double {
+        if (onset.isEmpty()) return 0.0
+        val centre = frame.roundToInt().coerceIn(0, onset.size - 1)
+        var best = centre
+        var top = onset[centre]
+        for (f in (centre - window).coerceAtLeast(1)..(centre + window).coerceAtMost(onset.size - 2)) {
             if (onset[f] > top) {
                 top = onset[f]
                 best = f
             }
         }
-        return best
+        val l = onset[best - 1].toDouble()
+        val c = onset[best].toDouble()
+        val r = onset[best + 1].toDouble()
+        val shift = if (l - 2 * c + r != 0.0) (0.5 * (l - r) / (l - 2 * c + r)).coerceIn(-0.5, 0.5) else 0.0
+        return best + shift
     }
 
     /** A frame's moment in the track: a frame stands for its window's middle — a hit is heard there, not at its start. */

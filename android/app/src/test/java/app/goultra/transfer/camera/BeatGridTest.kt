@@ -109,6 +109,37 @@ class BeatGridTest {
     }
 
     @Test
+    fun `a steady tempo is followed without losing a step by the end`() {
+        // 120 BPM for forty seconds: the beats must stay on the clicks all the way, not drift half a beat by the middle
+        // (a grid a beat and a half behind is what a whole-frame grid looked like).
+        val out = FloatArray(rate * 40)
+        val rnd = Random(5)
+        val clicks = ArrayList<Long>()
+        var at = 0.25 * rate
+        while (at < out.size) {
+            clicks += (at / rate * 1000).toLong()
+            val start = at.toInt()
+            for (k in 0 until 1500) {
+                if (start + k >= out.size) break
+                out[start + k] += ((rnd.nextFloat() * 2 - 1) * 0.8 * exp(-k / 250.0)).toFloat()
+            }
+            at += 0.5 * rate
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertEquals("tempo", 120.0, g!!.bpm, 0.5)
+        val gaps = g.beats.zipWithNext { a, b -> b - a }
+        assertEquals("middle gap", 500.0, gaps.sorted()[gaps.size / 2].toDouble(), 2.0)
+        var j = 0
+        var worst = 0L
+        for (beat in g.beats) {
+            while (j + 1 < clicks.size && abs(clicks[j + 1] - beat) <= abs(clicks[j] - beat)) j++
+            worst = maxOf(worst, abs(clicks[j] - beat))
+        }
+        assertTrue("worst beat $worst ms off", worst <= 25)
+    }
+
+    @Test
     fun `the drop is where the energy leaps out of a quiet stretch`() {
         val quietThenLoud = FloatArray(20) { if (it < 8) 0.2f else 0.9f }
         assertEquals(8_000L, BeatGrid.dropOf(quietThenLoud))

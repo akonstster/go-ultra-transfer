@@ -9,6 +9,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import app.goultra.transfer.camera.ProjectMusic
@@ -17,6 +18,8 @@ import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** How long the click sounds, and how quickly it dies away — a tick, not a note. */
 private const val CLICK_MS = 25
@@ -32,18 +35,41 @@ internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boole
     val beats = music?.beats.orEmpty()
     if (music == null || beats.isEmpty()) return
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val click = remember { Click(context) }
     DisposableEffect(click) { onDispose { click.release() } }
     // The clock comes in every 50 ms while the film plays: a beat is the tick a beat's moment fell between.
     var previous by remember(music.uri) { mutableLongStateOf(timeMs) }
     LaunchedEffect(timeMs, playing, AppPrefs.metronome) {
-        val from = previous
-        previous = timeMs
-        if (!playing || !AppPrefs.metronome) return@LaunchedEffect
+        if (!playing || !AppPrefs.metronome) {
+            previous = timeMs
+            return@LaunchedEffect
+        }
         // A jump (a seek, a piece put on) is not a beat to be heard; nor is the very first tick.
-        if (timeMs <= from || timeMs - from > 400L) return@LaunchedEffect
+        if (timeMs < previous || timeMs - previous > 400L) {
+            previous = timeMs
+            return@LaunchedEffect
+        }
         val offset = music.offsetMs
-        if (beats.any { it - offset in (from + 1)..timeMs }) click.play()
+        // A beat the clock has just gone past: the click is a few ms late, no more.
+        val passed = beats.firstOrNull { it - offset in (previous + 1)..timeMs }
+        previous = timeMs
+        if (passed != null) {
+            click.play()
+            return@LaunchedEffect
+        }
+        // A beat that is about to come: wait for it and click on the beat itself, not a whole tick later.
+        val ahead = beats.firstOrNull { it - offset > timeMs }
+        if (ahead != null) {
+            val wait = (ahead - offset) - timeMs
+            if (wait in 1L..50L) {
+                previous = ahead - offset
+                scope.launch {
+                    delay(wait)
+                    click.play()
+                }
+            }
+        }
     }
 }
 

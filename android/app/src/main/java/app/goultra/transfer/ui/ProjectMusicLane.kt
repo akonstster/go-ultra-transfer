@@ -113,7 +113,7 @@ private fun Tool(name: String, icon: ImageVector, onClick: () -> Unit) {
 private fun SoundSheet(vm: CameraController, music: ProjectMusic?, onPick: () -> Unit, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
     ) {
         Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
             Text(tr("Звук", "Sound"), style = MaterialTheme.typography.titleMedium)
@@ -141,16 +141,26 @@ private fun SoundSheet(vm: CameraController, music: ProjectMusic?, onPick: () ->
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long, onDismiss: () -> Unit) {
+    val bpm = MusicGrid.bpm(music.beats)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
     ) {
-        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
-            Text(tr("Темп", "Tempo"), style = MaterialTheme.typography.titleMedium)
-            GridRow(vm, music, clockMs)
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(tr("Темп", "Tempo"), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                Text(if (bpm > 0.0) "${bpm.roundToInt()} BPM" else "—", style = MaterialTheme.typography.titleSmall)
+            }
+            GridRow(vm, music)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
                 Text(tr("Метроном", "Metronome"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 Switch(AppPrefs.metronome, { AppPrefs.chooseMetronome(it) })
+            }
+            FilledTonalButton(
+                onClick = { vm.updateProjectMusic { m -> m.copy(dropMs = clockMs + m.offsetMs) } },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) {
+                Text(tr("Дроп", "Drop") + (music.dropMs?.let { " · " + formatDuration((it / 1000).toInt()) } ?: ""))
             }
             Text(
                 tr(
@@ -165,40 +175,40 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
     }
 }
 /**
- * The grid by hand (P3, plan §1): a beat a minute slower or faster, the pace halved or doubled, the whole grid shifted a
- * few ms, a tap tempo against what the analysis found, and the drop put where the clock's line stands.
+ * The grid by hand (P3, plan §1): a tap tempo against what the analysis found, a beat a minute slower or faster, the
+ * pace halved or doubled, and the whole grid shifted a few ms. Two rows, the tempo over the shape, so nothing crowds.
  */
 @Composable
-private fun GridRow(vm: CameraController, music: ProjectMusic, clockMs: Long) {
+private fun GridRow(vm: CameraController, music: ProjectMusic) {
     val bpm = MusicGrid.bpm(music.beats)
     // Taps: a few quick ones give the beat; two seconds of silence start them over.
     var taps by remember(music.uri) { mutableStateOf(emptyList<Long>()) }
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        TextButton({
-            val now = System.currentTimeMillis()
-            val next = if (now - (taps.lastOrNull() ?: 0L) > 2_000L) listOf(now) else taps + now
-            taps = next
-            vm.editMusicGrid { b, len -> MusicGrid.fromTap(b.firstOrNull() ?: 0L, next, len) }
-        }) { Text(tr("Тап", "Tap")) }
-        IconButton(
-            { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm - 1.0).coerceAtLeast(1.0), len) } },
-            enabled = bpm > 2.0,
-        ) { Icon(Icons.Filled.Remove, null) }
-        Text(if (bpm > 0.0) "${bpm.roundToInt()} BPM" else "—", style = MaterialTheme.typography.bodySmall)
-        IconButton(
-            { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm + 1.0), len) } },
-            enabled = bpm > 0.0,
-        ) { Icon(Icons.Filled.Add, null) }
-        TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 0.5, len) } }) { Text("×2") }
-        TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 2.0, len) } }) { Text("÷2") }
-        IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, -5L) } }) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null)
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton({
+                val now = System.currentTimeMillis()
+                val next = if (now - (taps.lastOrNull() ?: 0L) > 2_000L) listOf(now) else taps + now
+                taps = next
+                vm.editMusicGrid { b, len -> MusicGrid.fromTap(b.firstOrNull() ?: 0L, next, len) }
+            }) { Text(tr("Тап", "Tap")) }
+            IconButton(
+                { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm - 1.0).coerceAtLeast(1.0), len) } },
+                enabled = bpm > 2.0,
+            ) { Icon(Icons.Filled.Remove, null) }
+            IconButton(
+                { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm + 1.0), len) } },
+                enabled = bpm > 0.0,
+            ) { Icon(Icons.Filled.Add, null) }
         }
-        IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, 5L) } }) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
-        }
-        TextButton({ vm.updateProjectMusic { m -> m.copy(dropMs = clockMs + m.offsetMs) } }) {
-            Text(tr("Дроп", "Drop") + (music.dropMs?.let { " " + formatDuration((it / 1000).toInt()) } ?: ""))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 0.5, len) } }) { Text("×2") }
+            TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 2.0, len) } }) { Text("÷2") }
+            IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, -5L) } }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null)
+            }
+            IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, 5L) } }) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
+            }
         }
     }
 }
