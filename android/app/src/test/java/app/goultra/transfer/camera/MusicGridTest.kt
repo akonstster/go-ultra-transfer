@@ -1,6 +1,8 @@
 package app.goultra.transfer.camera
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -43,5 +45,33 @@ class MusicGridTest {
         assertEquals(120.0, MusicGrid.bpm(listOf(0L, 500L, 1000L, 1500L)), 0.01)
         assertEquals(0.0, MusicGrid.bpm(listOf(0L)), 0.0)
         assertEquals(0.0, MusicGrid.bpm(emptyList()), 0.0)
+    }
+
+    @Test
+    fun `a tempo that moves is a range, and it is called variable`() {
+        // Twenty beats whose gaps shrink from 600 ms to 480: 100 BPM at the start, 125 by the end.
+        val moving = ArrayList<Long>()
+        var at = 0L
+        var gap = 600L
+        repeat(20) {
+            moving += at
+            at += gap
+            if (gap > 480L) gap -= 10L
+        }
+        assertTrue("a moving tempo is variable", MusicGrid.isVariable(moving))
+        val (slow, fast) = MusicGrid.tempoRange(moving)!!
+        assertEquals(100.0, slow, 2.0)
+        assertEquals(125.0, fast, 2.0)
+
+        // A steady 120 with the beats a few ms off the ideal is not a moving tempo.
+        val steady = (0 until 13).map { (it * 500L + ((it % 3) - 1) * 4L) }
+        assertFalse("a steady tempo is not variable", MusicGrid.isVariable(steady))
+        val (from, to) = MusicGrid.tempoRange(steady)!!
+        assertEquals(120.0, (from + to) / 2, 2.0)
+        assertTrue("a steady tempo is one number: $from–$to", to - from < 5.0)
+
+        // Too few beats say nothing at all.
+        assertNull(MusicGrid.tempoRange(listOf(0L, 500L, 1_000L)))
+        assertFalse(MusicGrid.isVariable(emptyList()))
     }
 }

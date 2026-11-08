@@ -143,6 +143,10 @@ private fun SoundSheet(vm: CameraController, music: ProjectMusic?, onPick: () ->
 @Composable
 private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long, onDismiss: () -> Unit) {
     val bpm = MusicGrid.bpm(music.beats)
+    // A tempo that moves is not one number: it is a range, and it must be said so — 118.6 BPM would be a lie about a
+    // track that goes from 100 to 130, and a nudge of a tenth would move it nowhere true.
+    val range = MusicGrid.tempoRange(music.beats)
+    val moving = MusicGrid.isVariable(music.beats)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
@@ -151,7 +155,16 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(tr("Темп", "Tempo"), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 // A tenth of a beat a minute matters: 120.4 is not 120, and a grid a half BPM off walks away in a minute.
-                Text(if (bpm > 0.0) "%.1f BPM".format(bpm) else "—", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    when {
+                        bpm <= 0.0 -> "—"
+                        range != null && moving ->
+                            String.format(tr("переменный %.1f–%.1f", "variable %.1f–%.1f"), range.first, range.second)
+                        else -> "%.1f BPM".format(bpm)
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                )
             }
             GridRow(vm, music)
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
@@ -183,34 +196,50 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
 @Composable
 private fun GridRow(vm: CameraController, music: ProjectMusic) {
     val bpm = MusicGrid.bpm(music.beats)
+    // A tempo that moves cannot be nudged as one number — stretching the whole grid about its first beat would only put
+    // the error somewhere else. The shift stays (the grid may sit early or late as a whole), the rest is off.
+    val moving = MusicGrid.isVariable(music.beats)
     // Taps: a few quick ones give the beat; two seconds of silence start them over.
     var taps by remember(music.uri) { mutableStateOf(emptyList<Long>()) }
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton({
-                val now = System.currentTimeMillis()
-                val next = if (now - (taps.lastOrNull() ?: 0L) > 2_000L) listOf(now) else taps + now
-                taps = next
-                vm.editMusicGrid { b, len -> MusicGrid.fromTap(b.firstOrNull() ?: 0L, next, len) }
-            }) { Text(tr("Тап", "Tap")) }
+            TextButton(
+                {
+                    val now = System.currentTimeMillis()
+                    val next = if (now - (taps.lastOrNull() ?: 0L) > 2_000L) listOf(now) else taps + now
+                    taps = next
+                    vm.editMusicGrid { b, len -> MusicGrid.fromTap(b.firstOrNull() ?: 0L, next, len) }
+                },
+                enabled = !moving,
+            ) { Text(tr("Тап", "Tap")) }
             IconButton(
                 { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm - 0.1).coerceAtLeast(0.1), len) } },
-                enabled = bpm > 0.2,
+                enabled = !moving && bpm > 0.2,
             ) { Icon(Icons.Filled.Remove, null) }
             IconButton(
                 { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm + 0.1), len) } },
-                enabled = bpm > 0.0,
+                enabled = !moving && bpm > 0.0,
             ) { Icon(Icons.Filled.Add, null) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 0.5, len) } }) { Text("×2") }
-            TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 2.0, len) } }) { Text("÷2") }
+            TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 0.5, len) } }, enabled = !moving) { Text("×2") }
+            TextButton({ vm.editMusicGrid { b, len -> MusicGrid.stretched(b, 2.0, len) } }, enabled = !moving) { Text("÷2") }
             IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, -5L) } }) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null)
             }
             IconButton({ vm.editMusicGrid { b, _ -> MusicGrid.shifted(b, 5L) } }) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
             }
+        }
+        if (moving) {
+            Text(
+                tr(
+                    "Темп меняется по ходу трека — можно только сдвинуть всю сетку",
+                    "The tempo changes along the track — only the whole grid can be shifted",
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

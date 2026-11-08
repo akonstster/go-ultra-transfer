@@ -572,6 +572,8 @@ internal val TEXT_ES: Map<String, String> = mapOf(
 "Sound" to "Sonido",
     "Tempo" to "Tempo",
     "Metronome" to "Metrónomo",
+    "variable %.1f–%.1f" to "variable %.1f–%.1f",
+    "The tempo changes along the track — only the whole grid can be shifted" to "El tempo cambia a lo largo del tema — solo se puede desplazar toda la cuadrícula",
     "No music" to "Sin música",
     "No track" to "Sin pista",
     "The drop is where the track's energy leaps: the montage will put an accent there" to "El drop es donde la energía de la pista salta: el montaje pondrá ahí un acento",

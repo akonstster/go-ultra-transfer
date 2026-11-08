@@ -44,11 +44,9 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.platform.LocalContext
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -88,22 +86,22 @@ private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile)
 }
 
 /**
- * The pieces' lengths as the playlist plays them: the player's own for the items it has prepared, the clip's range for
- * the rest. media3 knows a length only once an item is prepared (the current one and the next), so a clock built from
- * its windows alone grew as it played and a seek landed in the wrong piece.
+ * The pieces' lengths, ms: the project's own numbers, never the player's. media3 knows a length only once an item is
+ * prepared, and for a while it reported a still's length as its loading time — a clock built from its windows grew as it
+ * played, a seek landed in the wrong piece, and the timeline (which draws by the clips' own lengths) and the click (which
+ * counts project time) came apart at the joins. One sum for the picture, the lines and the sound: the model.
  */
-private fun lengthsOf(player: Player, clips: List<ProjectClip>): List<Long> {
-    val timeline = player.currentTimeline
-    val window = Timeline.Window()
-    return clips.mapIndexed { i, clip ->
-        val known = if (i < timeline.windowCount) timeline.getWindow(i, window).durationMs else C.TIME_UNSET
-        if (known == C.TIME_UNSET || known <= 0L) clip.durationMs else known
-    }
-}
+private fun lengthsOf(clips: List<ProjectClip>): List<Long> = clips.map { it.durationMs }
 
-/** The project's clock at [posMs] into item [index]: everything before it plus the position in it. */
-internal fun clockAt(lengths: List<Long>, index: Int, posMs: Long): Long =
-    lengths.take(index.coerceIn(0, lengths.size)).sum() + posMs.coerceAtLeast(0L)
+/**
+ * The project's clock at [posMs] into item [index]: everything before it plus the position in it. The position is kept
+ * inside the piece — the player may read a moment past the model's end at a join, and the clock must not.
+ */
+internal fun clockAt(lengths: List<Long>, index: Int, posMs: Long): Long {
+    if (lengths.isEmpty()) return posMs.coerceAtLeast(0L)
+    val at = index.coerceIn(0, lengths.size - 1)
+    return lengths.take(at).sum() + posMs.coerceIn(0L, lengths[at].coerceAtLeast(0L))
+}
 
 /** The item and the place in it that an absolute time of the project falls on (the end holds at the last item). */
 internal fun seekPoint(lengths: List<Long>, atMs: Long): Pair<Int, Long> {
@@ -298,7 +296,7 @@ internal fun ProjectPreview(
     LaunchedEffect(player) {
         while (true) {
             val now = inPlayer.toList()
-            val lengths = lengthsOf(player, now.map { it.clip })
+            val lengths = lengthsOf(now.map { it.clip })
             if (dragging == null && now.isNotEmpty()) shown = clockAt(lengths, player.currentMediaItemIndex, player.currentPosition)
             shownTotal = if (lengths.isEmpty()) itemsNow.sumOf { it.clip.durationMs } else lengths.sum()
             now.getOrNull(player.currentMediaItemIndex)?.let { resume = it.clip to player.currentPosition.coerceAtLeast(0L) }
@@ -324,7 +322,7 @@ internal fun ProjectPreview(
     LaunchedEffect(seek, signature) {
         val ms = seek ?: return@LaunchedEffect
         if (inPlayer.isEmpty()) return@LaunchedEffect
-        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.clip }), ms)
+        val (i, at) = seekPoint(lengthsOf(inPlayer.map { it.clip }), ms)
         player.seekTo(i, at)
         onSeekedNow()
     }
@@ -379,7 +377,7 @@ internal fun ProjectPreview(
                 onValueChange = { dragging = it },
                 onValueChangeFinished = {
                     dragging?.let { ms ->
-                        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.clip }), ms.toLong())
+                        val (i, at) = seekPoint(lengthsOf(inPlayer.map { it.clip }), ms.toLong())
                         if (inPlayer.isNotEmpty()) player.seekTo(i, at)
                         shown = ms.toLong()
                     }

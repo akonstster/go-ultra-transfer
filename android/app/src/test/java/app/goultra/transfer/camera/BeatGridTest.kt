@@ -172,4 +172,62 @@ class BeatGridTest {
         assertNull(BeatGrid.dropOf(FloatArray(20) { 0.5f }))
         assertNull(BeatGrid.dropOf(FloatArray(3) { 0f }))
     }
+
+    @Test
+    fun `a riser before the drop is not the drop`() {
+        // Ten seconds of quiet verse, four of them a riser climbing to the drop's own level, then the loud part at 10 s.
+        // The old search looked for where the bright stretch begins, walked back into the riser and put the drop two
+        // beats early (8 s at 120 BPM) — the very error that was seen on the phone.
+        val loud = FloatArray(300) { i ->
+            val t = i * 100L
+            when {
+                t < 6_000L -> 0.2f
+                t < 10_000L -> 0.2f + 0.5f * (t - 6_000L) / 4_000L
+                else -> 0.9f
+            }
+        }
+        assertEquals(10_000L, BeatGrid.dropOf(loud, BeatGrid.LOUD_STEP_MS))
+        // On a grid it is the beat that opens the loud part — never a beat of the riser.
+        val beats = (0L..12_000L step 500L).toList()
+        assertEquals(10_000L, BeatGrid.dropOf(loud, BeatGrid.LOUD_STEP_MS, beats))
+    }
+
+    @Test
+    fun `a track that speeds up is followed without falling behind`() {
+        // A minute from 100 to 130 BPM. The old walk read its tempo from the four seconds around a beat and searched only
+        // 30 ms off its guess, so once the sound had moved on the grid never came back: the beats stood later and later,
+        // and the click with them.
+        val seconds = 60
+        val out = FloatArray(rate * seconds)
+        val rnd = Random(11)
+        val clicks = ArrayList<Long>()
+        var at = 0.2 * rate
+        while (at < out.size) {
+            clicks += (at / rate * 1000).toLong()
+            val start = at.toInt()
+            for (k in 0 until 1200) {
+                if (start + k >= out.size) break
+                out[start + k] += ((rnd.nextFloat() * 2 - 1) * 0.8 * exp(-k / 200.0)).toFloat()
+            }
+            val bpm = 100.0 + 30.0 * (at / out.size)
+            at += 60.0 / bpm * rate
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertTrue("beats: ${g!!.beats.size}", g.beats.size > 100)
+        // Every beat against the click it stands for: positive — the beat is early, negative — late.
+        var j = 0
+        val offs = ArrayList<Long>(g.beats.size)
+        for (beat in g.beats) {
+            while (j + 1 < clicks.size && abs(clicks[j + 1] - beat) <= abs(clicks[j] - beat)) j++
+            offs += clicks[j] - beat
+        }
+        val worst = offs.maxOf { abs(it) }
+        assertTrue("worst beat $worst ms off", worst <= 45)
+        val mean = offs.average()
+        assertTrue("mean error $mean", abs(mean) <= 12.0)
+        // The second half leans no more than the first: a grid that falls behind leans more and more.
+        val half = offs.size / 2
+        assertEquals("the two halves lean alike", offs.take(half).average(), offs.drop(half).average(), 15.0)
+    }
 }

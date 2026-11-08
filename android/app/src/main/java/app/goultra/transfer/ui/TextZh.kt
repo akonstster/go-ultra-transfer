@@ -572,6 +572,8 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
 "Sound" to "声音",
     "Tempo" to "速度",
     "Metronome" to "节拍器",
+    "variable %.1f–%.1f" to "速度变化 %.1f–%.1f",
+    "The tempo changes along the track — only the whole grid can be shifted" to "整首曲子的速度在变 — 只能整体移动网格",
     "No music" to "没有音乐",
     "No track" to "没有曲目",
     "The drop is where the track's energy leaps: the montage will put an accent there" to "高潮点是曲目能量跃升之处：自动剪辑会在那里加一个重音",

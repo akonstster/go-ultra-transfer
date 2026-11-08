@@ -8,6 +8,9 @@ import kotlin.math.roundToLong
  * testable as a found one — and nothing here touches the track's own file.
  */
 object MusicGrid {
+    /** How much the tempo may move before it is called variable: a twentieth of it is a rounding of the beats. */
+    private const val VARIABLE_SHARE = 0.05
+
     /** Every beat moved by [byMs]: a grid that sits a little early or late against the sound. Never before the start. */
     fun shifted(beats: List<Long>, byMs: Long): List<Long> = beats.map { it + byMs }.filter { it >= 0L }
 
@@ -58,5 +61,29 @@ object MusicGrid {
     fun bpm(beats: List<Long>): Double {
         val gap = BeatGrid.medianGap(beats)
         return if (gap > 0.0) 60_000.0 / gap else 0.0
+    }
+
+    /**
+     * The tempo as a range, beats a minute — the slowest and the fastest the grid holds — read from the ends of its gaps
+     * rather than from the widest and the narrowest of them: one lagging beat is not a tempo, one slip is not either.
+     * Null when there are too few beats to say anything.
+     */
+    fun tempoRange(beats: List<Long>): Pair<Double, Double>? {
+        val gaps = beats.zipWithNext { a, b -> b - a }.filter { it > 0L }.sorted()
+        if (gaps.size < 4) return null
+        val quick = gaps[(gaps.size * 0.05).toInt().coerceIn(0, gaps.lastIndex)]
+        val slow = gaps[(gaps.size * 0.95).toInt().coerceIn(0, gaps.lastIndex)]
+        if (quick <= 0L) return null
+        return 60_000.0 / slow to 60_000.0 / quick
+    }
+
+    /**
+     * Whether the track's tempo changes along it: a twentieth between its slowest and its fastest beat is a rounding, a
+     * fifth is a tempo that moves. A moving tempo cannot be nudged as one number — the whole grid would only be stretched
+     * about its first beat — so the tempo controls are off for it and only the shift is left.
+     */
+    fun isVariable(beats: List<Long>): Boolean {
+        val (slow, fast) = tempoRange(beats) ?: return false
+        return fast - slow > slow * VARIABLE_SHARE
     }
 }

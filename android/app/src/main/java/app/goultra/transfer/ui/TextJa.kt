@@ -572,6 +572,8 @@ internal val TEXT_JA: Map<String, String> = mapOf(
 "Sound" to "サウンド",
     "Tempo" to "テンポ",
     "Metronome" to "メトロノーム",
+    "variable %.1f–%.1f" to "可変 %.1f–%.1f",
+    "The tempo changes along the track — only the whole grid can be shifted" to "曲の途中でテンポが変わります — グリッド全体のずらしだけができます",
     "No music" to "音楽なし",
     "No track" to "曲なし",
     "The drop is where the track's energy leaps: the montage will put an accent there" to "ドロップは曲のエネルギーが跳ね上がる場所です：自動編集はそこにアクセントを置きます",
