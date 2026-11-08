@@ -140,6 +140,32 @@ class BeatGridTest {
     }
 
     @Test
+    fun `a whole minute that speeds up is followed to its last beat`() {
+        // Sixty seconds from 100 to 130 BPM: the walk reaches the very last frame of the track, which once read past the
+        // end of the envelope and lost the whole analysis.
+        val seconds = 60
+        val out = FloatArray(rate * seconds)
+        val rnd = Random(9)
+        var at = 0.2 * rate
+        while (at < out.size) {
+            val bpm = 100.0 + 30.0 * (at / out.size)
+            val start = at.toInt()
+            for (k in 0 until 1200) {
+                if (start + k >= out.size) break
+                out[start + k] += ((rnd.nextFloat() * 2 - 1) * 0.8 * exp(-k / 200.0)).toFloat()
+            }
+            at += 60.0 / bpm * rate
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertTrue("beats: ${g!!.beats.size}", g.beats.size > 100)
+        assertTrue("last beat ${g.beats.last()}", g.beats.last() > seconds * 1000L - 1000L)
+        // The pace got faster: the last gaps are shorter than the first ones.
+        val gaps = g.beats.zipWithNext { a, b -> b - a }
+        assertTrue("gaps ${gaps.first()} -> ${gaps.last()}", gaps.last() < gaps.first())
+    }
+
+    @Test
     fun `the drop is where the energy leaps out of a quiet stretch`() {
         val quietThenLoud = FloatArray(20) { if (it < 8) 0.2f else 0.9f }
         assertEquals(8_000L, BeatGrid.dropOf(quietThenLoud))

@@ -3359,6 +3359,12 @@ class CameraController(private val app: Application) {
             withContext(Dispatchers.IO) {
                 runCatching { writePeaks(music.uri, found.peaks) }.onFailure { log("музыка: ${it.message}") }
             }
+            // What the analysis made of the track: the numbers to look at when a grid or a drop is out of place.
+            log(
+                "музыка ${music.name}: %.0f BPM, %d ударов, дроп %s, длина %d мс".format(
+                    found.bpm, found.beats.size, found.profile?.dropMs?.toString() ?: "нет", found.lengthMs,
+                ),
+            )
             musicFailed = musicFailed - music.uri
             musicVersion++
             // The grid and the profile go into whichever project still holds this track: it may have been replaced

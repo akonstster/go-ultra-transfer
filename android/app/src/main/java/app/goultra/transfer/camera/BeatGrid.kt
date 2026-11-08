@@ -205,18 +205,31 @@ object BeatGrid {
         )
     }
 
-    /** Where the energy first leaps out of a quiet stretch: the first second well above the quiet four before it, put on
-     *  the beat that opens it ([beats] in track ms) — a drop is heard on a beat, not between two. */
+    /**
+     * Where the track's brightest stretch begins (the plan's «дроп»): the loudest part of the piece — its chorus, its
+     * leap — walked back to the second its energy climbs out of the calm before it, and put on the beat that opens it.
+     * That is the moment the peak of the song starts, not the loudest shout inside it.
+     */
     internal fun dropOf(energy: FloatArray, beats: List<Long> = emptyList()): Long? {
-        for (i in 4 until energy.size) {
-            val quiet = (i - 4 until i).maxOf { energy[it] }
-            if (quiet > 0.45f) continue
-            val rise = energy[i] - quiet
-            if (rise < 0.35f) continue
-            val at = i * ENERGY_STEP_MS
-            return beats.firstOrNull { it >= at } ?: at
+        if (energy.size < 6) return null
+        // Smoothed over three seconds: one loud hit is not a bright stretch.
+        val smooth = FloatArray(energy.size) { i ->
+            val from = (i - 1).coerceAtLeast(0)
+            val to = (i + 1).coerceAtMost(energy.size - 1)
+            var sum = 0f
+            for (j in from..to) sum += energy[j]
+            sum / (to - from + 1)
         }
-        return null
+        val peak = smooth.maxOrNull() ?: return null
+        if (peak <= 0f) return null
+        val brightest = smooth.indexOfFirst { it >= peak * 0.98f }
+        if (brightest <= 0) return null
+        // Back to where that stretch lifts out of the calm: the first second above six tenths of the peak, counting back.
+        val level = peak * 0.6f
+        var at = brightest
+        while (at > 0 && smooth[at - 1] > level) at--
+        val ms = at * ENERGY_STEP_MS
+        return beats.firstOrNull { it >= ms } ?: ms
     }
 
     /** The middle gap between the beats, ms (0 when there are fewer than two). */
@@ -242,6 +255,9 @@ object BeatGrid {
                 best = f
             }
         }
+        // The parabola needs a neighbour on each side: at the very edges of the track there is none (the last frame of a
+        // long track once walked off the end and lost the whole analysis).
+        if (best <= 0 || best >= onset.size - 1) return best.toDouble()
         val l = onset[best - 1].toDouble()
         val c = onset[best].toDouble()
         val r = onset[best + 1].toDouble()
