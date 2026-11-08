@@ -143,7 +143,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 4)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 5)
     }
 
     @Test
@@ -346,6 +346,17 @@ class BeatGridTest {
         assertEquals(listOf(15_000L), shortDrops)
         assertEquals(1, fullDrops.size)
         assertTrue("the drop after 20 s is on the full grid: $fullDrops", fullDrops.single() in 20_000L..20_500L)
+    }
+
+    @Test
+    fun `the first beat of a return is chosen even when the loud level arrives one beat later`() {
+        // A pause to 10 s, then a hit at the first beat (10.1) that is already loud, the level settling by 10.4. The
+        // detected 90 % edge is after that first beat; taking only the next beat would put the drop on the second one.
+        val energy = FloatArray(200) { i -> if (i < 100) 0.05f else 0.90f }
+        val beats = (100L..20_000L step 500L).toList()
+        assertEquals(10_100L, BeatGrid.beatOfReturn(10_400L, 10_000L, 0.9, energy, BeatGrid.LOUD_STEP_MS, beats))
+        // A beat far from the pause (a riser) must not be pulled back onto it.
+        assertEquals(10_600L, BeatGrid.beatOfReturn(10_400L, 7_500L, 0.9, energy, BeatGrid.LOUD_STEP_MS, beats))
     }
 
     @Test

@@ -83,6 +83,13 @@ object BeatGrid {
      *  before another rise can be counted. */
     private const val DROP_APART_SECONDS = 8.0
 
+    /** How far into the returning level a beat must be to count as the first beat out of the pause. */
+    private const val RETURN_EDGE_SHARE = 0.4
+
+    /** One drop candidate: where the returning level is reached, the quiet it left (and where that quiet ended), and
+     *  that level. */
+    private class DropPoint(val edge: Int, val quiet: Double, val quietEnd: Int, val level: Double)
+
     /** How far a beat walks off the grid to sit on the strongest start near it, ms. */
     private const val SNAP_MS = 30L
 
@@ -105,7 +112,7 @@ object BeatGrid {
     private const val MIN_STARTS = 8
 
     /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
-    const val ANALYSIS_VERSION = 4
+    const val ANALYSIS_VERSION = 5
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
@@ -523,7 +530,7 @@ object BeatGrid {
         if (loud.size < quiet + far) return emptyList()
         val mean = loud.average()
         if (mean <= 0.0) return emptyList()
-        val found = ArrayList<Int>()
+        val found = ArrayList<DropPoint>()
         for (t in quiet until loud.size - far) {
             // The level the track is returning to: the four seconds that follow, so a later quiet stretch cannot lower it.
             val level = mean(loud, t, t + far)
@@ -539,19 +546,25 @@ object BeatGrid {
             // The pause behind it: a second and a half somewhere in the six before the rise, well under the return level.
             // It may lie before a riser, which is why the whole span is searched rather than only the half second before.
             var quietest = Double.MAX_VALUE
+            var quietEnd = 0
             var q = (edge - lookBack).coerceAtLeast(0)
             while (q + quiet <= edge) {
                 val was = mean(loud, q, q + quiet)
-                if (was < quietest) quietest = was
+                if (was < quietest) {
+                    quietest = was
+                    quietEnd = q + quiet
+                }
                 q += (quiet / 4).coerceAtLeast(1)
             }
             if (quietest > level * QUIET_SHARE) continue
             // One pause is one drop: a rise seen over a few steps belongs to the same return, and eight seconds also put
             // the previous pause out of the look-back before another rise can count.
-            if (found.isNotEmpty() && edge - found.last() < apart) continue
-            found += edge
+            if (found.isNotEmpty() && edge - found.last().edge < apart) continue
+            found += DropPoint(edge, quietest, quietEnd, level)
         }
-        if (found.isNotEmpty()) return found.map { onBeat(it * stepMs, beats) }.distinct()
+        if (found.isNotEmpty()) {
+            return found.map { dropBeat(it, energy, stepMs, beats) }.distinct()
+        }
         // A piece that opens loud or builds smoothly has no pause at all: one broad arrival stands in for the drops.
         return listOfNotNull(loudStart(loud, far)?.let { onBeat(it * stepMs, beats) })
     }
@@ -581,6 +594,47 @@ object BeatGrid {
         if (top < mean * FLAT_SHARE) return null
         val level = top * REACHED_SHARE
         return holds.indexOfFirst { it >= level }.takeIf { it >= 0 }
+    }
+
+    /**
+     * The beat a drop opens on. The returning level is reached a little after the first beat out of the pause (33.2 s on
+     * one real track, the level at 33.4), so the beat *before* the detected edge is checked too: if it has already left
+     * the quiet, it is the first beat of the return. The previous beat of a leap inside an already loud part is still loud
+     * before the leap, so that one stays on the following beat.
+     */
+    private fun dropBeat(point: DropPoint, energy: FloatArray, stepMs: Long, beats: List<Long>): Long =
+        beatOfReturn(point.edge * stepMs, point.quietEnd * stepMs, point.level, energy, stepMs, beats)
+
+    /**
+     * The beat a return opens on, from the detected [edgeMs] (where the returning level is reached), the end of the pause
+     * and the level. The return can reach its level one beat after the sound came back, so the beat before [edgeMs] is
+     * checked: when the pause ends at that beat and it is already well out of the quiet, it is the first beat of the return.
+     */
+    internal fun beatOfReturn(
+        edgeMs: Long,
+        quietEndMs: Long,
+        level: Double,
+        energy: FloatArray,
+        stepMs: Long,
+        beats: List<Long>,
+    ): Long {
+        if (beats.isEmpty()) return edgeMs
+        val next = beats.firstOrNull { it >= edgeMs } ?: return beats.lastOrNull() ?: edgeMs
+        val prev = beats.lastOrNull { it < edgeMs } ?: return next
+        val period = medianGap(beats)
+        if (period > 0.0 && edgeMs - prev > period * 1.5) return next
+        // The pause must have ended right at that beat: a beat deep inside a riser is not the first beat of the return, and a
+        // beat before a still-silent passage is not either.
+        if (abs(quietEndMs - prev) > period * 0.75) return next
+        val at = (prev / stepMs).toInt().coerceIn(0, energy.lastIndex)
+        // A single drum hit in a quiet passage is not a return: listen across a couple of steps, not one sample.
+        val around = mean(energy, at - 1, at + 2)
+        // The quiet is read from the raw curve again: the beat-long average carries the first hit back into it and would
+        // make a real return look too weak to count.
+        val quietSteps = (QUIET_SECONDS * 1000 / stepMs).toInt().coerceAtLeast(1)
+        val rawQuiet = mean(energy, (quietEndMs / stepMs).toInt() - quietSteps, (quietEndMs / stepMs).toInt())
+        val leftTheQuiet = rawQuiet + (level - rawQuiet) * RETURN_EDGE_SHARE
+        return if (around >= leftTheQuiet) prev else next
     }
 
     /**
