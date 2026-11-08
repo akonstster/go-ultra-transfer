@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import app.goultra.transfer.CameraService
 import app.goultra.transfer.camera.ClipAudio
+import app.goultra.transfer.camera.BeatGrid
 import androidx.compose.ui.graphics.asAndroidBitmap
 import app.goultra.transfer.camera.Look
 import app.goultra.transfer.camera.FilmMath
@@ -3293,6 +3294,9 @@ class CameraController(private val app: Application) {
     var musicFailed by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    /** Tracks being read right now: the lane's effect and a fresh pick must not decode the same file twice. */
+    private val musicAnalysing = HashSet<String>()
+
     /**
      * The project's track, picked through SAF: the app keeps the link and a lasting permission to read it (the file is
      * not copied), and the wave and the grid are worked out in the background ([analyseMusic]).
@@ -3303,17 +3307,11 @@ class CameraController(private val app: Application) {
             app.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }.onFailure { log("музыка ${uri.lastPathSegment}: нет постоянного доступа (${it.message})") }
         val name = runCatching { addedName(uri) }.getOrNull().orEmpty()
-        // The levels stay as they were set: another track is another sound, not another mix — a replaced track once came
-        // back at full volume and the video's own sound at its default, and both had to be set again by hand.
-        val was = p.music
-        val music = ProjectMusic(
-            uri = uri.toString(),
-            name = name,
-            volume = was?.volume ?: 1.0,
-            videoVolume = was?.videoVolume ?: ProjectMusic.UNDER_MUSIC,
-        )
-        saveProject(p.copy(music = music))
-        analyseMusic(music)
+        // The levels stay as they were set: another track is another sound, not another mix. The same levels are kept by the
+        // project after the track is removed, so even a delete and a later pick come back to the mix, not to the defaults.
+        val next = p.withMusic(uri.toString(), name)
+        saveProject(next)
+        next.music?.let(::analyseMusic)
     }
 
     /** The music's settings changed (volume, ducking): the project keeps them, and the sound follows them everywhere. */
@@ -3329,7 +3327,7 @@ class CameraController(private val app: Application) {
     /** The ✕ on the lane: the project has no music (the track itself stays on the phone). */
     fun removeProjectMusic() {
         val p = seenProject ?: return
-        saveProject(p.copy(music = null))
+        saveProject(p.withoutMusic())
     }
 
     /**
@@ -3343,7 +3341,50 @@ class CameraController(private val app: Application) {
         val length = music.lengthMs.coerceAtLeast(music.beats.lastOrNull() ?: 0L)
         val next = change(music.beats, length)
         if (next.isEmpty() || next == music.beats) return
-        saveProject(p.copy(music = music.copy(beats = next)))
+        // A hand-made grid is marked: a later detector may improve an automatic grid, never this one.
+        saveProject(
+            p.copy(
+                music = music.copy(
+                    beats = next,
+                    gridEdited = true,
+                    gridVersion = BeatGrid.ANALYSIS_VERSION,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Debug: the real analysis of one file on the phone, end to end — the decoder, the same [TrackAudio.analyse] the
+     * project uses, and the numbers the lane would receive. Used to compare the detector against real tracks without
+     * picking each one in the interface; the file is never changed.
+     */
+    fun debugMusic(path: String) {
+        if (!debuggable) return
+        scope.launch {
+            val file = File(path)
+            if (!file.exists()) {
+                log("DEBUG музыка: файла нет — $path")
+                return@launch
+            }
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            val found = withContext(Dispatchers.IO) {
+                runCatching { TrackAudio.analyse(file) }.onFailure { log("DEBUG музыка: ${it.message}") }.getOrNull()
+            }
+            if (found == null) {
+                log("DEBUG музыка: не читается — ${file.name}")
+                return@launch
+            }
+            val took = android.os.SystemClock.elapsedRealtime() - startedAt
+            val beats = found.beats
+            val firstGap = beats.take(8).zipWithNext { a, b -> b - a }.sorted().getOrNull(3)
+            log(
+                "DEBUG музыка ${file.name}: %.1f BPM, уверенность %.3f, ударов %d, первый %d, последний %d, начало-шаг %s, дроп %s, длина %d, за %d мс".format(
+                    found.bpm, found.confidence, beats.size, beats.firstOrNull() ?: -1L,
+                    beats.lastOrNull() ?: -1L, firstGap?.toString() ?: "нет",
+                    found.profile?.dropMs?.toString() ?: "нет", found.lengthMs, took,
+                ),
+            )
+        }
     }
 
     /**
@@ -3351,40 +3392,60 @@ class CameraController(private val app: Application) {
      * project's JSON (a cut snaps to it, P3). A track already analysed is not decoded again.
      */
     fun analyseMusic(music: ProjectMusic) {
-        if (music.uri in musicFailed) return
-        if (music.beats.isNotEmpty() && music.lengthMs > 0L && musicPeaks(music.uri) != null) return
+        if (music.uri in musicFailed || music.uri in musicAnalysing) return
+        // A current grid and its wave are kept. An automatic grid from an older detector is read again: real tracks got
+        // grids that began 51 and 84 seconds in, and asking every project to re-pick its track would hide the fix.
+        val cached = music.gridEdited || (music.beats.isNotEmpty() && music.lengthMs > 0L && music.gridVersion >= BeatGrid.ANALYSIS_VERSION)
+        if (cached && musicPeaks(music.uri) != null) return
         val uri = android.net.Uri.parse(music.uri)
+        musicAnalysing += music.uri
         scope.launch {
-            val found = withContext(Dispatchers.IO) {
-                runCatching { TrackAudio.analyse(app, uri) }
-                    .onFailure { log("музыка ${music.name}: ${it.message}") }
-                    .getOrNull()
-            }
-            if (found == null) {
-                musicFailed = musicFailed + music.uri
-                return@launch
-            }
-            withContext(Dispatchers.IO) {
-                runCatching { writePeaks(music.uri, found.peaks) }.onFailure { log("музыка: ${it.message}") }
-            }
-            // What the analysis made of the track: the numbers to look at when a grid or a drop is out of place.
-            log(
-                "музыка ${music.name}: %.1f BPM, %d ударов (первый %d), дроп %s, длина %d мс, задержка кодека %d мс".format(
-                    found.bpm, found.beats.size, found.beats.firstOrNull() ?: -1L,
-                    found.profile?.dropMs?.toString() ?: "нет", found.lengthMs, found.delayMs,
-                ),
-            )
-            musicFailed = musicFailed - music.uri
-            musicVersion++
-            // The grid and the profile go into whichever project still holds this track: it may have been replaced
-            // meanwhile. The drop comes along only when the track's own was not moved by hand.
-            projects.filter { it.music?.uri == music.uri && (it.music?.beats?.isEmpty() == true || it.music?.lengthMs == 0L) }.forEach { held ->
-                val m = held.music ?: return@forEach
-                saveProject(held.copy(music = m.copy(
-                    beats = found.beats,
-                    lengthMs = found.lengthMs,
-                    dropMs = m.dropMs ?: found.profile?.dropMs,
-                )))
+            try {
+                val found = withContext(Dispatchers.IO) {
+                    runCatching { TrackAudio.analyse(app, uri) }
+                        .onFailure { log("музыка ${music.name}: ${it.message}") }
+                        .getOrNull()
+                }
+                if (found == null) {
+                    musicFailed = musicFailed + music.uri
+                    return@launch
+                }
+                withContext(Dispatchers.IO) {
+                    runCatching { writePeaks(music.uri, found.peaks) }.onFailure { log("музыка: ${it.message}") }
+                }
+                // What the analysis made of the track: the numbers to look at when a grid or a drop is out of place.
+                log(
+                    "музыка ${music.name}: %.1f BPM, %d ударов (первый %d), %s, уверенность %.2f, дроп %s, длина %d мс, задержка кодека %d мс".format(
+                        found.bpm, found.beats.size, found.beats.firstOrNull() ?: -1L,
+                        if (found.beats.isEmpty()) "сетки нет" else "сетка v${BeatGrid.ANALYSIS_VERSION}",
+                        found.confidence,
+                        found.profile?.dropMs?.toString() ?: "нет", found.lengthMs, found.delayMs,
+                    ),
+                )
+                musicFailed = musicFailed - music.uri
+                musicVersion++
+                // The grid and the profile go into whichever project still holds this track: it may have been replaced
+                // meanwhile. A hand-made grid is never written over; an older automatic one is brought up to date.
+                projects.filter { held ->
+                    val m = held.music
+                    m != null && m.uri == music.uri && !m.gridEdited &&
+                        (m.beats.isEmpty() || m.lengthMs == 0L || m.gridVersion < BeatGrid.ANALYSIS_VERSION)
+                }.forEach { held ->
+                    val m = held.music ?: return@forEach
+                    saveProject(
+                        held.copy(
+                            music = m.copy(
+                                beats = found.beats,
+                                lengthMs = found.lengthMs,
+                                dropMs = m.dropMs ?: found.profile?.dropMs,
+                                gridVersion = BeatGrid.ANALYSIS_VERSION,
+                                gridConfidence = found.confidence,
+                            ),
+                        ),
+                    )
+                }
+            } finally {
+                musicAnalysing -= music.uri
             }
         }
     }

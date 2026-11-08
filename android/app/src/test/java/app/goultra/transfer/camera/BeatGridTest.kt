@@ -46,6 +46,36 @@ class BeatGridTest {
     }
 
     @Test
+    fun `a strong accent every second beat does not halve the tempo`() {
+        // A real track (Huawei's «Dream It Possible», 120 BPM): the strong beat repeats every two beats, so the plain
+        // autocorrelation is strongest at the half-time lag and the grid became a click every other beat — 63.5 BPM on a
+        // 120 BPM piece. The lean toward the usual tempo has to be strong enough to keep the beat, not the bar.
+        val seconds = 20
+        val out = FloatArray(rate * seconds) { i -> (0.05 * sin(2 * PI * 220 * i / rate)).toFloat() }
+        val rnd = Random(23)
+        var at = 0.25 * rate
+        var k = 0
+        while (at < out.size) {
+            val loud = if (k % 2 == 0) 0.85f else 0.18f
+            val start = at.toInt()
+            for (n in 0 until 1500) {
+                if (start + n >= out.size) break
+                out[start + n] += ((rnd.nextFloat() * 2 - 1) * loud * exp(-n / 250.0)).toFloat()
+            }
+            at += 0.5 * rate
+            k++
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertEquals("the beat, not the bar", 120.0, g!!.bpm, 2.0)
+        assertTrue("the grid must begin on the first click: ${g.offsetMs}", g.offsetMs < 1_000L)
+        assertTrue(
+            "beats: ${g.beats.take(8)}",
+            g.beats.take(8).zipWithNext { a, b -> b - a }.all { abs(it - 500) <= 15 },
+        )
+    }
+
+    @Test
     fun `the beats cover the piece one period apart`() {
         val g = BeatGrid.detect(clicks(120.0, 230, 20), rate)!!
         assertTrue(g.beats.size in 38..40)
@@ -73,6 +103,47 @@ class BeatGridTest {
         assertEquals(500L, BeatGrid.nearest(g, 620))
         assertEquals(1000L, BeatGrid.nearest(g, 760))
         assertEquals(42L, BeatGrid.nearest(g.copy(beats = emptyList()), 42))
+    }
+
+    @Test
+    fun `a quiet intro is found before a much louder chorus`() {
+        // The real failure: the loudest part set a global floor, the quiet intro never became a candidate, and the DP path
+        // began where the chorus did — 51 s into one track, 84 s into another. The clicks here start at 250 ms at a tenth
+        // of the chorus's loudness.
+        val seconds = 20
+        val out = FloatArray(rate * seconds)
+        val rnd = Random(17)
+        val clicks = ArrayList<Long>()
+        var at = 0.25 * rate
+        while (at < out.size) {
+            clicks += (at / rate * 1000).toLong()
+            val loud = if (at < 10.0 * rate) 0.07f else 0.85f
+            val start = at.toInt()
+            for (k in 0 until 1500) {
+                if (start + k >= out.size) break
+                out[start + k] += ((rnd.nextFloat() * 2 - 1) * loud * exp(-k / 250.0)).toFloat()
+            }
+            at += 0.5 * rate
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertEquals("the chorus must not change the tempo", 120.0, g!!.bpm, 1.0)
+        assertTrue("the grid must begin at the intro, not the chorus: ${g.offsetMs}", g.offsetMs < 1_000L)
+        // Every found beat is near one of the clicks — the quiet intro included.
+        var j = 0
+        var worst = 0L
+        for (beat in g.beats) {
+            while (j + 1 < clicks.size && abs(clicks[j + 1] - beat) <= abs(clicks[j] - beat)) j++
+            worst = maxOf(worst, abs(clicks[j] - beat))
+        }
+        assertTrue("worst beat $worst ms off", worst <= 55)
+    }
+
+    @Test
+    fun `the confidence is kept once the grid is built`() {
+        val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
+        assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 2)
     }
 
     @Test

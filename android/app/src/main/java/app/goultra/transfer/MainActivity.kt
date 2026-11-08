@@ -63,6 +63,8 @@ class MainActivity : ComponentActivity() {
         intent.getStringExtra("cmd")?.split(':')?.let { p ->
             p[0].toIntOrNull()?.let { cameraController.debugCommand(it, p.getOrElse(1) { "" }) }
         }
+        // Debug: `--es music /sdcard/Android/data/…/files/track.mp3` analyses one file and logs its grid.
+        intent.getStringExtra("music")?.let(cameraController::debugMusic)
         // Debug: `--ez selftest true` runs the settings self-test (same as menu ⋮ → «Самопроверка настроек»).
         if (intent.getBooleanExtra("selftest", false)) cameraController.selfTest()
         // `--es fms 0-40` widens the function modes read (finding an unknown mode's number).

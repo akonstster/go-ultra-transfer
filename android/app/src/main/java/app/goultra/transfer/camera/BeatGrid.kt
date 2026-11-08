@@ -84,8 +84,14 @@ object BeatGrid {
     /** Where a start must stand above the envelope's mean, as a share of the way to its loudest, to be a candidate. */
     private const val START_FLOOR = 0.25f
 
+    /** The seconds whose own mean and loudest frame set the floor for a start: a loud chorus must not hide a quiet intro. */
+    private const val START_LOCAL_SECONDS = 8.0
+
     /** The starts a piece needs before a path is chosen through them; fewer, and the old walk has the last word. */
     private const val MIN_STARTS = 8
+
+    /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
+    const val ANALYSIS_VERSION = 2
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
@@ -121,16 +127,21 @@ object BeatGrid {
         val fps = sampleRate.toDouble() / HOP
         val opening = tempoOf(onset, fps) ?: return null
         val lengthMs = samples.size * 1000L / sampleRate
-        val started = starts(onset, opening.period)
-        val path = if (started.size >= MIN_STARTS) track(onset, started, opening.period) else emptyList()
+        val started = starts(onset, opening.period, fps)
+        val path = if (started.size >= MIN_STARTS) track(onset, started, opening.period, fps) else emptyList()
+        // The path is chosen for its earned score, so it may begin where the piece is loudest — 51 s into one real track,
+        // 84 s into another. The introduction is still part of the track: walk the same period back from the first beat to
+        // the beginning, following the local period and taking a real start when one stands where the grid expects it.
+        val whole = if (path.isNotEmpty()) backfilled(path, onset, opening.period, fps) else path
         // Too few starts to choose a path through (a wash of sound, a spoken piece): the walk still makes a grid.
-        val beats = if (path.isNotEmpty()) beatsOf(path, sampleRate, lengthMs)
+        val beats = if (whole.isNotEmpty()) beatsOf(whole, sampleRate, lengthMs)
         else walk(onset, opening, sampleRate, lengthMs)
         if (beats.isEmpty()) return null
         // What the envelope itself is early or late by, taken out of the whole grid: the *middle* of what the beats stand
         // off their starts, so one beat on the wrong start cannot drag the rest of the grid along (a sum could).
         val tuned = aligned(beats, started, sampleRate)
-        return Grid(60_000.0 / medianGap(tuned), tuned.first(), tuned, opening.confidence)
+        val confidence = gridConfidence(opening.confidence, whole, tuned)
+        return Grid(60_000.0 / medianGap(tuned), tuned.first(), tuned, confidence)
     }
 
     /**
@@ -160,17 +171,36 @@ object BeatGrid {
      * Every start the sound has, as a frame (between frames): the frames where the onset envelope peaks above a floor a
      * quarter of the way from its mean to its loudest — a rise too small to be a note is no candidate for a beat.
      */
-    private fun starts(onset: FloatArray, period: Double): List<Double> {
+    private fun starts(onset: FloatArray, period: Double, fps: Double): List<Double> {
         if (onset.size < 3) return emptyList()
-        val mean = onset.sumOf { it.toDouble() } / onset.size
         val top = onset.max().toDouble()
         if (top <= 0.0) return emptyList()
-        val floor = mean + (top - mean) * START_FLOOR
+        // The floor is local: eight seconds of the piece set their own mean and their own loudest start. The old global
+        // fraction turned one loud chorus into a gate the quiet intro could never pass, and the beat grid began there.
+        val cell = (2.0 * fps).roundToInt().coerceAtLeast(1)
+        val cells = (onset.size + cell - 1) / cell
+        val tops = FloatArray(cells)
+        for (i in onset.indices) {
+            val c = i / cell
+            if (onset[i] > tops[c]) tops[c] = onset[i]
+        }
+        val prefix = DoubleArray(onset.size + 1)
+        for (i in onset.indices) prefix[i + 1] = prefix[i] + onset[i]
+        val span = (START_LOCAL_SECONDS * fps / 2).roundToInt().coerceAtLeast(cell)
         // A third of a beat: the envelope rings for a frame or two, and that is one start, not two.
         val apart = (period * 0.3).coerceAtLeast(2.0)
         val out = ArrayList<Double>(onset.size / 4 + 1)
         for (i in 1 until onset.size - 1) {
             val v = onset[i]
+            val from = (i - span).coerceAtLeast(0)
+            val to = (i + span).coerceAtMost(onset.size - 1)
+            val mean = (prefix[to + 1] - prefix[from]) / (to - from + 1)
+            val firstCell = from / cell
+            val lastCell = to / cell
+            var localTop = 0f
+            for (c in firstCell..lastCell) if (tops[c] > localTop) localTop = tops[c]
+            if (localTop <= mean || localTop <= 0f) continue
+            val floor = mean + (localTop - mean) * START_FLOOR
             if (v < floor) continue
             // A peak, not a slope: the frame after is no higher (two equal frames are one peak).
             if (v < onset[i - 1] || v < onset[i + 1]) continue
@@ -203,16 +233,17 @@ object BeatGrid {
      * two steps where the sound has one, earns less than it pays. Chosen for the whole piece at once, from the last beat
      * back: a beat can always be the next one, never only the one the walk guessed.
      */
-    private fun track(onset: FloatArray, started: List<Double>, period: Double): List<Double> {
+    private fun track(onset: FloatArray, started: List<Double>, period: Double, fps: Double): List<Double> {
         val n = started.size
         if (n < 2) return emptyList()
         val worth = DoubleArray(n) { i -> onset[started[i].roundToInt().coerceIn(0, onset.lastIndex)].toDouble() }
         val top = worth.max()
         if (top <= 0.0) return emptyList()
+        // The four seconds around each start have their own period; a step is judged against that, so a live take or a
+        // band that speeds up is followed instead of being pulled back to the opening tempo all the way through.
+        val local = DoubleArray(n) { i -> localPeriod(onset, started[i], period, fps) }
         val score = DoubleArray(n)
         val back = IntArray(n) { -1 }
-        val near = period * (1.0 - TEMPO_SCAN)
-        val far = period * (1.0 + TEMPO_SCAN)
         for (j in 0 until n) {
             // A beat earns what its start is worth, and may be the first of the path (a piece does not always open on a
             // beat it can hear): the step before it adds what the path up to there had earned, less its own lean.
@@ -222,9 +253,13 @@ object BeatGrid {
             var i = j - 1
             while (i >= 0) {
                 val step = started[j] - started[i]
-                if (step > far) break
-                if (step >= near) {
-                    val lean = ln(step / period)
+                val expected = ((local[i] + local[j]) / 2).coerceAtLeast(1.0)
+                if (step > expected * (1.0 + TEMPO_SCAN)) {
+                    // The local period may have shrunk since i; the opening period is the widest this path may reach.
+                    if (step > period * (1.0 + TEMPO_SCAN)) break
+                }
+                if (step >= expected * (1.0 - TEMPO_SCAN) && step <= expected * (1.0 + TEMPO_SCAN)) {
+                    val lean = ln(step / expected)
                     val earned = score[i] - TIGHTNESS * lean * lean
                     if (earned > along) {
                         along = earned
@@ -246,6 +281,47 @@ object BeatGrid {
         }
         path.reverse()
         return path
+    }
+
+    /**
+     * The path walked back from its first beat to the beginning. The DP chooses where a path *earns* most, not where the
+     * piece begins; a first beat 51 s in is a correct maximum and a useless grid. The opening period is followed back
+     * through the local tempo, and the grid takes a real start when one stands within an eighth of a beat of where it
+     * expects it. Silence stays on the grid rather than inventing notes.
+     */
+    private fun backfilled(path: List<Double>, onset: FloatArray, period: Double, fps: Double): List<Double> {
+        if (path.isEmpty()) return path
+        val gaps = path.zipWithNext { a, b -> b - a }.sorted()
+        var step = if (gaps.isEmpty()) period else gaps[gaps.size / 2]
+        if (step <= 1.0) step = period
+        val window = (step * 0.12).roundToInt().coerceAtLeast(1)
+        val before = ArrayList<Double>()
+        var predicted = path.first()
+        while (predicted - step >= 0.0) {
+            val expected = predicted - step
+            // A start near the expected moment is the truth; otherwise the grid itself is the best statement we have.
+            val snapped = snapExact(onset, expected, window)
+            val at = if (abs(snapped - expected) <= window + 0.5) snapped else expected
+            before += at
+            step = localPeriod(onset, at, step, fps)
+            predicted = at
+        }
+        before.reverse()
+        return before + path
+    }
+
+    /**
+     * How much of the grid is backed by a path through real starts, folded into the tempo's own certainty: a path that
+     * skipped most beats, or a piece with no repeats, must not look as sure as a metronome. The UI can then say «check
+     * the grid» instead of presenting a guess as fact.
+     */
+    private fun gridConfidence(tempo: Double, path: List<Double>, beats: List<Long>): Double {
+        if (path.size < 2 || beats.size < 2) return 0.0
+        val gaps = path.zipWithNext { a, b -> b - a }.sorted()
+        val step = gaps[gaps.size / 2].coerceAtLeast(1.0)
+        val expected = ((path.last() - path.first()) / step + 1.0).coerceAtLeast(1.0)
+        val covered = (path.size / expected).coerceIn(0.0, 1.0)
+        return (tempo * (0.65 + 0.35 * covered)).coerceIn(0.0, 1.0)
     }
 
     /**

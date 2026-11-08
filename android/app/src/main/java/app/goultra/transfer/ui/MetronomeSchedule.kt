@@ -3,10 +3,12 @@ package app.goultra.transfer.ui
 import kotlin.math.abs
 
 /**
- * How far ahead of its beat a click is put on the queue at most, ms: the clock ticks 50 ms apart, so a beat further off
- * than this waits for a later tick instead of filling the queue with clicks it may have to take back.
+ * How far ahead of its beat a click is put on the queue at most, ms. The clock ticks 50 ms apart, so this is not about
+ * the tick: it is the room the scheduler has to be late. A 60 ms lead gave the main thread only one tick of warning,
+ * and a stalled frame made the click miss its beat and be dropped. Half a second is armed once and then slept on by the
+ * scheduler itself; a seek or a pause still takes it back before it sounds.
  */
-internal const val CLICK_LEAD_MS = 60L
+internal const val CLICK_LEAD_MS = 500L
 
 /** How late a click may still sound, ms: past this the beat is let go and not clicked into the next one. */
 internal const val CLICK_LATE_MS = 120L
@@ -100,12 +102,21 @@ internal class MetronomeSchedule(
             // The beats are in order: the first one beyond the lead means nothing is due yet.
             if (whenMs > until) return null
             if (beat == armed) return null
-            // Gone by — the phone stood still for a moment: the beat is let go, not clicked into the next one.
+            // Gone by — the phone stood still for a moment. The late limit is measured against the beat the ear hears,
+            // not against the shifted queue moment: with a −120 ms nudge a scheduler 130 ms late had a click that would
+            // still sound on the beat, and it was thrown away only because the correction had moved the target.
             if (whenMs < now - CLICK_LATE_MS) {
-                last = beat
-                lateBeat = beat
-                lateByMs = now - whenMs
-                continue
+                val heardLate = now + latencyMs - (beat - offsetMs)
+                if (heardLate > CLICK_LATE_MS) {
+                    last = beat
+                    lateBeat = beat
+                    lateByMs = now - whenMs
+                    continue
+                }
+                // Best effort: the exact shifted moment is gone, but the musical beat is not. The scheduler has no
+                // useful wait left here, so the click is due this instant.
+                armed = beat
+                return Due(beat, 0L)
             }
             armed = beat
             return Due(beat, whenMs - now)

@@ -9,14 +9,21 @@ package app.goultra.transfer.ui
  * Pure arithmetic on ms — no player, no Compose — so the tests can hold it to its word.
  */
 internal class MusicClock {
-    private var projectMs: Long? = null
-    private var atMs = 0L
-    private var playing = false
+    /**
+     * One immutable reading, swapped as a whole: the player's tick is written on the main thread while the metronome
+     * reads it on its own audio thread. Two separate fields could be seen half-updated (a new position with an old
+     * monotonic moment), which puts every extrapolated click off by the difference.
+     */
+    private data class Reading(val projectMs: Long?, val atMs: Long, val playing: Boolean)
+
+    @Volatile
+    private var reading = Reading(null, 0L, false)
 
     /** The music's moment at [elapsedMs] of the monotonic clock; null until the player has played at all. */
     fun now(elapsedMs: Long): Long? {
-        val base = projectMs ?: return null
-        return if (playing) base + (elapsedMs - atMs).coerceAtLeast(0L) else base
+        val seen = reading
+        val base = seen.projectMs ?: return null
+        return if (seen.playing) base + (elapsedMs - seen.atMs).coerceAtLeast(0L) else base
     }
 
     /**
@@ -24,8 +31,6 @@ internal class MusicClock {
      * loading, or the film has not reached its start yet): the click then goes back to the picture's clock.
      */
     fun told(projectMs: Long?, elapsedMs: Long, playing: Boolean) {
-        this.projectMs = projectMs
-        this.atMs = elapsedMs
-        this.playing = playing
+        reading = Reading(projectMs, elapsedMs, playing)
     }
 }

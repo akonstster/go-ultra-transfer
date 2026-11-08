@@ -52,6 +52,30 @@ class ProjectTest {
     }
 
     @Test
+    fun `the mix survives removing a track, a restart and adding another`() {
+        val mixed = sample().let { p -> p.copy(music = p.music!!.copy(volume = 0.27, videoVolume = 0.83)) }
+        val gone = mixed.withoutMusic()
+        assertNull("the track is gone", gone.music)
+        assertEquals(0.27, gone.musicLevels().first, 0.0)
+        assertEquals(0.83, gone.musicLevels().second, 0.0)
+        // A restart is nothing but JSON: the levels are kept apart from the track, so they come back with it.
+        val afterRestart = Project.decode(Project.encode(gone))!!
+        val added = afterRestart.withMusic("content://media/external/audio/media/2", "another.mp3")
+        assertEquals(0.27, added.music!!.volume, 0.0)
+        assertEquals(0.83, added.music!!.videoVolume, 0.0)
+        assertEquals("the new track gets its own grid", emptyList<Long>(), added.music!!.beats)
+    }
+
+    @Test
+    fun `zero is a real level and is kept too`() {
+        val silent = sample().let { p -> p.copy(music = p.music!!.copy(volume = 0.0, videoVolume = 0.0)) }
+        val back = Project.decode(Project.encode(silent.withoutMusic()))!!
+        val added = back.withMusic("content://media/external/audio/media/3", "quiet.mp3")
+        assertEquals(0.0, added.music!!.volume, 0.0)
+        assertEquals(0.0, added.music!!.videoVolume, 0.0)
+    }
+
+    @Test
     fun `a partial file comes back with the defaults`() {
         val p = Project.decode("""{"id":"1-0001","name":"Пусто"}""")
         assertNotNull(p)

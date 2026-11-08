@@ -574,6 +574,7 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Metronome" to "メトロノーム",
     "variable %.1f–%.1f" to "可変 %.1f–%.1f",
     "The tempo changes along the track — only the whole grid can be shifted" to "曲の途中でテンポが変わります — グリッド全体のずらしだけができます",
+    "The beat was found unsure — check the grid in Tempo" to "ビートを確実に検出できませんでした — 「テンポ」でグリッドを確認してください",
     "Click" to "クリック",
     "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer." to "「⇠」— 早める、「⇢」— 遅らせる。クリックは端末のミキサーを通ります。",
     "No music" to "音楽なし",

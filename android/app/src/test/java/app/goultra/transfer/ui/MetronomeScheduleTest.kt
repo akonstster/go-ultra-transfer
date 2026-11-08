@@ -34,6 +34,39 @@ class MetronomeScheduleTest {
     }
 
     @Test
+    fun `the scheduler sees a beat half a second ahead`() {
+        // The old 60 ms lead gave one main-thread tick of warning; a stalled frame lost the beat. The default now arms it
+        // while there is still half a second to sleep on this thread.
+        val s = MetronomeSchedule(listOf(500L), offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        val due = s.due(0L, latencyMs = 50L)!!
+        assertEquals(500L, due.beat)
+        assertEquals(450L, due.inMs)
+    }
+
+    @Test
+    fun `a negative nudge does not turn a late scheduler into a lost beat`() {
+        val s = MetronomeSchedule(listOf(500L, 1_000L), offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        // A −120 ms nudge queued this beat for 330 ms. At 460 ms the shifted moment is 130 ms gone, but a click sent now
+        // is heard at 510 ms — ten milliseconds after the musical beat, and far better than silence. The old check threw
+        // it away because it measured lateness against the nudged target.
+        val due = s.due(460L, leadMs = 60L, latencyMs = 50L, shiftMs = -120L)!!
+        assertEquals(500L, due.beat)
+        assertEquals(0L, due.inMs)
+        assertEquals(Long.MIN_VALUE, s.lateBeat)
+    }
+
+    @Test
+    fun `a beat truly gone by is still let go`() {
+        val s = MetronomeSchedule(listOf(500L, 1_000L), offsetMs = 0L)
+        s.told(0L, atMs = 0L, playing = true)
+        // At 700 ms a click queued now is heard at 750 ms: a quarter of a second after the beat, into the next one.
+        assertNull(s.due(700L, leadMs = 0L, latencyMs = 50L, shiftMs = -120L))
+        assertEquals(500L, s.lateBeat)
+    }
+
+    @Test
     fun `a beat close by is waited for, not clicked on the tick`() {
         val s = MetronomeSchedule(beats, offsetMs = 0L)
         s.told(0L, atMs = 1_000L, playing = true)

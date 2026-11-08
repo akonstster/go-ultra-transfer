@@ -574,6 +574,7 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Metronome" to "Metronom",
     "variable %.1f–%.1f" to "değişken %.1f–%.1f",
     "The tempo changes along the track — only the whole grid can be shifted" to "Tempo parça boyunca değişiyor — yalnızca tüm ızgara kaydırılabilir",
+    "The beat was found unsure — check the grid in Tempo" to "Vuruş belirsiz bulundu — «Tempo» içindeki ızgarayı kontrol edin",
     "Click" to "Tık",
     "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer." to "«⇠» — daha erken, «⇢» — daha geç. Tık telefonun mikserinden geçer.",
     "No music" to "Müzik yok",

@@ -167,6 +167,19 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
                 )
             }
             GridRow(vm, music)
+            // The analysis says how sure it is; a low certainty is shown where the grid is corrected, not buried in a log.
+            if (music.gridVersion >= app.goultra.transfer.camera.BeatGrid.ANALYSIS_VERSION &&
+                music.beats.isNotEmpty() && music.gridConfidence < 0.20
+            ) {
+                Text(
+                    tr(
+                        "Бит найден неуверенно — проверьте сетку в «Темпе»",
+                        "The beat was found unsure — check the grid in Tempo",
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
                 Text(tr("Метроном", "Metronome"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 Switch(AppPrefs.metronome, { AppPrefs.chooseMetronome(it) })

@@ -1,7 +1,9 @@
 package app.goultra.transfer.camera
 
 import android.content.Context
+import android.media.MediaExtractor
 import android.net.Uri
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -54,8 +56,15 @@ object TrackAudio {
      * The track at [uri] decoded and measured; null when it is not a sound the phone can read. Blocking — seconds of
      * decoding and arithmetic — so it is called from a worker, never from a composable.
      */
-    fun analyse(context: Context, uri: Uri): Found? {
-        val reader = runCatching { ClipAudio.openPcm { ex -> ex.setDataSource(context, uri, null) } }.getOrNull()
+    fun analyse(context: Context, uri: Uri): Found? =
+        analyse { extractor -> extractor.setDataSource(context, uri, null) }
+
+    /** A file already on the phone (a debug probe, a downloaded copy): no SAF permission, the player's own path. */
+    internal fun analyse(file: File): Found? =
+        analyse { extractor -> extractor.setDataSource(file.absolutePath) }
+
+    private fun analyse(open: (MediaExtractor) -> Unit): Found? {
+        val reader = runCatching { ClipAudio.openPcm(open) }.getOrNull()
             ?: return null
         try {
             val step = (reader.rate.toDouble() / RATE).roundToInt().coerceAtLeast(1)

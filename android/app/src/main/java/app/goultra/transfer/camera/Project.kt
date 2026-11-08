@@ -79,6 +79,12 @@ data class ProjectMusic(
     val dropMs: Long? = null,
     /** The track's length, ms, as the analysis read it (0 until then): the wave and its grid are drawn against it. */
     val lengthMs: Long = 0L,
+    /** Which detector made this grid: an older one is read again when the project is opened. */
+    val gridVersion: Int = 0,
+    /** How sure that detector was (0…1): a low value is a grid to check, not a truth to trust. */
+    val gridConfidence: Double = 0.0,
+    /** The grid was changed by hand: a newer detector may not overwrite it. */
+    val gridEdited: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("uri", uri)
@@ -89,6 +95,9 @@ data class ProjectMusic(
         if (beats.isNotEmpty()) put("beats", JSONArray(beats))
         dropMs?.let { put("drop", it) }
         if (lengthMs > 0L) put("length", lengthMs)
+        if (gridVersion != 0) put("gridVersion", gridVersion)
+        if (gridConfidence > 0.0) put("gridConfidence", gridConfidence)
+        if (gridEdited) put("gridEdited", true)
     }
 
     companion object {
@@ -112,6 +121,9 @@ data class ProjectMusic(
                 beats = beats,
                 dropMs = if (o.has("drop")) o.optLong("drop") else null,
                 lengthMs = o.optLong("length", 0L),
+                gridVersion = o.optInt("gridVersion", 0),
+                gridConfidence = o.optDouble("gridConfidence", 0.0).takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0) ?: 0.0,
+                gridEdited = o.optBoolean("gridEdited", false),
             )
         }
     }
@@ -136,7 +148,35 @@ data class Project(
     val previous: List<ProjectClip>? = null,
     /** Clips taken out by hand: an edit of their file must not bring them back (see [resynced]). */
     val hidden: List<ProjectClip> = emptyList(),
+    /**
+     * The mix last used with a track, kept while the project has none. Removing music is not the same as resetting the
+     * mix: adding another track must bring these levels back (0 is a real level, so the fields are nullable, not 0).
+     */
+    val lastMusicVolume: Double? = null,
+    val lastVideoVolume: Double? = null,
 ) {
+    /**
+     * The levels a track takes: the ones in the project now, else the last mix kept after removing music, else the
+     * defaults a freshly picked track always had.
+     */
+    fun musicLevels(): Pair<Double, Double> = music?.let { it.volume to it.videoVolume }
+        ?: ((lastMusicVolume ?: 1.0) to (lastVideoVolume ?: ProjectMusic.UNDER_MUSIC))
+
+    /** The project with [uri] as its track, at the levels the mix already has; the wave and the grid come later. */
+    fun withMusic(uri: String, name: String): Project {
+        val (volume, video) = musicLevels()
+        return copy(
+            music = ProjectMusic(uri = uri, name = name, volume = volume, videoVolume = video),
+            lastMusicVolume = volume,
+            lastVideoVolume = video,
+        )
+    }
+
+    /** The project without its track, keeping the mix for whichever track comes next. */
+    fun withoutMusic(): Project {
+        val held = music ?: return this
+        return copy(music = null, lastMusicVolume = held.volume, lastVideoVolume = held.videoVolume)
+    }
     /** The cutaways: clips pinned to a moment of the base's own time ([ProjectClip.atMs]). */
     val covers: List<ProjectClip> get() = clips.filter { it.atMs != null }
 
@@ -220,6 +260,8 @@ data class Project(
             p.baseFile?.let { put("base", it) }
             put("clips", JSONArray().apply { p.clips.forEach { put(it.toJson()) } })
             p.music?.let { put("music", it.toJson()) }
+            p.lastMusicVolume?.let { put("musicLevel", it) }
+            p.lastVideoVolume?.let { put("videoLevel", it) }
             p.previous?.let { prev -> put("previous", JSONArray().apply { prev.forEach { put(it.toJson()) } }) }
             if (p.hidden.isNotEmpty()) put("hidden", JSONArray().apply { p.hidden.forEach { put(it.toJson()) } })
         }.toString()
@@ -240,6 +282,8 @@ data class Project(
                 music = o.optJSONObject("music")?.let(ProjectMusic::from),
                 previous = o.optJSONArray("previous")?.let(::clipsOf),
                 hidden = clipsOf(o.optJSONArray("hidden")),
+                lastMusicVolume = o.optDouble("musicLevel").takeIf { o.has("musicLevel") && !it.isNaN() }?.coerceIn(0.0, 1.0),
+                lastVideoVolume = o.optDouble("videoLevel").takeIf { o.has("videoLevel") && !it.isNaN() }?.coerceIn(0.0, 1.0),
             )
         }
 

@@ -574,6 +574,7 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Metronome" to "节拍器",
     "variable %.1f–%.1f" to "速度变化 %.1f–%.1f",
     "The tempo changes along the track — only the whole grid can be shifted" to "整首曲子的速度在变 — 只能整体移动网格",
+    "The beat was found unsure — check the grid in Tempo" to "节拍识别不确定——请在“速度”中检查网格",
     "Click" to "咔嗒",
     "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer." to "“⇠” — 更早，“⇢” — 更晚。咔嗒声要经过手机混音器。",
     "No music" to "没有音乐",
