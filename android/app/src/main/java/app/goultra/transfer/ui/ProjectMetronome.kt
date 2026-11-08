@@ -9,6 +9,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import app.goultra.transfer.camera.ProjectMusic
@@ -17,6 +19,8 @@ import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** How long the click sounds, and how quickly it dies away — a tick, not a note. */
 private const val CLICK_MS = 25
@@ -32,21 +36,51 @@ internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boole
     val beats = music?.beats.orEmpty()
     if (music == null || beats.isEmpty()) return
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val click = remember { Click(context) }
     DisposableEffect(click) { onDispose { click.release() } }
-    // The clock comes in every 50 ms while the film plays, and the clock's line is drawn from it: a click on the tick that
-    // first shows a beat gone past stands exactly where the line stands — never somewhere of its own.
+    // The project time of the beat last sounded: a beat is clicked once, whether it was caught on a tick or awaited.
+    var fired by remember(music.uri) { mutableLongStateOf(Long.MIN_VALUE) }
+    val beatsNow by rememberUpdatedState(beats)
+    val offsetNow by rememberUpdatedState(music.offsetMs)
+    // Clicks come from the clock's own ticks — the very value the line is drawn from — but a beat that is a few ms ahead
+    // is waited for, so the click lands on the beat instead of up to a tick after it.
     var previous by remember(music.uri) { mutableLongStateOf(timeMs) }
     LaunchedEffect(timeMs, playing, AppPrefs.metronome) {
         val from = previous
         previous = timeMs
         if (!playing || !AppPrefs.metronome) return@LaunchedEffect
-        // A jump (a seek, a piece put on) is not a beat to be heard; nor is the very first tick.
-        if (timeMs <= from || timeMs - from > 400L) return@LaunchedEffect
-        val offset = music.offsetMs
-        if (beats.any { it - offset in (from + 1)..timeMs }) click.play()
+        // A jump (a seek, another piece put on) is not a beat to be heard, and neither is the first tick.
+        val moved = timeMs - from
+        val offset = offsetNow
+        if (moved <= 0L || moved > 400L) {
+            fired = Long.MIN_VALUE
+            return@LaunchedEffect
+        }
+        // A beat the clock has gone past since the last one sounded: click now (it is a few ms late, no more).
+        val due = beatsNow.firstOrNull { it - offset in (maxOf(from, toProject(fired, offset)) + 1)..timeMs }
+        if (due != null) {
+            fired = due
+            click.play()
+            return@LaunchedEffect
+        }
+        // A beat just ahead: wait for it and click on the beat itself.
+        val ahead = beatsNow.firstOrNull { it - offset > timeMs }
+        if (ahead != null) {
+            val wait = ahead - offset - timeMs
+            if (wait in 1L..45L) {
+                fired = ahead
+                scope.launch {
+                    delay(wait)
+                    click.play()
+                }
+            }
+        }
     }
 }
+
+/** The project time [beat] (a track moment) stands at: a beat of the track less the music's own offset. */
+private fun toProject(beat: Long, offsetMs: Long): Long = beat - offsetMs
 
 /** The tick itself: a short, quickly dying tone, made once and kept in the cache — a metronome must sound the same always. */
 private class Click(context: Context) {

@@ -2,6 +2,7 @@ package app.goultra.transfer.ui
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -159,7 +160,9 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             // The same pieces in time: as wide as they last, the track under them, one line for the clock.
             ProjectTimeline(vm, p, clockMs, clockPlaying, onSeek = { seekTo = it })
         }
-        // The music itself: the picked track, the two levels, the tempo (its wave and grid are on the timeline).
+        // The music itself: the picked track, the two levels, the tempo (its wave and grid are on the timeline). The
+        // toolbox stands at the very bottom of the screen, where a thumb expects it, not under the timeline.
+        Spacer(Modifier.weight(1f))
         ProjectMusicLane(vm, p, clockMs)
     }
 }

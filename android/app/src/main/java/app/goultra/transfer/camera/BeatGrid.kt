@@ -54,6 +54,9 @@ object BeatGrid {
     /** How far a beat walks off the grid to sit on the strongest start near it, ms. */
     private const val SNAP_MS = 30L
 
+    /** How many frames the whole grid may be shifted to sit on the sound itself: a bias of the envelope, taken out. */
+    private const val BIAS_FRAMES = 3
+
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
      * a few beats).
@@ -98,7 +101,25 @@ object BeatGrid {
             at += period
         }
         if (beats.isEmpty()) return null
-        return Grid(60_000.0 / medianGap(beats), beats.first(), beats, opening.confidence)
+        // The walk puts every beat on the frame its onset peaks at; a small shift for the whole track takes out what the
+        // envelope itself is late by (its window's middle, a click's decay) — a click then sits on the beat of the sound.
+        val frames = beats.map { frameOf(it, sampleRate) }
+        var shift = 0
+        var bestScore = Double.NEGATIVE_INFINITY
+        for (d in -BIAS_FRAMES..BIAS_FRAMES) {
+            var score = 0.0
+            for (f in frames) {
+                val at = f + d
+                if (at in onset.indices) score += onset[at]
+            }
+            if (score > bestScore) {
+                bestScore = score
+                shift = d
+            }
+        }
+        val shiftMs = shift.toLong() * HOP * 1000L / sampleRate
+        val tuned = if (shiftMs == 0L) beats else beats.map { it + shiftMs }
+        return Grid(60_000.0 / medianGap(tuned), tuned.first(), tuned, opening.confidence)
     }
 
     /** The tempo of an envelope (its period finer than a frame), where a bar starts, and how sure it is. */
@@ -268,6 +289,10 @@ object BeatGrid {
     /** A frame's moment in the track: a frame stands for its window's middle — a hit is heard there, not at its start. */
     internal fun frameMs(frame: Double, sampleRate: Int): Long =
         ((frame * HOP + WINDOW / 2) * 1000.0 / sampleRate).roundToInt().toLong()
+
+    /** The frame a moment of the track falls on: the inverse of [frameMs]. */
+    internal fun frameOf(ms: Long, sampleRate: Int): Int =
+        ((ms.toDouble() * sampleRate / 1000.0 - WINDOW / 2) / HOP).roundToInt()
 
     /** The envelope smoothed over a few frames: a tempo whose period falls between frames still lines its hits up. */
     internal fun smoothed(raw: FloatArray): FloatArray = FloatArray(raw.size) { i ->

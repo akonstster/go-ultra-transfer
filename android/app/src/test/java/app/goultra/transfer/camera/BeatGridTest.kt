@@ -136,7 +136,7 @@ class BeatGridTest {
             while (j + 1 < clicks.size && abs(clicks[j + 1] - beat) <= abs(clicks[j] - beat)) j++
             worst = maxOf(worst, abs(clicks[j] - beat))
         }
-        assertTrue("worst beat $worst ms off", worst <= 25)
+        assertTrue("worst beat $worst ms off", worst <= 12)
     }
 
     @Test

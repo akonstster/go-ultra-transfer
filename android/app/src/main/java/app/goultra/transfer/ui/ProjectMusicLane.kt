@@ -69,8 +69,8 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
     val failed = music != null && music.uri in vm.musicFailed
     var sheet by remember { mutableStateOf(Sheet.NONE) }
 
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 Icons.Filled.LibraryMusic,
                 null,
@@ -84,7 +84,8 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            TrackState(peaks, failed)
+            // Only a track has a state to report: without one there is nothing being analysed.
+            if (music != null) TrackState(peaks, failed)
         }
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Tool(tr("Звук", "Sound"), Icons.Filled.VolumeUp) { sheet = Sheet.SOUND }
@@ -149,7 +150,8 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
         Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(tr("Темп", "Tempo"), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                Text(if (bpm > 0.0) "${bpm.roundToInt()} BPM" else "—", style = MaterialTheme.typography.titleSmall)
+                // A tenth of a beat a minute matters: 120.4 is not 120, and a grid a half BPM off walks away in a minute.
+                Text(if (bpm > 0.0) "%.1f BPM".format(bpm) else "—", style = MaterialTheme.typography.titleSmall)
             }
             GridRow(vm, music)
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
@@ -192,11 +194,11 @@ private fun GridRow(vm: CameraController, music: ProjectMusic) {
                 vm.editMusicGrid { b, len -> MusicGrid.fromTap(b.firstOrNull() ?: 0L, next, len) }
             }) { Text(tr("Тап", "Tap")) }
             IconButton(
-                { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm - 1.0).coerceAtLeast(1.0), len) } },
-                enabled = bpm > 2.0,
+                { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm - 0.1).coerceAtLeast(0.1), len) } },
+                enabled = bpm > 0.2,
             ) { Icon(Icons.Filled.Remove, null) }
             IconButton(
-                { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm + 1.0), len) } },
+                { vm.editMusicGrid { b, len -> MusicGrid.stretched(b, bpm / (bpm + 0.1), len) } },
                 enabled = bpm > 0.0,
             ) { Icon(Icons.Filled.Add, null) }
         }
