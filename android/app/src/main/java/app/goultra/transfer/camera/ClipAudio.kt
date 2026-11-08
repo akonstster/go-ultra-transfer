@@ -124,6 +124,13 @@ object ClipAudio {
         val rate: Int,
         val channels: Int,
         val durationMs: Long,
+        /**
+         * The codec's own delay in frames — an mp3's or an aac's priming samples, which the decoder gives out as the
+         * first frames of the stream and which a player cuts off before a single sample is heard. A reader that finds a
+         * track's beat must cut them off too: otherwise the whole grid stands later than the sound by them (25 ms for an
+         * mp3, up to 50 for an aac), and a click on that grid lands after the beat.
+         */
+        val delayFrames: Int,
     ) {
         private var next = Long.MIN_VALUE // the frame [buffer] continues from
         private var buffer = ShortArray(0)
@@ -249,12 +256,15 @@ object ClipAudio {
                         c.start()
                         // The track's own length: a reader of a whole track stops at the end instead of the padded silence.
                         val us = if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
+                        // The priming samples the decoder hands out before the first real one (mp3, aac in an mp4).
+                        val delay = if (f.containsKey(MediaFormat.KEY_ENCODER_DELAY)) f.getInteger(MediaFormat.KEY_ENCODER_DELAY) else 0
                         return PcmReader(
                             ex,
                             c,
                             f.getInteger(MediaFormat.KEY_SAMPLE_RATE),
                             f.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
                             if (us > 0L) us / 1000 else 0L,
+                            delay.coerceAtLeast(0),
                         )
                     }
                     ex.release()

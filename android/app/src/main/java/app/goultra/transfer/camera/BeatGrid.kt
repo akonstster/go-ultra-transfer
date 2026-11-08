@@ -58,9 +58,16 @@ object BeatGrid {
     private const val STEP_SECONDS = 0.5
     private const val LOUD_SECONDS = 4.0
 
-    /** How loud the part after a drop must be against the loudest of the piece, and how much louder than the part before. */
-    private const val LOUD_SHARE = 0.5f
-    private const val QUIET_SHARE = 0.8f
+    /** How much louder the half-second after a drop must be, against the half-second before, the piece's own mean and
+     *  the seconds that follow it — a slice of the truth, not «half of the loudest drum». */
+    private const val STEP_SHARE = 1.2f
+    private const val LOUDER_SHARE = 1.05f
+    private const val HOLD_SHARE = 1.15f
+
+    /** A piece whose loudest stretch is not this much above its mean has no drop; a drop is where the loudness reaches
+     *  most of the way to that stretch. */
+    private const val FLAT_SHARE = 1.15f
+    private const val REACHED_SHARE = 0.8f
 
     /** How far a beat walks off the grid to sit on the strongest start near it, ms. */
     private const val SNAP_MS = 30L
@@ -397,41 +404,80 @@ object BeatGrid {
      * moment against what stands before it), not the start of the brightest stretch: a rise before a drop (a roll, a
      * riser) is quieter than the drop but already bright, and a search for «where the bright part begins» walked back into
      * it — the drop then stood two beats early. A beat too early is worse than one a hair late.
+     *
+     * Everything is asked in the track's *own* terms — louder than just before, louder than the piece on average, and
+     * loud for seconds after — never «half as loud as the loudest moment»: the loudest moment of a track with drums is one
+     * drum, and a drop never reaches half of it, so the drop was found on nothing at all (not on the test track either).
      */
     internal fun dropOf(energy: FloatArray, stepMs: Long = ENERGY_STEP_MS, beats: List<Long> = emptyList()): Long? {
         if (stepMs <= 0L) return null
+        // The curve is averaged over a beat where the grid says what a beat is: the loudness of a drum track jumps from a
+        // hit to near silence every few tenths of a second, and a step read on those jumps was found wherever two windows
+        // happened to hold a different number of hits — a piece with no drop at all was given one.
+        val beat = medianGap(beats)
+        val span = if (beat > 0.0) (beat / stepMs).roundToInt().coerceIn(1, 40) else 1
+        val loud = averaged(energy, span)
         // The step is read across half a second — a drop jumps inside a beat, a riser climbs for seconds — and the loud
         // part it opens must hold for seconds, so one loud hit is never a drop.
         val near = (STEP_SECONDS * 1000 / stepMs).toInt().coerceAtLeast(1)
         val far = (LOUD_SECONDS * 1000 / stepMs).toInt().coerceAtLeast(near + 1)
-        if (energy.size < 2 * near + far) return null
-        val peak = energy.max()
-        if (peak <= 0f) return null
+        if (loud.size < 2 * near + far) return null
+        val mean = loud.average()
+        if (mean <= 0.0) return null
         var bestAt = -1
-        var bestScore = 0.0
-        for (t in near until energy.size - far) {
-            val later = mean(energy, t, t + near)
-            // Loud after the moment — at once, and for the seconds that follow — and clearly quieter right before it.
-            if (later < peak * LOUD_SHARE) continue
-            if (mean(energy, t, t + far) < peak * LOUD_SHARE) continue
-            val earlier = mean(energy, t - near, t)
-            if (earlier > later * QUIET_SHARE) continue
-            if (later - earlier > bestScore) {
-                bestScore = later - earlier
+        var bestStep = 0.0
+        for (t in near until loud.size - far) {
+            val later = mean(loud, t, t + near)
+            val earlier = mean(loud, t - near, t)
+            if (later < earlier * STEP_SHARE) continue
+            if (later < mean * LOUDER_SHARE) continue
+            // The loudness must *stay* loud for seconds (one crashing hit is not a drop) — against what stood before it,
+            // not against the half second itself: drums leave quiet gaps, and a four-second mean of a drum track is well
+            // under its own loud half-second.
+            if (mean(loud, t, t + far) < earlier * HOLD_SHARE) continue
+            if (later - earlier > bestStep) {
+                bestStep = later - earlier
                 bestAt = t
             }
         }
-        if (bestAt < 0) return null
-        return onBeat(bestAt * stepMs, beats)
+        if (bestAt >= 0) return onBeat(bestAt * stepMs, beats)
+        return loudStart(loud, far)?.let { onBeat(it * stepMs, beats) }
     }
 
-    /** [ms] put on the grid: the beat that opens the loud part (the next one when it is a moment away, else the one before). */
+    /** [values] averaged over [span] places (centred, so the moment of a step is not moved by the averaging). */
+    private fun averaged(values: FloatArray, span: Int): FloatArray {
+        if (span <= 1) return values
+        val half = span / 2
+        return FloatArray(values.size) { i -> mean(values, i - half, i + half + 1).toFloat() }
+    }
+
+    /**
+     * The fallback for a piece that has no step in it (it opens loud, or builds without a leap): where the loudness first
+     * reaches most of the way to its loudest *sustained* stretch and stays there, taken forward — never back into a build.
+     * Null when the piece is flat: a drop that is not in the sound cannot be guessed at.
+     */
+    private fun loudStart(energy: FloatArray, far: Int): Int? {
+        val holds = FloatArray(energy.size - far + 1) { i -> mean(energy, i, i + far).toFloat() }
+        if (holds.isEmpty()) return null
+        val top = holds.max()
+        if (top <= 0f) return null
+        val mean = holds.average()
+        if (top < mean * FLAT_SHARE) return null
+        val level = top * REACHED_SHARE
+        return holds.indexOfFirst { it >= level }.takeIf { it >= 0 }
+    }
+
+    /**
+     * [ms] put on the grid: the beat that opens the loud part. The step's own edge can be up to its half-second window
+     * early (the window after it has to fill before the leap is seen), so a beat a little ahead is preferred: a marker a
+     * hair late is better than one on the beat before the drop.
+     */
     private fun onBeat(ms: Long, beats: List<Long>): Long {
         if (beats.isEmpty()) return ms
         val period = medianGap(beats).takeIf { it > 0.0 } ?: return ms
         val next = beats.firstOrNull { it >= ms } ?: return beats.lastOrNull() ?: ms
         val was = beats.lastOrNull { it < ms }
-        return if (was == null || next - ms <= period * 0.35) next else was
+        return if (was == null || next - ms <= period * 0.75) next else was
     }
 
     /** The mean of [from] until [to] of [values] (0 when the range is empty). */

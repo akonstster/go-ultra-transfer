@@ -33,13 +33,14 @@ private const val CLICK_HZ = 1_400.0
  * or set by hand can be *heard*, not only seen. On every beat of the project's own clock, no accents — which beat of the
  * bar it is, is not something the analysis knows, and a guessed accent would be a lie.
  *
- * The click is timed by [MetronomeSchedule] from the monotonic clock, not from the clock's ticks alone: the ticks come
- * every 50 ms and a beat between two of them would otherwise be clicked up to a tick late — the reason the click was seen
- * to drift off the lines even when the grid itself was right. One beat, one click: a click already on its way is never
- * asked for twice, and a jump of the clock (a seek, another piece) takes the clicks it promised with it.
+ * Its time is the **music's own** ([MusicClock]), not the picture's: a piece waiting on the camera's Wi-Fi stalls the
+ * picture while the music plays on, and a click that followed the picture walked off the sound — the desync that was
+ * heard. Within a tick the time is counted from the monotonic clock ([MetronomeSchedule]), so a beat that falls between
+ * two ticks is clicked on itself; the click is queued as long before its beat as the phone takes to sound it. One beat,
+ * one click, and a jump of the clock takes the clicks it promised with it.
  */
 @Composable
-internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boolean) {
+internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boolean, heard: MusicClock) {
     val beats = music?.beats.orEmpty()
     if (music == null || beats.isEmpty()) return
     val context = LocalContext.current
@@ -52,14 +53,16 @@ internal fun ProjectMetronome(music: ProjectMusic?, timeMs: Long, playing: Boole
     var pending by remember(schedule) { mutableStateOf<Job?>(null) }
     val on = AppPrefs.metronome
     LaunchedEffect(schedule, timeMs, playing, on) {
-        // The tick tells the schedule where the project stands; a jump (a seek, another piece, a pause) takes the clicks
-        // that were promised with it.
-        if (schedule.told(timeMs, SystemClock.elapsedRealtime(), playing && on)) {
+        val at = SystemClock.elapsedRealtime()
+        // Where the click is due is where the *music* stands; the picture's own clock is only the stand-in for a track that
+        // is not heard yet (still loading, or the film has not reached its start).
+        val base = heard.now(at) ?: timeMs
+        if (schedule.told(base, at, playing && on)) {
             pending?.cancel()
             pending = null
         }
         if (!playing || !on) return@LaunchedEffect
-        val due = schedule.due(SystemClock.elapsedRealtime(), CLICK_LEAD_MS, latency) ?: return@LaunchedEffect
+        val due = schedule.due(at, CLICK_LEAD_MS, latency) ?: return@LaunchedEffect
         if (due.inMs <= 0L) {
             // On the beat: the click goes at once, and only once (a tick that comes late does not repeat it).
             if (click.play()) schedule.fired(due.beat) else schedule.released()

@@ -3303,7 +3303,15 @@ class CameraController(private val app: Application) {
             app.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }.onFailure { log("музыка ${uri.lastPathSegment}: нет постоянного доступа (${it.message})") }
         val name = runCatching { addedName(uri) }.getOrNull().orEmpty()
-        val music = ProjectMusic(uri = uri.toString(), name = name)
+        // The levels stay as they were set: another track is another sound, not another mix — a replaced track once came
+        // back at full volume and the video's own sound at its default, and both had to be set again by hand.
+        val was = p.music
+        val music = ProjectMusic(
+            uri = uri.toString(),
+            name = name,
+            volume = was?.volume ?: 1.0,
+            videoVolume = was?.videoVolume ?: ProjectMusic.UNDER_MUSIC,
+        )
         saveProject(p.copy(music = music))
         analyseMusic(music)
     }
@@ -3361,8 +3369,9 @@ class CameraController(private val app: Application) {
             }
             // What the analysis made of the track: the numbers to look at when a grid or a drop is out of place.
             log(
-                "музыка ${music.name}: %.0f BPM, %d ударов, дроп %s, длина %d мс".format(
-                    found.bpm, found.beats.size, found.profile?.dropMs?.toString() ?: "нет", found.lengthMs,
+                "музыка ${music.name}: %.1f BPM, %d ударов (первый %d), дроп %s, длина %d мс, задержка кодека %d мс".format(
+                    found.bpm, found.beats.size, found.beats.firstOrNull() ?: -1L,
+                    found.profile?.dropMs?.toString() ?: "нет", found.lengthMs, found.delayMs,
                 ),
             )
             musicFailed = musicFailed - music.uri

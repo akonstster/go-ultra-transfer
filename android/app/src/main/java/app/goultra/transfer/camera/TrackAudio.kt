@@ -46,6 +46,8 @@ object TrackAudio {
         val confidence: Double,
         val lengthMs: Long,
         val profile: BeatGrid.Profile?,
+        /** The codec's own delay, ms, taken off the analysis (0 when the file has none): mp3 and aac carry some. */
+        val delayMs: Long = 0L,
     )
 
     /**
@@ -69,11 +71,20 @@ object TrackAudio {
             var inBucket = 0
             var quiet = 0 // chunks read with nothing in them: the end of a file that does not say how long it is
             var at = 0L
+            // The priming samples a player cuts off before anything is heard: dropped here too, or every beat of the
+            // grid stands later than the sound by them and a click on it lands after the beat (see PcmReader.delayFrames).
+            var priming = reader.delayFrames.toLong()
             while (at < leftToRead) {
                 val count = minOf(CHUNK.toLong(), leftToRead - at).toInt()
-                val pcm = reader.read(at, count)
+                var pcm = reader.read(at, count)
                 if (pcm.isEmpty()) break
                 at += count
+                if (priming > 0L) {
+                    val frames = pcm.size / reader.channels
+                    val drop = minOf(priming, frames.toLong()).toInt()
+                    if (drop > 0) pcm = pcm.copyOfRange(drop * reader.channels, pcm.size)
+                    priming -= drop
+                }
                 var loud = false
                 for (v in mono(pcm, reader.channels, step)) {
                     val a = abs(v)
@@ -105,6 +116,7 @@ object TrackAudio {
                 confidence = grid?.confidence ?: 0.0,
                 lengthMs = lengthMs,
                 profile = BeatGrid.profile(seen, rate, grid),
+                delayMs = reader.delayFrames * 1000L / reader.rate.coerceAtLeast(1),
             )
         } finally {
             reader.release()

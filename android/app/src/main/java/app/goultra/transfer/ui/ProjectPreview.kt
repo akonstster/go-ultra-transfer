@@ -266,10 +266,11 @@ internal fun ProjectPreview(
         player.volume = music?.videoVolume?.toFloat()?.coerceIn(0f, 1f) ?: 1f
     }
     // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
-    // sound need not.
-    ProjectMusicSound(music, shown, playing)
+    // sound need not. Its own reading of that time is what the click keeps time with: what is heard, not what is drawn.
+    val heard = remember { MusicClock() }
+    ProjectMusicSound(music, shown, playing, heard)
     // And the click on the grid, when it is asked for.
-    ProjectMetronome(music, shown, playing)
+    ProjectMetronome(music, shown, playing, heard)
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {

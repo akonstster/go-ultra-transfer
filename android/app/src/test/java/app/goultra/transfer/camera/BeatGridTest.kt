@@ -193,6 +193,43 @@ class BeatGridTest {
     }
 
     @Test
+    fun `a drop is found in a track of drums, not half of its loudest hit`() {
+        // The loudness of a track with drums: one loud bucket a beat, near-silence between them — the piece's loudest
+        // moment is a single drum, and «half of it» was never reached by the quiet half, so no drop was found at all.
+        fun drums(seconds: Int, quietMs: Long, loudAmp: Float, quietAmp: Float): FloatArray {
+            val buckets = seconds * 10
+            return FloatArray(buckets) { i ->
+                val ms = i * 100L
+                val inBeat = ms % 500L < 100L
+                val amp = if (ms < quietMs) quietAmp else loudAmp
+                if (inBeat) amp else amp * 0.05f
+            }
+        }
+        val track = drums(40, 20_000L, loudAmp = 1f, quietAmp = 0.2f)
+        val drop = BeatGrid.dropOf(track, BeatGrid.LOUD_STEP_MS)
+        assertNotNull(drop)
+        assertTrue("drop $drop", drop!! in 19_800L..20_500L)
+        // On the grid it is the beat that opens the loud part.
+        val beats = (0L..40_000L step 500L).toList()
+        assertEquals(20_000L, BeatGrid.dropOf(track, BeatGrid.LOUD_STEP_MS, beats))
+    }
+
+    @Test
+    fun `a piece that only builds still has a drop, where its loud part is reached`() {
+        // No step anywhere (the loudness climbs smoothly), so the fallback names where it comes most of the way to its own
+        // loud stretch — taken forward, so it can never stand in the middle of the build.
+        val builds = FloatArray(300) { i -> 0.4f + 0.6f * (i / 300f) }
+        val drop = BeatGrid.dropOf(builds, BeatGrid.LOUD_STEP_MS)
+        assertNotNull("a piece that builds has a loud part", drop)
+        // Where the loudness comes most of the way to its own loud stretch: in the loud end, never at the start of the
+        // build (that is the error the drop once made — it stood where the brightness began, not where it arrived).
+        assertTrue("drop $drop", drop!! in 12_000L..20_000L)
+        // A flat piece has none: silence and a steady hum are not a drop.
+        assertNull(BeatGrid.dropOf(FloatArray(300) { 0.5f }, BeatGrid.LOUD_STEP_MS))
+        assertNull(BeatGrid.dropOf(FloatArray(300), BeatGrid.LOUD_STEP_MS))
+    }
+
+    @Test
     fun `a track that speeds up is followed without falling behind`() {
         // A minute from 100 to 130 BPM. The old walk read its tempo from the four seconds around a beat and searched only
         // 30 ms off its guess, so once the sound had moved on the grid never came back: the beats stood later and later,

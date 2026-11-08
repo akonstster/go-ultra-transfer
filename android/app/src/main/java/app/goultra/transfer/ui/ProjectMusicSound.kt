@@ -1,11 +1,13 @@
 package app.goultra.transfer.ui
 
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import app.goultra.transfer.camera.ProjectMusic
 import kotlin.math.abs
@@ -31,7 +33,7 @@ private const val MUSIC_NUDGE = 0.03f
  * touches this file alone: its input is the two values below.
  */
 @Composable
-internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Boolean) {
+internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Boolean, heard: MusicClock) {
     if (music == null) return
     val context = LocalContext.current
     val player = remember {
@@ -62,6 +64,7 @@ internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Bool
             if (player.currentPosition > 0L) player.seekTo(0L)
             if (player.playbackParameters.speed != 1f) player.setPlaybackSpeed(1f)
             player.playWhenReady = false
+            heard.told(null, SystemClock.elapsedRealtime(), false)
             return@LaunchedEffect
         }
         val off = player.currentPosition - want
@@ -69,6 +72,13 @@ internal fun ProjectMusicSound(music: ProjectMusic?, timeMs: Long, playing: Bool
         if (speed == null) player.seekTo(want)
         if (player.playbackParameters.speed != (speed ?: 1f)) player.setPlaybackSpeed(speed ?: 1f)
         player.playWhenReady = playing
+        // And the one other thing the preview is told: where the *sound* stands (the click keeps time with it, not with the
+        // picture — a piece waiting on the camera's Wi-Fi stalls the picture, and a click following the picture would walk
+        // off the music). The player's own position is what is being heard: it is read from the audio's playback head.
+        val at = SystemClock.elapsedRealtime()
+        val here = player.currentPosition
+        val ready = player.playbackState == Player.STATE_READY
+        heard.told(if (ready) here - music.offsetMs else null, at, player.isPlaying)
     }
 }
 
