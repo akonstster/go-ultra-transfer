@@ -68,35 +68,50 @@ data class ProjectMusic(
     /** Where the montage starts in the track (trim), ms. */
     val offsetMs: Long = 0L,
     val volume: Double = 1.0,
-    /** Keep the video's own sound under the music, lowering it (P2). */
-    val duck: Boolean = true,
+    /**
+     * How loud the video's own sound stays under the music, 0…1 (0 — music only, 1 — as recorded). Set on its own
+     * slider; an older project's «duck» flag reads as [UNDER_MUSIC] (on) or 1 (off).
+     */
+    val videoVolume: Double = UNDER_MUSIC,
     /** The beat grid in ms (P3); empty until the track has been analysed. */
     val beats: List<Long> = emptyList(),
     /** The drop the analysis found, movable by hand (P3). */
     val dropMs: Long? = null,
+    /** The track's length, ms, as the analysis read it (0 until then): the wave and its grid are drawn against it. */
+    val lengthMs: Long = 0L,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("uri", uri)
         if (name.isNotEmpty()) put("name", name)
         if (offsetMs != 0L) put("offset", offsetMs)
         put("volume", volume)
-        put("duck", duck)
+        put("video", videoVolume)
         if (beats.isNotEmpty()) put("beats", JSONArray(beats))
         dropMs?.let { put("drop", it) }
+        if (lengthMs > 0L) put("length", lengthMs)
     }
 
     companion object {
+        /** The video's own sound under freshly picked music: the music leads, the place's sound still heard. */
+        const val UNDER_MUSIC = 0.35
+
         fun from(o: JSONObject): ProjectMusic? {
             val uri = o.optString("uri").takeIf { it.isNotEmpty() } ?: return null
             val beats = o.optJSONArray("beats")?.let { a -> (0 until a.length()).map { a.optLong(it) } }.orEmpty()
+            val video = when {
+                o.has("video") -> o.optDouble("video", UNDER_MUSIC).takeIf { !it.isNaN() } ?: UNDER_MUSIC
+                o.has("duck") -> if (o.optBoolean("duck", true)) UNDER_MUSIC else 1.0
+                else -> UNDER_MUSIC
+            }
             return ProjectMusic(
                 uri = uri,
                 name = o.optString("name"),
                 offsetMs = o.optLong("offset", 0L),
                 volume = o.optDouble("volume", 1.0).takeIf { !it.isNaN() } ?: 1.0,
-                duck = o.optBoolean("duck", true),
+                videoVolume = video.coerceIn(0.0, 1.0),
                 beats = beats,
                 dropMs = if (o.has("drop")) o.optLong("drop") else null,
+                lengthMs = o.optLong("length", 0L),
             )
         }
     }

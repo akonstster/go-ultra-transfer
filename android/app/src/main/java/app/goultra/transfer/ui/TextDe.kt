@@ -454,6 +454,7 @@ internal val TEXT_DE: Map<String, String> = mapOf(
     "Remove" to "Entfernen",
     "In a project" to "In einem Projekt",
     "On screen for" to "Anzeigedauer des Fotos",
+    "Clips' sound" to "Ton der Clips",
     "The camera seems to have run flat (%s %%) — charge it and save the project again" to "Die Kamera scheint leer zu sein (%s %%) — laden und das Projekt erneut speichern",
     "The camera's link dropped — saving again once it is back" to "Verbindung zur Kamera unterbrochen — wird erneut gespeichert, sobald sie zurück ist",
     "The camera didn't come back — save the project again" to "Die Kamera kam nicht zurück — Projekt erneut speichern",
@@ -559,5 +560,13 @@ internal val TEXT_DE: Map<String, String> = mapOf(
     "Checking for updates…" to "Suche nach Updates…",
     "Couldn't check for updates — the internet is needed." to "Update-Suche fehlgeschlagen — Internet nötig.",
     "No updates — you're on the latest version." to "Keine Updates — du hast die neueste Version.",
+"Music" to "Musik",
+    "Choose a track" to "Titel wählen",
+    "The track" to "Der Titel",
+    "Replace the track" to "Titel ersetzen",
+    "Remove the track" to "Titel entfernen",
+    "The track could not be read" to "Der Titel lässt sich nicht lesen",
+    "Analysing the track…" to "Titel wird analysiert…",
+    "Beat: %s BPM" to "Beat: %s BPM",
 )
 

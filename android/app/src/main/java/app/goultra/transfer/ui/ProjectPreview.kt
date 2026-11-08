@@ -1,7 +1,6 @@
 package app.goultra.transfer.ui
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -56,7 +55,6 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.image.BitmapFactoryImageDecoder
-import androidx.media3.exoplayer.image.ImageDecoderException
 import androidx.media3.exoplayer.image.ImageOutput
 import androidx.media3.exoplayer.image.ImageRenderer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -66,6 +64,7 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.ProjectClip
+import app.goultra.transfer.camera.ProjectMusic
 
 /**
  * One piece as a media3 item: its file's URI, cut to its range. A still has no range to cut — it is one picture, and
@@ -117,32 +116,11 @@ internal fun seekPoint(lengths: List<Long>, atMs: Long): Pair<Int, Long> {
     return lengths.lastIndex to 0L
 }
 
-/** The long side of a photo as the preview decodes it: more than a phone screen needs, little enough to keep in hand. */
+/**
+ * The long side of a photo as the preview decodes it: more than a phone screen needs, little enough to keep in hand ?
+ * media3's own decoder samples a 50 MP photo down to it instead of taking it whole.
+ */
 private const val STILL_SIDE = 1280
-
-/**
- * How many times a side has to be halved to fit [maxSide] — the same rule the viewer decodes photos by, so a photo is
- * never taken into memory whole (the phone's camera takes 12–50 MP, a screen asks for one or two).
- */
-internal fun sampleFor(width: Int, height: Int, maxSide: Int): Int {
-    if (width <= 0 || height <= 0 || maxSide <= 0) return 1
-    var sample = 1
-    while (maxOf(width, height) / (sample * 2) >= maxSide) sample *= 2
-    return sample
-}
-
-/**
- * A photo of the playlist, decoded small on purpose: media3's own decoder takes the picture whole, which a 50 MP photo
- * does not survive. Bounds first, then a sampled decode, both straight from the bytes the source has delivered.
- */
-@androidx.annotation.OptIn(UnstableApi::class)
-private fun decodePhoto(data: ByteArray, length: Int): Bitmap {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(data, 0, length, bounds)
-    val sample = sampleFor(bounds.outWidth, bounds.outHeight, STILL_SIDE)
-    return BitmapFactory.decodeByteArray(data, 0, length, BitmapFactory.Options().apply { inSampleSize = sample })
-        ?: throw ImageDecoderException("not a picture: $length bytes, ${bounds.outWidth}×${bounds.outHeight}")
-}
 
 /**
  * Where the player puts the picture of a still. The player waits while it is not here (a still's length starts only
@@ -187,6 +165,12 @@ internal fun ProjectPreview(
     onPlayed: () -> Unit,
     onPlaying: (Int?) -> Unit,
     carrying: Boolean,
+    music: ProjectMusic? = null,
+    /** The project's own clock, told out every tick: where the film is, and whether it plays (the timeline draws by it). */
+    onClock: (timeMs: Long, playing: Boolean) -> Unit = { _, _ -> },
+    /** A jump asked from outside (a tap on the timeline), in project ms; [onSeeked] says it has been taken. */
+    seek: Long? = null,
+    onSeeked: () -> Unit = {},
 ) {
     val context = LocalContext.current
     // Every piece with its file: the real one, or — out of reach — a stand-in played as its card's frame.
@@ -198,6 +182,8 @@ internal fun ProjectPreview(
     // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
     val itemsNow by rememberUpdatedState(items)
     val onPlayingNow by rememberUpdatedState(onPlaying)
+    val onClockNow by rememberUpdatedState(onClock)
+    val onSeekedNow by rememberUpdatedState(onSeeked)
     // The camera's own data source (its Wi-Fi is bound to this app) under the stock one: content and file URIs keep
     // going to the phone's own readers. A photo is a plain JPEG by content, and the stock JPEG reader takes a JPEG for
     // a motion photo — the flag is what makes it a picture the playlist can show.
@@ -216,7 +202,7 @@ internal fun ProjectPreview(
         // that takes it, so a renderer added at the end never saw a photo (the stock one decoded it whole, to nowhere).
         val renderers = object : DefaultRenderersFactory(context) {
             override fun buildImageRenderers(out: java.util.ArrayList<Renderer>) {
-                out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory { data, length -> decodePhoto(data, length) }, photo))
+                out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory(context).setMaxOutputSize(STILL_SIDE), photo))
             }
         }
         ExoPlayer.Builder(context, factory)
@@ -277,6 +263,13 @@ internal fun ProjectPreview(
     LaunchedEffect(carrying) {
         if (carrying) player.pause()
     }
+    // The video's own sound under the music: at its own slider's level while there is music (P2).
+    LaunchedEffect(music?.uri, music?.videoVolume) {
+        player.volume = music?.videoVolume?.toFloat()?.coerceIn(0f, 1f) ?: 1f
+    }
+    // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
+    // sound need not.
+    ProjectMusicSound(music, shown, playing)
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {
@@ -309,7 +302,10 @@ internal fun ProjectPreview(
             now.getOrNull(player.currentMediaItemIndex)?.let { resume = it.clip to player.currentPosition.coerceAtLeast(0L) }
             // Told to the screen: its card is marked in the strip and the strip follows it.
             onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.at?.index)
-            delay(250)
+            // And the project's own clock, for the timeline: the line it draws must move with the picture, so the loop
+            // is quick while the film plays and slow while it stands.
+            onClockNow(shown, player.isPlaying)
+            delay(if (player.isPlaying) 50 else 250)
         }
     }
     // A card tapped: the preview jumps to that piece — video or photo alike — and plays on from it.
@@ -320,6 +316,15 @@ internal fun ProjectPreview(
             player.play()
         }
         if (play != null) onPlayed()
+    }
+    // A jump asked from outside — a tap on the timeline — by the very arithmetic the slider uses, so a tap lands where
+    // the strip's own seek would. The film does not start by itself: the tap moves the picture, it does not press play.
+    LaunchedEffect(seek, signature) {
+        val ms = seek ?: return@LaunchedEffect
+        if (inPlayer.isEmpty()) return@LaunchedEffect
+        val (i, at) = seekPoint(lengthsOf(player, inPlayer.map { it.clip }), ms)
+        player.seekTo(i, at)
+        onSeekedNow()
     }
 
     Column(Modifier.fillMaxWidth()) {

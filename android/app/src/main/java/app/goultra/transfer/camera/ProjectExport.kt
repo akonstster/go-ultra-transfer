@@ -23,8 +23,12 @@ object ProjectExport {
         return out
     }
 
-    /** As shot (no re-encoding) needs video pieces only: a photo has no frames to copy, it has to be encoded. */
-    fun canCopy(clips: List<ProjectClip>): Boolean = clips.isNotEmpty() && clips.none { it.role == ProjectClip.Role.STILL }
+    /**
+     * As shot (no re-encoding of the picture) needs video pieces only: a photo has no frames to copy. Music is fine — only
+     * the sound is made anew then ([ProjectSound]).
+     */
+    fun canCopy(clips: List<ProjectClip>): Boolean =
+        clips.isNotEmpty() && clips.none { it.role == ProjectClip.Role.STILL }
 
     /** A file name made of the project's name: only what every gallery takes, and never empty. */
     fun fileStem(name: String): String =

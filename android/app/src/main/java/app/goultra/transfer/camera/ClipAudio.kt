@@ -107,10 +107,24 @@ object ClipAudio {
     }
 
     /**
+     * Any sound the phone can decode ([open] sets the extractor's source: a camera file or a content URI of a picked
+     * track) as 16-bit PCM frames — the very reader [encode] works through. Used for a music track's wave and beat.
+     */
+    internal fun openPcm(open: (MediaExtractor) -> Unit): PcmReader? = PcmReader.open(open)
+
+    /**
      * The original's sound as 16-bit PCM by frame: [read] (frame, count), seeking when asked for another place than
      * where it is (from a little earlier, so the decoder has settled); silence before the start and after the end.
+     * [durationMs] is what the file says of itself (0 when it does not): a reader taken for the whole track stops
+     * there instead of reading the silence [read] pads the end with.
      */
-    private class PcmReader(private val ex: MediaExtractor, private val codec: MediaCodec, val rate: Int, val channels: Int) {
+    internal class PcmReader(
+        private val ex: MediaExtractor,
+        private val codec: MediaCodec,
+        val rate: Int,
+        val channels: Int,
+        val durationMs: Long,
+    ) {
         private var next = Long.MIN_VALUE // the frame [buffer] continues from
         private var buffer = ShortArray(0)
         private var bufferAt = 0 // frames of [buffer] already given out
@@ -233,7 +247,15 @@ object ClipAudio {
                         val c = MediaCodec.createDecoderByType(mime).also { codec = it }
                         c.configure(f, null, null, 0)
                         c.start()
-                        return PcmReader(ex, c, f.getInteger(MediaFormat.KEY_SAMPLE_RATE), f.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                        // The track's own length: a reader of a whole track stops at the end instead of the padded silence.
+                        val us = if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
+                        return PcmReader(
+                            ex,
+                            c,
+                            f.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                            f.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
+                            if (us > 0L) us / 1000 else 0L,
+                        )
                     }
                     ex.release()
                     return null
@@ -247,7 +269,7 @@ object ClipAudio {
     }
 
     /** 16-bit PCM in, AAC-LC at [BITRATE] out into [file] (sizes, times, flags kept here: a few bytes a sample). */
-    private class AacWriter(private val rate: Int, private val channels: Int, private val file: java.io.File) {
+    internal class AacWriter(private val rate: Int, private val channels: Int, private val file: java.io.File) {
         private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).also { c ->
             try {
                 val f = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, channels)

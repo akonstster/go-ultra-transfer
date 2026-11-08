@@ -36,8 +36,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.17-alpha4"
+        versionCode = 21
+        versionName = "0.17-alpha5"
     }
 
     signingConfigs {
@@ -102,11 +102,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // In-app preview of files still on the camera (the system player cannot reach the camera's Wi-Fi).
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-ui:1.11.1")
     // Colour over I-Log videos in the viewer: a LUT, brightness, saturation (GL effects in the player).
-    implementation("androidx.media3:media3-effect:1.4.1")
-    implementation("androidx.media3:media3-transformer:1.4.1")
+    implementation("androidx.media3:media3-effect:1.11.1")
+    implementation("androidx.media3:media3-transformer:1.11.1")
 
     testImplementation("junit:junit:4.13.2")
     // Real org.json in JVM unit tests: the android.jar stub throws on every method.

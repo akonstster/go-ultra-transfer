@@ -39,6 +39,31 @@ internal const val TICK_MAX_MS = 48f
 /** The other cards parting for the carried one (and the outline of its place). */
 internal val PART_SPRING = spring<Float>(dampingRatio = 0.85f, stiffness = 420f)
 
+// The timeline's feel (see `docs/STRIP_TUNING.md`): the two tracks under the strip, how it zooms, how it follows the clock.
+
+/** The timeline's video track, the music track under it, and the joint drawn between two pieces. */
+internal val TIMELINE_VIDEO_H = 56.dp
+internal val TIMELINE_MUSIC_H = 44.dp
+internal val TIMELINE_JOINT = 2.dp
+
+/** Room at either end of the timeline, so the first and the last moment are not glued to the screen's edge. */
+internal val TIMELINE_EDGE = 12.dp
+
+/** The closest the timeline zooms in: 400 px of a second, a piece's frame every few pixels. */
+internal const val TIMELINE_MAX_PX_PER_MS = 0.4f
+
+/** Where the clock's line stands while the timeline follows it: this share of the width from the left. */
+internal const val TIMELINE_FOLLOW_SHARE = 1f / 3f
+
+/** How long after a touch the timeline stops following the clock, ms. */
+internal const val TIMELINE_FOLLOW_PAUSE_MS = 1500L
+
+/** Every fourth beat opens a bar: a thicker line, the same count as on the music track. */
+internal const val TIMELINE_BAR_EVERY = 4
+
+/** The music's offset may not come closer to the track's end than this, ms: a sliver of a track is no use. */
+internal const val TIMELINE_OFFSET_TAIL_MS = 1000L
+
 /** The strip gathering when a card is taken and spreading back when it is let go of. */
 internal val ZOOM_SPRING = spring<Float>(dampingRatio = 1f, stiffness = 260f)
 

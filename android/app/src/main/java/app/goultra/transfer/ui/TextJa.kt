@@ -454,6 +454,7 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Remove" to "外す",
     "In a project" to "プロジェクト内",
     "On screen for" to "写真の表示時間",
+    "Clips' sound" to "クリップの音",
     "The camera seems to have run flat (%s %%) — charge it and save the project again" to "カメラのバッテリーが切れたようです（%s %%）— 充電してからプロジェクトをもう一度保存してください",
     "The camera's link dropped — saving again once it is back" to "カメラとの接続が切れました — 戻りしだい保存し直します",
     "The camera didn't come back — save the project again" to "カメラが戻りませんでした — プロジェクトをもう一度保存してください",
@@ -559,5 +560,13 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Checking for updates…" to "更新を確認しています…",
     "Couldn't check for updates — the internet is needed." to "確認できません — インターネットが必要です。",
     "No updates — you're on the latest version." to "更新はありません — 最新版です。",
+"Music" to "音楽",
+    "Choose a track" to "曲を選ぶ",
+    "The track" to "曲",
+    "Replace the track" to "曲を差し替える",
+    "Remove the track" to "曲を外す",
+    "The track could not be read" to "曲を読み取れません",
+    "Analysing the track…" to "曲を解析しています…",
+    "Beat: %s BPM" to "ビート：%s BPM",
 )
 

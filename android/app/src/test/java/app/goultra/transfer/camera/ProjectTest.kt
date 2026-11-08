@@ -29,7 +29,8 @@ class ProjectTest {
         ),
         music = ProjectMusic(
             uri = "content://media/external/audio/media/1", name = "track.mp3",
-            offsetMs = 3_000, volume = 0.8, duck = false, beats = listOf(0L, 500L, 1_000L), dropMs = 32_000,
+            offsetMs = 3_000, volume = 0.8, videoVolume = 0.5, beats = listOf(0L, 500L, 1_000L), dropMs = 32_000,
+            lengthMs = 180_000,
         ),
         previous = listOf(ProjectClip(file = "VID_20261105_211421_165.mp4", fromMs = 1_200, toMs = 4_000)),
     )
@@ -39,6 +40,15 @@ class ProjectTest {
         val back = Project.decode(Project.encode(sample()))
         assertNotNull(back)
         assertEquals(sample(), back)
+    }
+
+    @Test
+    fun `an older project's ducking flag reads as the video's level under the music`() {
+        fun music(json: String) = ProjectMusic.from(org.json.JSONObject(json))!!.videoVolume
+        assertEquals(ProjectMusic.UNDER_MUSIC, music("""{"uri":"u","duck":true}"""), 0.0)
+        assertEquals(1.0, music("""{"uri":"u","duck":false}"""), 0.0)
+        assertEquals(ProjectMusic.UNDER_MUSIC, music("""{"uri":"u"}"""), 0.0)
+        assertEquals(0.6, music("""{"uri":"u","video":0.6,"duck":false}"""), 0.0) // the slider wins
     }
 
     @Test

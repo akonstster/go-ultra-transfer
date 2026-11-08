@@ -44,7 +44,10 @@ import app.goultra.transfer.camera.PbWriter
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
 import app.goultra.transfer.camera.ProjectExport
+import app.goultra.transfer.camera.ProjectSound
 import app.goultra.transfer.camera.Projects
+import app.goultra.transfer.camera.ProjectMusic
+import app.goultra.transfer.camera.TrackAudio
 import app.goultra.transfer.camera.Proto
 import app.goultra.transfer.camera.SettingCodes
 import app.goultra.transfer.camera.Downloader
@@ -3258,6 +3261,108 @@ class CameraController(private val app: Application) {
         reloadProjects()
     }
 
+    // ---------- a project's music: the picked track, its wave and its grid (P2) ----------
+
+    /**
+     * A track's wave waits on the phone between openings: one small file per picked uri (the [TrackAudio.BUCKETS]
+     * columns), so a project opened again draws at once instead of decoding the track again.
+     */
+    private val trackDir = File(app.cacheDir, "tracks").apply { mkdirs() }
+
+    private fun trackFile(uri: String): File = File(
+        trackDir,
+        java.security.MessageDigest.getInstance("SHA-1").digest(uri.toByteArray())
+            // «.w25»: the fine wave (one peak per 25 ms); a file of the old 800 columns is simply not found, and redone.
+            .joinToString("") { "%02x".format(it) }.take(24) + ".w25",
+    )
+
+    /** The wave of a track as last analysed (one value 0…1 per [TrackAudio.BUCKET_MS]), or null while there is none. */
+    fun musicPeaks(uri: String): FloatArray? {
+        val f = trackFile(uri)
+        if (!f.exists()) return null
+        return runCatching {
+            java.io.DataInputStream(f.inputStream().buffered()).use { s -> FloatArray((f.length() / 4).toInt()) { s.readFloat() } }
+        }.onFailure { log("музыка: ${it.message}") }.getOrNull()
+    }
+
+    /** Bumped when a track's analysis lands: the lane redraws what came of it. */
+    var musicVersion by mutableIntStateOf(0)
+        private set
+
+    /** Tracks the phone could not read (a broken file, a permission taken away): the lane says so, not «waiting». */
+    var musicFailed by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /**
+     * The project's track, picked through SAF: the app keeps the link and a lasting permission to read it (the file is
+     * not copied), and the wave and the grid are worked out in the background ([analyseMusic]).
+     */
+    fun setProjectMusic(uri: android.net.Uri) {
+        val p = seenProject ?: return
+        runCatching {
+            app.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }.onFailure { log("музыка ${uri.lastPathSegment}: нет постоянного доступа (${it.message})") }
+        val name = runCatching { addedName(uri) }.getOrNull().orEmpty()
+        val music = ProjectMusic(uri = uri.toString(), name = name)
+        saveProject(p.copy(music = music))
+        analyseMusic(music)
+    }
+
+    /** The music's settings changed (volume, ducking): the project keeps them, and the sound follows them everywhere. */
+    fun updateProjectMusic(change: (ProjectMusic) -> ProjectMusic) {
+        val p = seenProject ?: return
+        val music = p.music ?: return
+        val next = change(music)
+        saveProject(p.copy(music = next))
+        // Another track needs analysing; volume and ducking alone need nothing.
+        if (next.uri != music.uri) analyseMusic(next)
+    }
+
+    /** The ✕ on the lane: the project has no music (the track itself stays on the phone). */
+    fun removeProjectMusic() {
+        val p = seenProject ?: return
+        saveProject(p.copy(music = null))
+    }
+
+    /**
+     * The wave and the grid of [music] in the background: the wave to a small file on the phone, the grid into the
+     * project's JSON (a cut snaps to it, P3). A track already analysed is not decoded again.
+     */
+    fun analyseMusic(music: ProjectMusic) {
+        if (music.uri in musicFailed) return
+        if (music.beats.isNotEmpty() && music.lengthMs > 0L && musicPeaks(music.uri) != null) return
+        val uri = android.net.Uri.parse(music.uri)
+        scope.launch {
+            val found = withContext(Dispatchers.IO) {
+                runCatching { TrackAudio.analyse(app, uri) }
+                    .onFailure { log("музыка ${music.name}: ${it.message}") }
+                    .getOrNull()
+            }
+            if (found == null) {
+                musicFailed = musicFailed + music.uri
+                return@launch
+            }
+            withContext(Dispatchers.IO) {
+                runCatching { writePeaks(music.uri, found.peaks) }.onFailure { log("музыка: ${it.message}") }
+            }
+            musicFailed = musicFailed - music.uri
+            musicVersion++
+            // The grid goes into whichever project still holds this track: it may have been replaced meanwhile. Only the
+            // start of a track is analysed; its grid already runs on to the track's end (TrackAudio.beatsOver).
+            projects.filter { it.music?.uri == music.uri && (it.music?.beats?.isEmpty() == true || it.music?.lengthMs == 0L) }.forEach { held ->
+                saveProject(held.copy(music = held.music?.copy(beats = found.beats, lengthMs = found.lengthMs)))
+            }
+        }
+    }
+
+    /** Written beside and moved over: a lane never reads half a wave. */
+    private fun writePeaks(uri: String, peaks: FloatArray) {
+        val target = trackFile(uri)
+        val tmp = File(target.path + ".tmp")
+        java.io.DataOutputStream(tmp.outputStream().buffered()).use { s -> peaks.forEach { s.writeFloat(it) } }
+        java.nio.file.Files.move(tmp.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+
     /**
      * Adds the selected files to [p]: each video's pieces as they stand (edited on the phone, or the camera's marks; a
      * video without marks goes in whole), each photo as a still — see `memory-bank/projects-plan.md`. The camera's
@@ -3676,6 +3781,19 @@ class CameraController(private val app: Application) {
         ClipMaker.Mismatch.SOUND -> tr("разный звук", "different sound")
     }
 
+    /**
+     * A constant volume as media3's own gain processor: the music's own level, or the video's level under the music
+     * (the ducking, P2). A level of one is unity — the processor then does nothing at all.
+     */
+    private fun gain(factor: Float): androidx.media3.common.audio.GainProcessor =
+        androidx.media3.common.audio.GainProcessor(object : androidx.media3.common.audio.GainProcessor.GainProvider {
+            override fun getGainFactorAtSamplePosition(samplePosition: Long, channelCount: Int): Float =
+                factor.coerceIn(0f, 1f)
+
+            override fun isUnityUntil(samplePosition: Long, channelCount: Int): Long =
+                if (factor >= 1f) Long.MAX_VALUE else samplePosition
+        })
+
     /** The project's file name in the gallery: its own name, then …2, …3 if taken. */
     private suspend fun projectSaveName(p: Project): String {
         val stem = ProjectExport.fileStem(p.name)
@@ -3774,23 +3892,70 @@ class CameraController(private val app: Application) {
                     }
                 }
                 var lengthUs = 0L
+                // With music: the picture is copied as it is into a file of its own, the sound made anew (the clips'
+                // sound exactly where the picture was cut, the music under it) and the two put together.
+                val music = p.music?.takeIf { sound }
+                val videoTmp = java.io.File(app.cacheDir, "project_video.mp4")
+                val soundTmp = java.io.File(app.cacheDir, "project_sound.aac")
+                try {
                 withContext(Dispatchers.IO) {
                     val job = coroutineContext[Job]
                     var reportedAt = 0L
-                    Downloader.saveClip(app, name, System.currentTimeMillis()) { fd ->
-                        lengthUs = ClipMaker.joinAll(sources, fd, sound) { us ->
-                            if (job?.isActive == false) throw CancellationException("остановлено")
-                            val now = System.currentTimeMillis()
-                            if (now - reportedAt >= 250) {
-                                reportedAt = now
-                                val done = if (wantedUs > 0) estimate * minOf(us, wantedUs) / wantedUs else 0L
-                                scope.launch { download = DownloadProgress(name, 1, 1, done, maxOf(estimate, done), 0) }
-                            }
+                    val progress: (Long) -> Unit = { us ->
+                        if (job?.isActive == false) throw CancellationException("остановлено")
+                        val now = System.currentTimeMillis()
+                        if (now - reportedAt >= 250) {
+                            reportedAt = now
+                            // With music the picture is most of the work, the sound the last few per cent.
+                            val share = if (music != null) 0.92 else 1.0
+                            val done = if (wantedUs > 0) (estimate * share * minOf(us, wantedUs) / wantedUs).toLong() else 0L
+                            scope.launch { download = DownloadProgress(name, 1, 1, done, maxOf(estimate, done), 0) }
                         }
                     }
+                    if (music == null) {
+                        Downloader.saveClip(app, name, System.currentTimeMillis()) { fd ->
+                            lengthUs = ClipMaker.joinAll(sources, fd, sound, progress).lengthUs
+                        }
+                    } else {
+                        val joined = java.io.FileOutputStream(videoTmp).use { ClipMaker.joinAll(sources, it.fd, false, progress) }
+                        lengthUs = joined.lengthUs
+                        // Read again for the sound, each through a source of its own: a camera source goes with the
+                        // extractor that used it.
+                        val parts = runs.zip(joined.cuts).map { (run, cut) ->
+                            val file = files.getValue(run.file)
+                            val local = file.localUri
+                            val open: (android.media.MediaExtractor) -> Unit = if (local == null) {
+                                val camera = session.clipSource(file);
+                                { ex -> ex.setDataSource(camera) }
+                            } else {
+                                val uri = android.net.Uri.parse(local);
+                                { ex -> ex.setDataSource(app, uri, null) }
+                            }
+                            ProjectSound.Part(open, cut)
+                        }
+                        val track = android.net.Uri.parse(music.uri)
+                        val mixed = ProjectSound.mix(
+                            parts,
+                            music.videoVolume.toFloat(),
+                            ProjectSound.Music(
+                                { ex -> ex.setDataSource(app, track, null) },
+                                music.offsetMs.coerceAtLeast(0L),
+                                music.volume.toFloat(),
+                                // The track may start after the picture does: silence first, then the music.
+                                (-music.offsetMs).coerceAtLeast(0L),
+                            ),
+                            soundTmp,
+                        ) { job?.isActive == false }
+                        Downloader.saveClip(app, name, System.currentTimeMillis()) { fd -> ClipAudio.mux(videoTmp, mixed, fd) }
+                    }
+                }
+                } finally {
+                    videoTmp.delete()
+                    soundTmp.delete()
                 }
                 lastResult = tr("Проект сохранён: %s · ", "Project saved: %s · ").format(name) + "%.1f ".format(lengthUs / 1e6) + tr("с", "s")
-                log("проект $name как снято: ${runs.size} отрезков, ${p.clips.size} кусков, %.1f с".format(lengthUs / 1e6))
+                log("проект $name как снято: ${runs.size} отрезков, ${p.clips.size} кусков, %.1f с".format(lengthUs / 1e6) +
+                    (p.music?.takeIf { sound }?.let { m -> ", музыка ${(m.volume * 100).toInt()} %, ролики ${(m.videoVolume * 100).toInt()} %" } ?: ""))
                 forgetThumbnail(name)
                 lastSaveOk = true
                 loadPhoneFiles()
@@ -3860,9 +4025,17 @@ class CameraController(private val app: Application) {
                         exportEffects(lut, l, minOf(f.width ?: 1080, f.height ?: 1080))
                     }.orEmpty()
                 }
+                // The music plays under the picture, and the video's own sound stays at its own slider's level:
+                // media3 mixes the sequences' sound, each item with a gain of its own.
+                val music = p.music
+                val under = if (music != null && sound && music.videoVolume < 1.0) {
+                    listOf<androidx.media3.common.audio.AudioProcessor>(gain(music.videoVolume.toFloat()))
+                } else {
+                    emptyList()
+                }
                 val items = p.clips.map { c ->
                     val f = files.getValue(c.file)
-                    val colour = androidx.media3.transformer.Effects(emptyList(), colours[f.name].orEmpty())
+                    val colour = androidx.media3.transformer.Effects(under, colours[f.name].orEmpty())
                     if (c.role == ProjectClip.Role.STILL) {
                         val media = androidx.media3.common.MediaItem.Builder().setUri(uriOf(f)).setImageDurationMs(c.durationMs).build()
                         androidx.media3.transformer.EditedMediaItem.Builder(media)
@@ -3882,7 +4055,40 @@ class CameraController(private val app: Application) {
                     }
                 }
                 val fit = androidx.media3.effect.Presentation.createForWidthAndHeight(w, h, androidx.media3.effect.Presentation.LAYOUT_SCALE_TO_FIT)
-                val composition = androidx.media3.transformer.Composition.Builder(androidx.media3.transformer.EditedMediaItemSequence(items))
+                // The pieces as one sequence; the track, if there is one, as another one beside it — the transformer
+                // mixes the two. Cut to the music's offset and to the project's own length: a longer track must not
+                // stretch the film past its last piece (and a shorter one simply ends).
+                val sequences = mutableListOf(androidx.media3.transformer.EditedMediaItemSequence.Builder(items).build())
+                val lengthMs = p.clips.sumOf { it.durationMs }
+                if (music != null && sound && lengthMs > 0L) {
+                    // Where the track is heard: from its own start (or from [from] in it, when its head is cut off) for
+                    // as long as the film runs — never longer, or the track would stretch the film past its last piece.
+                    val from = music.offsetMs.coerceAtLeast(0L)
+                    val to = (lengthMs + music.offsetMs).coerceAtLeast(from + 1L)
+                    val media = androidx.media3.common.MediaItem.Builder()
+                        .setUri(music.uri)
+                        .setClippingConfiguration(
+                            androidx.media3.common.MediaItem.ClippingConfiguration.Builder()
+                                .setStartPositionMs(from)
+                                .setEndPositionMs(to)
+                                .build(),
+                        )
+                        .build()
+                    val track = androidx.media3.transformer.EditedMediaItem.Builder(media)
+                        .setRemoveVideo(true)
+                        .setEffects(androidx.media3.transformer.Effects(listOf<androidx.media3.common.audio.AudioProcessor>(gain(music.volume.toFloat())), emptyList()))
+                        .build()
+                    sequences += if ((-music.offsetMs).coerceAtLeast(0L) > 0L) {
+                        // The track starts after the picture: a gap of silence leads into it.
+                        androidx.media3.transformer.EditedMediaItemSequence.Builder()
+                            .addGap(-music.offsetMs * 1000L) // µs
+                            .addItem(track)
+                            .build()
+                    } else {
+                        androidx.media3.transformer.EditedMediaItemSequence.Builder(listOf(track)).build()
+                    }
+                }
+                val composition = androidx.media3.transformer.Composition.Builder(sequences)
                     .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf(fit)))
                     // A photo has no sound: silence stands in for it, so the pieces around it keep theirs.
                     .experimentalSetForceAudioTrack(sound)
@@ -4045,7 +4251,7 @@ class CameraController(private val app: Application) {
         if (source.bitrate > 0) {
             b.setBitrate(source.bitrate)
         } else {
-            b.experimentalSetEnableHighQualityTargeting(true)
+            // media3 1.11 has no high-quality targeting any more: the encoder's own default rate.
         }
         if (source.mime == androidx.media3.common.MimeTypes.VIDEO_H264 && source.profile != 0) {
             b.setEncodingProfileLevel(source.profile, source.level.takeIf { it != 0 } ?: androidx.media3.transformer.EncoderUtil.LEVEL_UNSET)
@@ -4096,7 +4302,7 @@ class CameraController(private val app: Application) {
                 .build()
         }
         val composition = androidx.media3.transformer.Composition.Builder(
-            androidx.media3.transformer.EditedMediaItemSequence(parts?.map { item(it) } ?: listOf(item(null))),
+            androidx.media3.transformer.EditedMediaItemSequence.Builder(parts?.map { item(it) } ?: listOf(item(null))).build(),
         ).build()
         runComposition(composition, out, source, gopSeconds, camera, onPercent)
     }
