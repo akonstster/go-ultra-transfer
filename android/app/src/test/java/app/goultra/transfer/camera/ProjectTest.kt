@@ -31,6 +31,7 @@ class ProjectTest {
             uri = "content://media/external/audio/media/1", name = "track.mp3",
             offsetMs = 3_000, beats = listOf(0L, 500L, 1_000L),
             drops = listOf(8_000L, 32_000L), activeDropMs = 32_000L, lengthMs = 180_000,
+            dropVersion = 4,
         ),
         musicVolume = 0.8,
         videoVolume = 0.5,

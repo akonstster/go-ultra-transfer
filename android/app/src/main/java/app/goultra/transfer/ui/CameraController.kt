@@ -3427,10 +3427,13 @@ class CameraController(private val app: Application) {
      */
     fun analyseMusic(music: ProjectMusic) {
         if (music.uri in musicFailed || music.uri in musicAnalysing) return
-        // A current grid and its wave are kept. An automatic grid from an older detector is read again: real tracks got
-        // grids that began 51 and 84 seconds in, and asking every project to re-pick its track would hide the fix.
-        val cached = music.gridEdited || (music.beats.isNotEmpty() && music.lengthMs > 0L && music.gridVersion >= BeatGrid.ANALYSIS_VERSION)
-        if (cached && musicPeaks(music.uri) != null) return
+        // A current grid and its drops are kept. An automatic grid from an older detector is read again: real tracks got
+        // grids that began 51 and 84 seconds in, and asking every project to re-pick its track would hide the fix. The
+        // drops have their own version, so a grid edited by hand is never overwritten while its drops can still be updated.
+        val gridCached = music.gridEdited ||
+            (music.beats.isNotEmpty() && music.lengthMs > 0L && music.gridVersion >= BeatGrid.ANALYSIS_VERSION)
+        val dropsCached = music.dropsEdited || music.dropVersion >= BeatGrid.ANALYSIS_VERSION
+        if (gridCached && dropsCached && musicPeaks(music.uri) != null) return
         val uri = android.net.Uri.parse(music.uri)
         musicAnalysing += music.uri
         scope.launch {
@@ -3459,27 +3462,38 @@ class CameraController(private val app: Application) {
                 musicFailed = musicFailed - music.uri
                 musicVersion++
                 // The grid and the profile go into whichever project still holds this track: it may have been replaced
-                // meanwhile. A hand-made grid is never written over; an older automatic one is brought up to date.
+                // meanwhile. A hand-made grid is never written over; an older automatic one is brought up to date. The
+                // drops are versioned on their own, so even a hand-edited grid gets the new drops.
                 projects.filter { held ->
                     val m = held.music
-                    m != null && m.uri == music.uri && !m.gridEdited &&
-                        (m.beats.isEmpty() || m.lengthMs == 0L || m.gridVersion < BeatGrid.ANALYSIS_VERSION)
+                    m != null && m.uri == music.uri && (
+                        (!m.dropsEdited && m.dropVersion < BeatGrid.ANALYSIS_VERSION) ||
+                            (!m.gridEdited && (m.beats.isEmpty() || m.lengthMs == 0L || m.gridVersion < BeatGrid.ANALYSIS_VERSION))
+                        )
                 }.forEach { held ->
                     val m = held.music ?: return@forEach
+                    val newGrid = !m.gridEdited &&
+                        (m.beats.isEmpty() || m.lengthMs == 0L || m.gridVersion < BeatGrid.ANALYSIS_VERSION)
+                    val newDrops = !m.dropsEdited && m.dropVersion < BeatGrid.ANALYSIS_VERSION
+                    if (!newGrid && !newDrops) return@forEach
                     // Marks put in by hand are never overwritten; an automatic drop from an older detector is replaced
                     // by the whole set the new one found. An active mark that still exists stays active.
-                    val drops = if (m.dropsEdited) m.drops else found.profile?.drops.orEmpty()
-                    val active = if (m.dropsEdited) m.activeDropMs
-                    else m.activeDropMs?.takeIf { it in drops } ?: drops.firstOrNull()
+                    val drops = if (newDrops) found.profile?.drops.orEmpty() else m.drops
+                    val active = if (newDrops) {
+                        m.activeDropMs?.takeIf { it in drops } ?: drops.firstOrNull()
+                    } else {
+                        m.activeDropMs
+                    }
                     saveProject(
                         held.copy(
                             music = m.copy(
-                                beats = found.beats,
-                                lengthMs = found.lengthMs,
+                                beats = if (newGrid) found.beats else m.beats,
+                                lengthMs = if (newGrid) found.lengthMs else m.lengthMs,
                                 drops = drops,
                                 activeDropMs = active,
-                                gridVersion = BeatGrid.ANALYSIS_VERSION,
-                                gridConfidence = found.confidence,
+                                gridVersion = if (newGrid) BeatGrid.ANALYSIS_VERSION else m.gridVersion,
+                                dropVersion = if (newDrops) BeatGrid.ANALYSIS_VERSION else m.dropVersion,
+                                gridConfidence = if (newGrid) found.confidence else m.gridConfidence,
                             ),
                         ),
                     )

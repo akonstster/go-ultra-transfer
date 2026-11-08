@@ -82,6 +82,8 @@ data class ProjectMusic(
     val lengthMs: Long = 0L,
     /** Which detector made this grid: an older one is read again when the project is opened. */
     val gridVersion: Int = 0,
+    /** Which detector made [drops]: kept apart from the grid, so a hand-edited grid still gets new drops. */
+    val dropVersion: Int = 0,
     /** How sure that detector was (0…1): a low value is a grid to check, not a truth to trust. */
     val gridConfidence: Double = 0.0,
     /** The grid was changed by hand: a newer detector may not overwrite it. */
@@ -97,6 +99,7 @@ data class ProjectMusic(
         if (dropsEdited) put("dropsEdited", true)
         if (lengthMs > 0L) put("length", lengthMs)
         if (gridVersion != 0) put("gridVersion", gridVersion)
+        if (dropVersion != 0) put("dropVersion", dropVersion)
         if (gridConfidence > 0.0) put("gridConfidence", gridConfidence)
         if (gridEdited) put("gridEdited", true)
     }
@@ -127,6 +130,7 @@ data class ProjectMusic(
                 dropsEdited = o.optBoolean("dropsEdited", false),
                 lengthMs = o.optLong("length", 0L),
                 gridVersion = o.optInt("gridVersion", 0),
+                dropVersion = o.optInt("dropVersion", 0),
                 gridConfidence = o.optDouble("gridConfidence", 0.0).takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0) ?: 0.0,
                 gridEdited = o.optBoolean("gridEdited", false),
             )
