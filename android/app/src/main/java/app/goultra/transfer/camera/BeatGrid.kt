@@ -45,6 +45,15 @@ object BeatGrid {
     private const val MIN_BPM = 60.0
     private const val MAX_BPM = 200.0
 
+    /** The band a kick and a bass drum live in: the grid's phase is checked against it, while the tempo is read from all
+     *  the sound (a track without a drum still has a beat). 70–120 Hz is deliberate: a sub-bass swell and a bright synth
+     *  at 160–300 Hz both sit outside it, and that synth was exactly the offbeat the grid used to land on. */
+    private const val LOW_FROM_HZ = 70
+    private const val LOW_TO_HZ = 120
+
+    /** How much of a beat either side of a beat the low drum may stand and still be its own hit. */
+    private const val LOW_PHASE_SHARE = 0.45
+
     /** The tempo the eye and the foot expect most: the detector leans toward it between a tempo and its double. */
     private const val USUAL_BPM = 120.0
 
@@ -112,7 +121,7 @@ object BeatGrid {
     private const val MIN_STARTS = 8
 
     /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
-    const val ANALYSIS_VERSION = 7
+    const val ANALYSIS_VERSION = 8
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
@@ -161,8 +170,11 @@ object BeatGrid {
         // What the envelope itself is early or late by, taken out of the whole grid: the *middle* of what the beats stand
         // off their starts, so one beat on the wrong start cannot drag the rest of the grid along (a sum could).
         val tuned = aligned(beats, started, sampleRate)
-        val confidence = gridConfidence(opening.confidence, whole, tuned)
-        return Grid(60_000.0 / medianGap(tuned), tuned.first(), tuned, confidence)
+        // The tempo is right, but the phase can sit on the synth or the offbeat. The kick/bass band says where the foot
+        // lands; the whole grid moves by its median, never by more than half a beat.
+        val phased = phaseToLow(tuned, lowOnsets(samples, sampleRate), sampleRate)
+        val confidence = gridConfidence(opening.confidence, whole, phased)
+        return Grid(60_000.0 / medianGap(phased), phased.first(), phased, confidence)
     }
 
     /**
@@ -767,6 +779,92 @@ object BeatGrid {
             for (j in maxOf(0, f - half)..minOf(frames - 1, f + half)) { s += flux[j]; n++ }
             (flux[f] - s / n).toFloat().coerceAtLeast(0f)
         }
+    }
+
+    /**
+     * How strongly the kick/bass band (30–160 Hz) starts in each frame: the same spectral rise, measured only where a
+     * drum's body is. The full spectrum can favour a bright synth or a hi-hat; this envelope says where the foot lands.
+     */
+    internal fun lowOnsets(samples: FloatArray, sampleRate: Int): FloatArray {
+        val frames = if (samples.size < WINDOW) 0 else (samples.size - WINDOW) / HOP + 1
+        if (frames <= 0) return FloatArray(0)
+        val window = DoubleArray(WINDOW) { 0.5 - 0.5 * cos(2 * PI * it / WINDOW) }
+        val re = DoubleArray(WINDOW)
+        val im = DoubleArray(WINDOW)
+        val from = (LOW_FROM_HZ.toDouble() * WINDOW / sampleRate).roundToInt().coerceIn(1, WINDOW / 2 - 1)
+        val to = (LOW_TO_HZ.toDouble() * WINDOW / sampleRate).roundToInt().coerceIn(from + 1, WINDOW / 2 - 1)
+        var prev = 0.0
+        val flux = FloatArray(frames)
+        for (f in 0 until frames) {
+            val at = f * HOP
+            for (i in 0 until WINDOW) { re[i] = samples[at + i] * window[i]; im[i] = 0.0 }
+            fft(re, im)
+            // Energy, not a per-bin flux: a bass note changes many bins without beginning, while a drum's body lifts the
+            // whole low band at once. The rise of that energy is the hit.
+            var energy = 0.0
+            for (b in from..to) energy += re[b] * re[b] + im[b] * im[b]
+            energy = sqrt(energy)
+            flux[f] = if (f == 0) 0f else (energy - prev).coerceAtLeast(0.0).toFloat()
+            prev = energy
+        }
+        val half = 8
+        return FloatArray(frames) { f ->
+            var s = 0.0
+            var n = 0
+            for (j in maxOf(0, f - half)..minOf(frames - 1, f + half)) { s += flux[j]; n++ }
+            (flux[f] - s / n).toFloat().coerceAtLeast(0f)
+        }
+    }
+
+    /**
+     * The grid [beats] moved onto the low drum: for every beat the strongest low onset within [LOW_PHASE_SHARE] of a beat
+     * is found, and the median of those offsets moves the whole grid at once. A median, not a mean: a missed kick or a
+     * second bass note must not drag the beat. Fewer than a quarter of the beats with a low hit leaves the grid as it is.
+     */
+    internal fun phaseToLow(beats: List<Long>, low: FloatArray, sampleRate: Int): List<Long> {
+        if (beats.size < 4 || low.isEmpty()) return beats
+        val period = medianGap(beats)
+        if (period <= 0.0) return beats
+        val framePeriod = period * sampleRate / (HOP * 1000.0)
+        val span = (framePeriod * LOW_PHASE_SHARE).roundToInt().coerceIn(1, low.size / 2)
+        val centres = IntArray(beats.size) { frameOf(beats[it], sampleRate).coerceIn(0, low.lastIndex) }
+        // Real peaks of the low drum, not the broad energy between them: a sum of the envelope picked a phase halfway
+        // between two hits. Each beat votes for its nearest peak with that peak's strength, and the winning offset moves
+        // the whole grid.
+        val top = low.maxOrNull() ?: 0f
+        if (top <= 0f) return beats
+        val peaks = ArrayList<Int>()
+        for (f in 1 until low.lastIndex) {
+            if (low[f] < top * 0.08f) continue
+            if (low[f] >= low[f - 1] && low[f] >= low[f + 1]) peaks += f
+        }
+        if (peaks.size < 4) return beats
+        val weight = DoubleArray(span * 2 + 1)
+        for (centre in centres) {
+            var nearest = -1
+            var distance = Int.MAX_VALUE
+            for (p in peaks) {
+                val d = abs(p - centre)
+                if (d < distance) {
+                    distance = d
+                    nearest = p
+                }
+            }
+            if (nearest < 0 || distance > span) continue
+            val at = (nearest - centre + span).coerceIn(0, weight.lastIndex)
+            weight[at] += low[nearest].toDouble()
+        }
+        var bestShift = 0
+        var bestScore = 0.0
+        for (i in weight.indices) {
+            if (weight[i] > bestScore) {
+                bestScore = weight[i]
+                bestShift = i - span
+            }
+        }
+        if (bestScore <= 0.0 || bestShift == 0) return beats
+        val shiftMs = (bestShift * HOP * 1000.0 / sampleRate).roundToInt()
+        return beats.map { it + shiftMs }.filter { it >= 0L }
     }
 
     private fun autocorrelation(x: FloatArray, lag: Int): Double {

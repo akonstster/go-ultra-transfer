@@ -143,7 +143,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 7)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 8)
     }
 
     @Test
@@ -387,6 +387,19 @@ class BeatGridTest {
         assertEquals(10_100L, BeatGrid.beatOfReturn(10_400L, 10_000L, 0.9, energy, BeatGrid.LOUD_STEP_MS, beats))
         // A beat far from the pause (a riser) must not be pulled back onto it.
         assertEquals(10_600L, BeatGrid.beatOfReturn(10_400L, 7_500L, 0.9, energy, BeatGrid.LOUD_STEP_MS, beats))
+    }
+
+    @Test
+    fun `the grid phase moves onto the low drum, not between its hits`() {
+        // A low-drum envelope with a peak every 15 frames; the grid currently stands five frames after every peak. The
+        // whole grid must move back onto the peaks, not halfway between them.
+        val rate = 22050
+        val low = FloatArray(100)
+        val peaks = listOf(10, 25, 40, 55, 70, 85)
+        peaks.forEach { low[it] = 1f }
+        val beats = listOf(20, 35, 50, 65, 80).map { BeatGrid.frameMs(it.toDouble(), rate) }
+        val phased = BeatGrid.phaseToLow(beats, low, rate)
+        assertEquals(peaks.drop(1).map { BeatGrid.frameMs(it.toDouble(), rate) }, phased)
     }
 
     @Test
