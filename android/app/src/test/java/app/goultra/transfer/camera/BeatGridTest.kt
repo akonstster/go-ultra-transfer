@@ -8,6 +8,7 @@ import org.junit.Test
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
 
@@ -143,7 +144,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 8)
+        assertEquals(BeatGrid.ANALYSIS_VERSION, 9)
     }
 
     @Test
@@ -208,6 +209,49 @@ class BeatGridTest {
             worst = maxOf(worst, abs(clicks[j] - beat))
         }
         assertTrue("worst beat $worst ms off", worst <= 12)
+    }
+
+    @Test
+    fun `a drifting tempo keeps its pulse through a pause without a kick`() {
+        // 100→130 BPM with five seconds of no drum at all. A pause is not evidence of a new tempo: the grid must step
+        // across it as a whole number of beats, keep the phase it had, and only then continue following the real drift.
+        val seconds = 40
+        val out = FloatArray(rate * seconds)
+        val rnd = Random(13)
+        val clicks = ArrayList<Long>()
+        var at = 0.2 * rate
+        while (at < out.size) {
+            val ms = (at / rate * 1000).toLong()
+            if (ms < 12_000L || ms >= 17_000L) {
+                clicks += ms
+                val start = at.toInt()
+                for (k in 0 until 1200) {
+                    if (start + k >= out.size) break
+                    out[start + k] += ((rnd.nextFloat() * 2 - 1) * 0.8 * exp(-k / 220.0)).toFloat()
+                }
+            }
+            val bpm = 100.0 + 30.0 * (at / out.size)
+            at += 60.0 / bpm * rate
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        val gaps = g!!.beats.zipWithNext { a, b -> b - a }
+        assertTrue("beats: ${g.beats.size}", g.beats.size > 70)
+        // No gap is twice a beat: the pause did not become one long beat or hide a dropped one.
+        val median = gaps.sorted()[gaps.size / 2]
+        assertTrue("gaps around the pause: $gaps", gaps.all { it in median / 2..median * 3 / 2 })
+        assertTrue("the tempo still rises: ${gaps.first()} -> ${gaps.last()}", gaps.last() < gaps.first() - 30)
+        // On both sides of the pause every beat is near a real click and the mean error stays small. The beats the grid
+        // carries through the pause have no click to compare with — that is the point — so they are checked by the
+        // interval and phase above, not against a note that does not exist.
+        var j = 0
+        val errors = ArrayList<Long>()
+        for (beat in g.beats) {
+            while (j + 1 < clicks.size && abs(clicks[j + 1] - beat) <= abs(clicks[j] - beat)) j++
+            if (beat < 12_000L || beat >= 17_000L) errors += abs(clicks[j] - beat)
+        }
+        assertTrue("worst beat ${errors.max()}", errors.max() <= 90)
+        assertTrue("mean error ${errors.average()}", errors.average() <= 35.0)
     }
 
     @Test
@@ -415,6 +459,51 @@ class BeatGridTest {
         // A flat piece has none: silence and a steady hum are not a drop.
         assertNull(BeatGrid.dropOf(FloatArray(300) { 0.5f }, BeatGrid.LOUD_STEP_MS))
         assertNull(BeatGrid.dropOf(FloatArray(300), BeatGrid.LOUD_STEP_MS))
+    }
+
+    @Test
+    fun `a constant dance pulse keeps one grid through a breakdown without a kick`() {
+        // 126 BPM, a kick every beat, an offbeat synth between them, and no kick at all for seven seconds. The pulse is
+        // still perfectly constant: the grid must run straight through the pause, keep every interval and land on the
+        // kicks again, instead of re-reading the synth as a new rhythm.
+        val seconds = 30
+        val bpm = 126.0
+        val firstMs = 200L
+        val period = 60_000.0 / bpm
+        val out = FloatArray(rate * seconds) { i -> (0.03 * sin(2 * PI * 220 * i / rate)).toFloat() }
+        var beat = firstMs
+        var k = 0
+        while (beat < seconds * 1000L) {
+            val silentKick = beat >= 9_000L && beat < 16_000L
+            if (!silentKick) {
+                val start = (beat / 1000.0 * rate).toInt()
+                for (n in 0 until 1400) {
+                    if (start + n >= out.size) break
+                    out[start + n] += (0.75 * sin(2 * PI * 80.0 * n / rate) * exp(-n / 300.0)).toFloat()
+                }
+            }
+            // The synth on the offbeat is exactly what used to pull the grid by half a beat.
+            val off = ((beat + period / 2) / 1000.0 * rate).toInt()
+            for (n in 0 until 900) {
+                if (off + n >= out.size) break
+                out[off + n] += (0.30 * sin(2 * PI * 440.0 * n / rate) * exp(-n / 180.0)).toFloat()
+            }
+            beat = (firstMs + (++k) * period).toLong()
+        }
+        val g = BeatGrid.detectDrifting(out, rate)
+        assertNotNull(g)
+        assertEquals("the pulse, not the offbeat", bpm, g!!.bpm, 0.7)
+        val gaps = g.beats.zipWithNext { a, b -> b - a }
+        assertTrue("gaps: ${gaps.distinct()}", gaps.all { abs(it - period) <= 2.0 })
+        // Through the breakdown too: the grid does not stop, restart or lose a beat.
+        val during = g.beats.filter { it in 9_500L..15_500L }
+        assertTrue("beats in the breakdown: $during", during.size >= 12)
+        var worst = 0.0
+        for (at in g.beats) {
+            val n = ((at - firstMs) / period).roundToInt()
+            worst = maxOf(worst, abs(at - (firstMs + n * period)))
+        }
+        assertTrue("worst beat $worst ms off the constant pulse", worst <= 25.0)
     }
 
     @Test

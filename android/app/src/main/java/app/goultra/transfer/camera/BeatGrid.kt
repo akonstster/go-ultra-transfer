@@ -60,6 +60,16 @@ object BeatGrid {
     /** The seconds around a beat its own period is read from: a tempo that drifts is followed, not averaged away. */
     private const val LOCAL_SECONDS = 4.0
 
+    /** How far the steady grid may stand off the starts of its own piece: a hit inside a tenth of a beat is on it. */
+    private const val STEADY_SHARE = 0.10
+
+    /** The weighted agreement the starts need before one fixed grid is trusted for the whole piece. A constant pulse
+     *  keeps its phase (1.0); a tempo that really drifts spreads the starts around the circle and falls away from it. */
+    private const val STEADY_AGREEMENT = 0.62
+
+    /** The share of the fixed grid that must have a real start on it, so a short loud passage cannot speak for a track. */
+    private const val STEADY_COVERAGE = 0.35
+
     /** The step of the energy curve, ms (one value a second is plenty to see a drop in). */
     internal const val ENERGY_STEP_MS = 1000L
 
@@ -108,6 +118,13 @@ object BeatGrid {
     /** How far a beat's step may stand off the tempo, as a share of it: a tempo that drifts is followed, a jump is not. */
     private const val TEMPO_SCAN = 0.5
 
+    /** The furthest a path may leap without a start between: about a minute of beats — a breakdown, not a lost track. */
+    private const val MAX_LEAPS = 96
+
+    /** What one beat with no start between costs. A real start earns up to one, so the path prefers every beat it can
+     *  hear and only leaps when the sound is genuinely absent — never because leaping was cheaper. */
+    private const val SKIP_COST = 0.75
+
     /** What one step off the tempo costs, against a beat's own worth (1 for the strongest start in the piece). */
     private const val TIGHTNESS = 10.0
 
@@ -121,7 +138,7 @@ object BeatGrid {
     private const val MIN_STARTS = 8
 
     /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
-    const val ANALYSIS_VERSION = 8
+    const val ANALYSIS_VERSION = 9
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
@@ -154,27 +171,208 @@ object BeatGrid {
     fun detectDrifting(samples: FloatArray, sampleRate: Int): Grid? {
         val onset = smoothed(onsets(samples, sampleRate))
         if (onset.isEmpty()) return null
+        val low = lowOnsets(samples, sampleRate)
+        // Every band votes. The low drum is weighted a little higher (it is where the foot lands), but a piece without a
+        // kick keeps the full spectrum, and the synth that used to pull the grid onto the offbeat cannot outvote both.
+        val fused = fuse(onset, low)
         val fps = sampleRate.toDouble() / HOP
-        val opening = tempoOf(onset, fps) ?: return null
+        val opening = tempoOf(fused, fps) ?: return null
         val lengthMs = samples.size * 1000L / sampleRate
-        val started = starts(onset, opening.period, fps)
-        val path = if (started.size >= MIN_STARTS) track(onset, started, opening.period, fps) else emptyList()
+
+        // A dance track has one pulse from its first bar to its last: estimate that single period and phase from the
+        // whole piece, then draw every beat from them. A pause has no starts, so it neither changes the period nor votes
+        // for another phase. This is tried first; the drifting path below is only for a piece that proves it moves.
+        val steady = steadyGrid(fused, low, opening, fps, sampleRate, lengthMs)
+        if (steady != null && steadySupport(fused, low, steady, fps) >= STEADY_AGREEMENT) return steady
+
+        val started = starts(fused, opening.period, fps)
+        val path = if (started.size >= MIN_STARTS) track(fused, started, opening.period, fps) else emptyList()
         // The path is chosen for its earned score, so it may begin where the piece is loudest — 51 s into one real track,
         // 84 s into another. The introduction is still part of the track: walk the same period back from the first beat to
         // the beginning, following the local period and taking a real start when one stands where the grid expects it.
-        val whole = if (path.isNotEmpty()) backfilled(path, onset, opening.period, fps) else path
+        val whole = if (path.isNotEmpty()) backfilled(path, fused, opening.period, fps) else path
         // Too few starts to choose a path through (a wash of sound, a spoken piece): the walk still makes a grid.
         val beats = if (whole.isNotEmpty()) beatsOf(whole, sampleRate, lengthMs)
-        else walk(onset, opening, sampleRate, lengthMs)
+        else walk(fused, opening, sampleRate, lengthMs)
         if (beats.isEmpty()) return null
         // What the envelope itself is early or late by, taken out of the whole grid: the *middle* of what the beats stand
         // off their starts, so one beat on the wrong start cannot drag the rest of the grid along (a sum could).
         val tuned = aligned(beats, started, sampleRate)
         // The tempo is right, but the phase can sit on the synth or the offbeat. The kick/bass band says where the foot
         // lands; the whole grid moves by its median, never by more than half a beat.
-        val phased = phaseToLow(tuned, lowOnsets(samples, sampleRate), sampleRate)
+        val phased = phaseToLow(tuned, low, sampleRate)
         val confidence = gridConfidence(opening.confidence, whole, phased)
         return Grid(60_000.0 / medianGap(phased), phased.first(), phased, confidence)
+    }
+
+    /** A pulse read from the whole piece: its period and the first start of its grid, both finer than a frame. */
+    private class Pulse(val period: Double, val phase: Double)
+
+    /**
+     * Every band as one envelope: each is scaled to its own loudest start first, so a loud chorus or a soft intro cannot
+     * decide which band matters. The low band gets 55 % because it is the drum's body, the full spectrum 45 % because a
+     * track may have no drum at all.
+     */
+    private fun fuse(onset: FloatArray, low: FloatArray): FloatArray {
+        val top = onset.maxOrNull() ?: 0f
+        val lowTop = low.maxOrNull() ?: 0f
+        if (low.isEmpty() || lowTop <= 0f) {
+            return if (top > 0f) FloatArray(onset.size) { onset[it] / top } else onset
+        }
+        if (top <= 0f) return FloatArray(low.size) { low[it] / lowTop }
+        val n = minOf(onset.size, low.size)
+        return FloatArray(n) { 0.45f * onset[it] / top + 0.55f * low[it] / lowTop }
+    }
+
+    /**
+     * The one period and phase of the whole piece, from a comb filter: the atomic pulse is compared with every beat of
+     * a trial grid through a narrow Gaussian window, and the grid that collects the most start energy wins. This is the
+     * local score of Ellis's beat tracker and Scheirer's resonator bank in one: unlike the raw Fourier coefficient, it
+     * does not mistake the shape of a kick (or its ringing) for a different tempo, and a silent gap contributes zero.
+     * The coarse autocorrelation gives the octave; the comb gives the fraction of a frame and the phase.
+     */
+    private fun steadyPulse(onset: FloatArray, opening: Tempo, fps: Double): Pulse? {
+        val base = opening.period
+        if (base <= 1.0 || onset.isEmpty()) return null
+        // One frame is 23 ms; the kernel is about two frames wide, so a hit need not fall exactly on a sampled frame.
+        val smooth = gaussian(onset, 1.0)
+        var from = base * 0.98
+        var to = base * 1.02
+        var best = Pulse(base, 0.0)
+        var bestScore = -1.0
+        // Coarse to fine: the period is settled in milli-frames, the phase with it.
+        repeat(3) {
+            val step = (to - from) / 24
+            if (step <= 0.0) return@repeat
+            var at = from
+            while (at <= to) {
+                var phase = 0.0
+                while (phase < at) {
+                    var score = 0.0
+                    var count = 0
+                    var beat = phase
+                    while (beat < smooth.size) {
+                        score += sample(smooth, beat)
+                        count++
+                        beat += at
+                    }
+                    if (count > 0) {
+                        val mean = score / count
+                        if (mean > bestScore) {
+                            bestScore = mean
+                            best = Pulse(at, phase)
+                        }
+                    }
+                    // A tenth of a frame is 2.3 ms: finer than the ear's placement of a click.
+                    phase += (at / 96).coerceAtLeast(0.05)
+                }
+                at += step
+            }
+            val span = step * 2.0
+            from = (best.period - span).coerceAtLeast(2.0)
+            to = best.period + span
+        }
+        return best.takeIf { bestScore > 0.0 }
+    }
+
+    /** The envelope smoothed by a Gaussian of [sigma] frames: a hit is a small hill, not a one-frame spike. */
+    private fun gaussian(raw: FloatArray, sigma: Double): DoubleArray {
+        val radius = kotlin.math.ceil(sigma * 3.0).toInt().coerceAtLeast(1)
+        val kernel = DoubleArray(radius * 2 + 1) { i ->
+            val d = i - radius
+            exp(-0.5 * d * d / (sigma * sigma))
+        }
+        val total = kernel.sum()
+        return DoubleArray(raw.size) { i ->
+            var sum = 0.0
+            for (d in -radius..radius) {
+                val j = i + d
+                if (j in raw.indices) sum += raw[j] * kernel[d + radius]
+            }
+            sum / total
+        }
+    }
+
+    /** An envelope at a moment between frames. */
+    private fun sample(values: DoubleArray, at: Double): Double {
+        if (values.isEmpty() || at < 0.0 || at > values.lastIndex) return 0.0
+        val i = at.toInt()
+        val j = (i + 1).coerceAtMost(values.lastIndex)
+        return values[i] + (values[j] - values[i]) * (at - i)
+    }
+
+    /** The fixed grid [pulse] stands for, with one global phase shift onto the low drum. */
+    private fun steadyGrid(
+        onset: FloatArray,
+        low: FloatArray,
+        opening: Tempo,
+        fps: Double,
+        sampleRate: Int,
+        lengthMs: Long,
+    ): Grid? {
+        val pulse = steadyPulse(onset, opening, fps) ?: return null
+        val beats = ArrayList<Long>(1024)
+        var at = pulse.phase
+        while (frameMs(at, sampleRate) < lengthMs) {
+            beats += frameMs(at, sampleRate)
+            at += pulse.period
+        }
+        if (beats.size < 4) return null
+        // The Fourier phase is the middle of the envelope's fundamental; the low drum's actual peak is the foot. One
+        // median shift for the whole grid keeps every interval exactly as the model drew it.
+        val phased = phaseToLow(beats, low, sampleRate)
+        if (phased.size < 4) return null
+        return Grid(60.0 * fps / pulse.period, phased.first(), phased, opening.confidence)
+    }
+
+    /**
+     * How much the bands agree with one fixed grid, 0…1. The low drum has the stronger vote (70 %): the offbeat synth of
+     * a real dance track is a perfectly steady pulse too, but it stands half a beat away and must not be able to veto the
+     * kick. The full spectrum still contributes, and it is all there is for a track without a drum.
+     */
+    private fun steadySupport(fused: FloatArray, low: FloatArray, grid: Grid, fps: Double): Double {
+        val broad = steadyAgreement(fused, grid, fps)
+        val lowTop = low.maxOrNull() ?: 0f
+        if (low.isEmpty() || lowTop <= 0f) return broad
+        return (0.70 * steadyAgreement(low, grid, fps) + 0.30 * broad).coerceIn(0.0, 1.0)
+    }
+
+    /**
+     * How much the starts of one envelope agree with a fixed grid, 0…1. Each start votes at its phase within the beat it
+     * belongs to; a constant pulse puts all votes in one place, a tempo that drifts spreads them around the circle.
+     * Coverage is folded in so a short loud passage that fits cannot speak for a whole track.
+     */
+    private fun steadyAgreement(onset: FloatArray, grid: Grid, fps: Double): Double {
+        if (grid.beats.size < 4) return 0.0
+        val periodMs = medianGap(grid.beats)
+        if (periodMs <= 0.0) return 0.0
+        val period = periodMs * fps / 1000.0
+        if (period <= 1.0) return 0.0
+        val started = starts(onset, period, fps)
+        if (started.isEmpty()) return 0.0
+        val base = grid.beats.first().toDouble() * fps / 1000.0
+        var sumRe = 0.0
+        var sumIm = 0.0
+        var weight = 0.0
+        val covered = BooleanArray(grid.beats.size)
+        for (frame in started) {
+            val beatsAway = ((frame - base) / period).roundToInt()
+            val residual = frame - (base + beatsAway * period)
+            if (abs(residual) > period * 0.5) continue
+            val value = onset[frame.roundToInt().coerceIn(0, onset.lastIndex)].toDouble()
+            if (value <= 0.0) continue
+            val angle = 2.0 * PI * residual / period
+            sumRe += value * cos(angle)
+            sumIm += value * sin(angle)
+            weight += value
+            if (abs(residual) <= period * STEADY_SHARE && beatsAway in covered.indices) {
+                covered[beatsAway] = true
+            }
+        }
+        if (weight <= 0.0) return 0.0
+        val agreement = sqrt(sumRe * sumRe + sumIm * sumIm) / weight
+        val coverage = covered.count { it }.toDouble() / covered.size
+        return (agreement * (0.5 + 0.5 * coverage)).coerceIn(0.0, 1.0)
     }
 
     /**
@@ -282,18 +480,19 @@ object BeatGrid {
             // beat it can hear): the step before it adds what the path up to there had earned, less its own lean.
             var along = 0.0
             var from = -1
-            // Only the starts within one step can be the beat before this one; the walk back stops at the first too far.
+            // A gap may hold several beats with no start in it (a breakdown): the path leaps over it as a whole number
+            // of beats, so the pulse and phase continue instead of a new grid beginning after the pause. Every skipped
+            // beat costs something, so a real start between the two is always preferred when the sound has one.
             var i = j - 1
             while (i >= 0) {
                 val step = started[j] - started[i]
                 val expected = ((local[i] + local[j]) / 2).coerceAtLeast(1.0)
-                if (step > expected * (1.0 + TEMPO_SCAN)) {
-                    // The local period may have shrunk since i; the opening period is the widest this path may reach.
-                    if (step > period * (1.0 + TEMPO_SCAN)) break
-                }
-                if (step >= expected * (1.0 - TEMPO_SCAN) && step <= expected * (1.0 + TEMPO_SCAN)) {
-                    val lean = ln(step / expected)
-                    val earned = score[i] - TIGHTNESS * lean * lean
+                if (step > expected * MAX_LEAPS) break
+                val leaps = (step / expected).roundToInt().coerceAtLeast(1)
+                val per = step / leaps
+                val lean = ln(per / expected)
+                if (abs(lean) <= ln(1.0 + TEMPO_SCAN)) {
+                    val earned = score[i] - TIGHTNESS * lean * lean * leaps - SKIP_COST * (leaps - 1)
                     if (earned > along) {
                         along = earned
                         from = i
