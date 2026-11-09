@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Speed
@@ -47,8 +48,8 @@ import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectMusic
 import kotlin.math.roundToInt
 
-/** Which sheet stands open under the project (none, the sound's, the tempo's). */
-private enum class Sheet { NONE, SOUND, TEMPO }
+/** Which sheet stands open under the project (none, the sound's, the tempo's, the montage's). */
+private enum class Sheet { NONE, SOUND, TEMPO, MONTAGE }
 
 /**
  * The project's music (see `memory-bank/projects-plan.md`, P2/P3): the track it holds, and a toolbox under it. All the
@@ -90,11 +91,13 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Tool(tr("Звук", "Sound"), Icons.Filled.VolumeUp) { sheet = Sheet.SOUND }
             Tool(tr("Темп", "Tempo"), Icons.Filled.Speed) { sheet = Sheet.TEMPO }
+            Tool(tr("Монтаж", "Montage"), Icons.Filled.ContentCut) { sheet = Sheet.MONTAGE }
         }
     }
     when (sheet) {
         Sheet.SOUND -> SoundSheet(vm, p, onPick = { pick.launch(arrayOf("audio/*")) }, onDismiss = { sheet = Sheet.NONE })
         Sheet.TEMPO -> music?.let { TempoSheet(vm, it, clockMs, onDismiss = { sheet = Sheet.NONE }) }
+        Sheet.MONTAGE -> MontageSheet(vm, p, onDismiss = { sheet = Sheet.NONE })
         Sheet.NONE -> Unit
     }
 }

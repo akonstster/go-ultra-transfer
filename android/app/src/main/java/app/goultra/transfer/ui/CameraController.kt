@@ -28,8 +28,12 @@ import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.CameraHttpDataSource
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
+import app.goultra.transfer.camera.ClipEnergy
 import app.goultra.transfer.camera.ClipMaker
 import app.goultra.transfer.camera.CubeLut
+import app.goultra.transfer.camera.Montage
+import app.goultra.transfer.camera.Dynamics
+import app.goultra.transfer.camera.Scenario
 import app.goultra.transfer.camera.KeyFrames
 import app.goultra.transfer.camera.FrameReader
 import app.goultra.transfer.camera.Mp4Index
@@ -3153,7 +3157,11 @@ class CameraController(private val app: Application) {
 
     /** Card frames no project refers to any more (a piece removed, re-cut or its project deleted) leave the disk. */
     private fun pruneFrames(all: List<Project>) {
-        val kept = all.flatMap { p -> p.clips.map { "${it.file}@${it.fromMs}.jpg" } }.toSet() + "_black.jpg"
+        // The pieces before the last auto montage stay on disk too: «отменить авто» must not leave the user with a
+        // strip of blank cards, least of all while the camera is away.
+        val kept = all.flatMap { p ->
+            (p.clips + p.previous.orEmpty()).map { "${it.file}@${it.fromMs}.jpg" }
+        }.toSet() + "_black.jpg"
         scope.launch(Dispatchers.IO) {
             frameDir.listFiles()?.forEach { if (it.name !in kept && !it.name.endsWith(".tmp")) it.delete() }
         }
@@ -3185,27 +3193,30 @@ class CameraController(private val app: Application) {
 
     fun showProject(p: Project) {
         seenProject = p
+        // The last run's note belongs to the project it was made in, not to the next one.
+        montageNote = null
     }
 
     fun closeProject() {
         seenProject = null
+        montageNote = null
     }
 
     /** The ✕ on a card: the clip leaves the project; the base goes with its last clip (see [Project.without]). */
     fun removeProjectClip(clip: ProjectClip) {
         // [saveProject] reloads the list, and the open project comes with it.
-        seenProject?.let { saveProject(it.without(clip)) }
+        seenProject?.let { saveProject(it.without(clip).editedByHand()) }
     }
 
     /** Dragging a card along the strip: the piece takes another place in the project's order (see [Project.movedSequence]). */
     fun moveProjectClip(from: Int, to: Int) {
-        seenProject?.let { saveProject(it.movedSequence(from, to)) }
+        seenProject?.let { saveProject(it.movedSequence(from, to).editedByHand()) }
     }
 
     /** A still's length in the project, set by hand from its card (the slider opens on the length of a photo). */
     fun setClipLength(clip: ProjectClip, ms: Long) {
         seenProject?.let { p ->
-            saveProject(p.copy(clips = p.clips.map { if (it == clip) it.copy(toMs = it.fromMs + ms) else it }))
+            saveProject(p.copy(clips = p.clips.map { if (it == clip) it.copy(toMs = it.fromMs + ms) else it }).editedByHand())
         }
     }
 
@@ -3216,7 +3227,161 @@ class CameraController(private val app: Application) {
      */
     fun resyncProjectClips(edited: Map<String, List<Highlight>>) {
         if (edited.isEmpty()) return
-        seenProject?.let { open -> open.resynced(edited).takeIf { it != open }?.let(::saveProject) }
+        seenProject?.let { open ->
+            open.resynced(edited).takeIf { it != open }?.editedByHand()?.let(::saveProject)
+        }
+    }
+
+    /** The scenario and dynamics the auto montage uses: a hand pick, kept in the project like the mix. */
+    fun setProjectStyle(scenario: Scenario, dynamics: Dynamics) {
+        val p = seenProject ?: return
+        if (p.scenario == scenario && p.dynamics == dynamics) return
+        saveProject(p.copy(scenario = scenario, dynamics = dynamics))
+    }
+
+    /** True while the auto montage reads frames and cuts: the button waits, the sheet says what is happening. */
+    var montageRunning by mutableStateOf(false)
+        private set
+
+    /** What the last auto montage made, in the language the interface is in now; null when there was none. */
+    var montageNote by mutableStateOf<Phrase?>(null)
+        private set
+
+    /**
+     * The auto montage (P3): every source range is walked like a take and cut into the track's musical slots, so four
+     * long files become a whole cut instead of four cards. The previous list is kept for one undo; the sources' measured
+     * energy is saved beside their clips (it is a property of the file range, not of this run). A project with a base
+     * file or cutaways is left alone: that is the base mode's own montage, a separate step.
+     */
+    fun autoMontage() {
+        val open = seenProject ?: return
+        if (montageRunning) return
+        if (open.clips.isEmpty()) {
+            montageNote = Phrase("Сначала добавьте файлы в проект", "Add files to the project first")
+            return
+        }
+        if (open.baseFile != null || open.covers.isNotEmpty()) {
+            montageNote = Phrase(
+                "Для проекта с основой АВТО будет отдельным шагом",
+                "For a project with a base file the auto montage is a separate step",
+            )
+            return
+        }
+        montageRunning = true
+        montageNote = null
+        val before = open.clips
+        scope.launch {
+            try {
+                var project = open
+                if (project.scenario == Scenario.MUSIC || project.scenario == Scenario.ACTION) {
+                    project = project.copy(clips = measureEnergies(project))
+                }
+                // A hand edit while the frames were being read wins: the montage must not overwrite work it never saw.
+                val current = seenProject
+                if (current?.id != project.id || current.clips != before) {
+                    montageNote = Phrase("Проект изменился — АВТО не тронул его", "The project changed — the montage left it alone")
+                    return@launch
+                }
+                val music = project.music
+                val beats = music?.beats.orEmpty()
+                val peaks = music?.uri?.let(::musicPeaks)
+                val track = Montage.Track(
+                    beats = beats,
+                    lengthMs = music?.lengthMs ?: 0L,
+                    offsetMs = music?.offsetMs ?: 0L,
+                    activeDropMs = music?.activeDropMs,
+                    energy = peaks?.let { Montage.intensities(it) }.orEmpty(),
+                    fallbackBeatMs = fallbackBeat(beats),
+                )
+                val result = Montage.montage(
+                    scenario = project.scenario,
+                    dynamics = project.dynamics,
+                    pool = project.sequence.map { Montage.Source(it) },
+                    track = track,
+                    seed = project.createdMs xor System.currentTimeMillis(),
+                )
+                if (result.clips.isEmpty()) {
+                    montageNote = Phrase("Не из чего собирать — проверьте куски проекта", "Nothing to cut — check the project's clips")
+                    return@launch
+                }
+                val next = project.autoMontaged(result.clips)
+                saveProject(next)
+                montageNote = if (result.usedMs < result.targetMs - 1_000L) {
+                    Phrase(
+                        "Материала хватило на %s из %s",
+                        "The material filled %s of %s",
+                        arrayOf(
+                            formatDuration((result.usedMs / 1000L).toInt()),
+                            formatDuration((result.targetMs / 1000L).toInt()),
+                        ),
+                    )
+                } else {
+                    Phrase("Кусков: %s", "Clips: %s", arrayOf(result.clips.size))
+                }
+                log("АВТО: ${result.clips.size} кусков, ${result.usedMs} из ${result.targetMs} мс, слотов ${result.slots}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("АВТО: ${e.message}")
+                montageNote = Phrase("Не удалось собрать автоматически", "The auto montage failed")
+            } finally {
+                montageRunning = false
+            }
+        }
+    }
+
+    /** «Отменить авто»: the exact pieces from before the last auto montage. */
+    fun undoAutoMontage() {
+        val p = seenProject ?: return
+        val next = p.undoAutoMontage()
+        if (next != p) {
+            saveProject(next)
+            montageNote = Phrase("Авто отменено", "The auto montage was undone")
+        }
+    }
+
+    /**
+     * The movement of every video source that has no measured energy yet: five frames across its range, through the
+     * same frame reader the film strip uses. A decode that fails is simply «not measured» — the montage still runs.
+     */
+    private suspend fun measureEnergies(p: Project): List<ProjectClip> {
+        val cache = HashMap<String, Double?>()
+        return p.sequence.map { clip ->
+            if (clip.role == ProjectClip.Role.STILL || clip.energy != null) return@map clip
+            val file = projectFile(clip.file) ?: return@map clip
+            val key = "${clip.file}@${clip.fromMs}-${clip.toMs}"
+            val energy = cache.getOrPut(key) { measureEnergy(clip, file) }
+            if (energy != null) clip.copy(energy = energy) else clip
+        }
+    }
+
+    /** Five small frames of one range, scored 0…1; null when fewer than two frames could be read. */
+    private suspend fun measureEnergy(clip: ProjectClip, file: CameraFile): Double? = withContext(Dispatchers.IO) {
+        val reader = openFrameReader(file) ?: return@withContext null
+        try {
+            val span = (clip.toMs - clip.fromMs).coerceAtLeast(1L)
+            val frames = (1..5).mapNotNull { n ->
+                val at = clip.fromMs + span * n / 6
+                val frame = reader.frame(at, 96) ?: return@mapNotNull null
+                try {
+                    ClipEnergy.of(frame)
+                } finally {
+                    frame.recycle()
+                }
+            }
+            if (frames.size < 2) null else ClipEnergy.score(frames)
+        } catch (e: RuntimeException) {
+            log("энергия ${clip.file}: ${e.message}")
+            null
+        } finally {
+            reader.close()
+        }
+    }
+
+    /** The track's usual step, for a fallback grid and one-beat accents: the median gap of its own beats. */
+    private fun fallbackBeat(beats: List<Long>): Long {
+        val gaps = beats.zipWithNext().map { it.second - it.first }.filter { it > 0L }.sorted()
+        return gaps.getOrNull(gaps.size / 2)?.coerceIn(120L, 2_000L) ?: 500L
     }
 
     /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
@@ -3545,7 +3710,9 @@ class CameraController(private val app: Application) {
             // Added again on purpose: pieces taken out of that file by hand are welcome back.
             if (added.isNotEmpty()) {
                 val names = added.map { it.file }.toSet()
-                saveProject(p.copy(clips = p.clips + added, hidden = p.hidden.filterNot { it.file in names }))
+                saveProject(
+                    p.copy(clips = p.clips + added, hidden = p.hidden.filterNot { it.file in names }).editedByHand(),
+                )
             }
             message = tr("В «%s»: +%s кусков", "Into «%s»: +%s clips").format(p.name, added.size) +
                 if (skipped > 0) tr(", %s без длины пропущено", ", %s without a duration skipped").format(skipped) else ""

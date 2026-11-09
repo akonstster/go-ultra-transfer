@@ -192,6 +192,24 @@ data class Project(
     }
 
     /**
+     * The project with [next] as the result of an auto montage: the list before it is kept in [previous] for «отменить
+     * авто». The mix, the track and the scenario stay exactly as they are; only the pieces and their undo snapshot move.
+     */
+    fun autoMontaged(next: List<ProjectClip>): Project {
+        if (next.isEmpty() || next == clips) return this
+        return copy(previous = clips, clips = next)
+    }
+
+    /** «Отменить авто»: the pieces as they were before the last auto montage; one undo, as the plan says. */
+    fun undoAutoMontage(): Project = previous?.let { copy(clips = it, previous = null) } ?: this
+
+    /**
+     * A change made by hand after an auto montage invalidates its undo snapshot: restoring the snapshot later would
+     * silently throw that hand work away. The «Авто» badges stay, so the origin of the pieces is still visible.
+     */
+    fun editedByHand(): Project = if (previous == null) this else copy(previous = null)
+
+    /**
      * The project with the clips of the files edited on the phone brought in line with their pieces (the plan §7): the
      * pieces of an edited file are what the project takes of it, put where that file's clips sit in the order. Files
      * nobody edited stay as they are — the camera's marks are not ours to re-read, and an unreachable camera says
@@ -203,6 +221,10 @@ data class Project(
         for ((name, pieces) in edited) {
             val mine = next.clips.filter { it.file == name }
             if (mine.isEmpty()) continue
+            // An auto montage is an editorial snapshot, not a live view of the file: replacing its several musical
+            // pieces with the file's few marked ranges would silently undo the whole cut. Source edits instead show as
+            // stale ranges, and «Авто» can be run again when the user wants the new material.
+            if (mine.any { it.auto }) continue
             val wanted = pieces
                 .filterNot { piece -> next.hidden.any { it.file == name && it.fromMs == piece.startMs && it.toMs == (piece.endMs ?: piece.startMs) } }
                 .map { ProjectClip(name, it.startMs, it.endMs ?: it.startMs, auto = mine.first().auto, role = mine.first().role) }

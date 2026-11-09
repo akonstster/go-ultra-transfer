@@ -1,6 +1,7 @@
 package app.goultra.transfer.camera
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -168,13 +169,14 @@ class ProjectTest {
     }
 
     @Test
-    fun `the clips of an edited file follow its new pieces`() {
-        val p = sample()
+    fun `manual clips of an edited file follow its new pieces`() {
+        // No piece here came from the auto montage: these are ordinary live links.
+        val p = sample().copy(clips = sample().clips.map { it.copy(auto = false) })
         // The first file was edited in the film strip: one piece, in other words.
         val edited = mapOf("VID_20261105_211421_165.mp4" to listOf(Highlight(2_000, 5_000)))
         val next = p.resynced(edited)
         assertEquals(listOf(2_000L, 5_000L), listOf(next.clips[0].fromMs, next.clips[0].toMs))
-        assertTrue(next.clips[0].auto)                          // still the auto montage's piece
+        assertFalse(next.clips[0].auto)
         assertEquals(p.clips[1], next.clips[1])                 // the other file's clips keep their place
         assertEquals(3, next.clips.size)
         // The pieces are what the project takes of that file now: nothing reads as «gone from the file».
@@ -186,8 +188,43 @@ class ProjectTest {
     }
 
     @Test
+    fun `an auto montage is not silently collapsed by a source edit`() {
+        val p = sample()
+        val edited = mapOf("VID_20261105_211421_165.mp4" to listOf(Highlight(2_000, 5_000)))
+        val next = p.resynced(edited)
+        // The cut stays as it was made; the range the source lost is reported as stale, not rewritten behind the cut.
+        assertEquals(p.clips, next.clips)
+        assertTrue(next.clips[0].auto)
+        assertEquals(listOf("VID_20261105_211421_165.mp4"), next.staleClips(edited).map { it.file })
+    }
+
+    @Test
+    fun `the auto montage keeps one undo snapshot`() {
+        val p = sample()
+        val cut = listOf(
+            ProjectClip("a.mp4", 0, 2_000, auto = true),
+            ProjectClip("a.mp4", 2_000, 4_000, auto = true),
+        )
+        val auto = p.autoMontaged(cut)
+        assertEquals(p.clips, auto.previous)
+        assertEquals(cut, auto.clips)
+        // A hand edit after the montage invalidates the snapshot: undo must not throw that work away.
+        assertEquals(null, auto.editedByHand().previous)
+        assertEquals(auto.clips, auto.editedByHand().clips)
+        // The snapshot survives JSON, and undo restores exactly the pieces before the cut.
+        val back = Project.decode(Project.encode(auto))!!
+        assertEquals(auto.previous, back.previous)
+        assertEquals(p.clips, back.undoAutoMontage().clips)
+        assertNull(back.undoAutoMontage().previous)
+        // Nothing to undo is the project itself, not an empty timeline.
+        val noUndo = p.copy(previous = null)
+        assertEquals(noUndo, noUndo.undoAutoMontage())
+    }
+
+    @Test
     fun `a clip taken out by hand does not come back with an edit`() {
-        val p = sample().copy(clips = sample().clips + ProjectClip("VID_20261105_211421_165.mp4", 6_000, 7_000))
+        val base = sample().copy(clips = sample().clips.map { it.copy(auto = false) })
+        val p = base.copy(clips = base.clips + ProjectClip("VID_20261105_211421_165.mp4", 6_000, 7_000))
         val one = p.without(p.clips[3])                         // the second piece of the first file, dropped
         assertEquals(3, one.clips.size)
         val next = one.resynced(
