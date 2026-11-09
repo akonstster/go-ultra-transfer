@@ -2,8 +2,10 @@ package app.goultra.transfer.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +13,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -21,6 +25,7 @@ import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -28,6 +33,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -68,6 +74,8 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
     LaunchedEffect(music?.uri) { music?.let { vm.analyseMusic(it) } }
     val peaks = remember(music?.uri, vm.musicVersion) { music?.let { vm.musicPeaks(it.uri) } }
     val failed = music != null && music.uri in vm.musicFailed
+    // The wave is written before the grid and drops are saved: the lane must not stop saying «analysing» at the wave.
+    val analysing = music != null && music.uri in vm.musicAnalysing
     var sheet by remember { mutableStateOf(Sheet.NONE) }
 
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
@@ -86,12 +94,32 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
                 overflow = TextOverflow.Ellipsis,
             )
             // Only a track has a state to report: without one there is nothing being analysed.
-            if (music != null) TrackState(peaks, failed)
+            if (music != null) TrackState(peaks, failed, analysing)
         }
-        Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Tool(tr("Звук", "Sound"), Icons.Filled.VolumeUp) { sheet = Sheet.SOUND }
-            Tool(tr("Темп", "Tempo"), Icons.Filled.Speed) { sheet = Sheet.TEMPO }
-            Tool(tr("Монтаж", "Montage"), Icons.Filled.ContentCut) { sheet = Sheet.MONTAGE }
+        // An explicit panel with a scrolling row: three equal-weight buttons squeezed the last one («Монтаж» was cut)
+        // on a phone, and a toolbox reads better as one surface than as loose chips over the cards.
+        Surface(
+            Modifier.fillMaxWidth().padding(top = 4.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            tonalElevation = 2.dp,
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+                Text(
+                    tr("Инструменты", "Tools"),
+                    Modifier.padding(start = 4.dp, bottom = 4.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Tool(tr("Звук", "Sound"), Icons.Filled.VolumeUp) { sheet = Sheet.SOUND }
+                    Tool(tr("Темп", "Tempo"), Icons.Filled.Speed) { sheet = Sheet.TEMPO }
+                    Tool(tr("Монтаж", "Montage"), Icons.Filled.ContentCut) { sheet = Sheet.MONTAGE }
+                }
+            }
         }
     }
     when (sheet) {
@@ -102,13 +130,24 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
     }
 }
 
-/** A toolbox button: its icon and its name, the two of them the whole of it. */
+/** A toolbox button: a fixed, readable card. It never takes an equal share of the row, so its label can scroll. */
 @Composable
 private fun Tool(name: String, icon: ImageVector, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick) {
-        Icon(icon, null, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(name, style = MaterialTheme.typography.labelLarge)
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = Modifier.width(96.dp).height(62.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(icon, null, Modifier.size(18.dp))
+            Spacer(Modifier.height(2.dp))
+            Text(
+                name,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 /** All the sound there is: the track (picked, replaced, taken off) and the two levels under it. */
@@ -328,14 +367,24 @@ private fun ClickNudge(enabled: Boolean) {
  * being read, or not readable at all.
  */
 @Composable
-private fun TrackState(peaks: FloatArray?, failed: Boolean) {
-    if (peaks != null && peaks.isNotEmpty()) return
-    Text(
-        if (failed) tr("Трек не читается", "The track could not be read")
-        else tr("Анализируем трек…", "Analysing the track…"),
-        style = MaterialTheme.typography.bodySmall,
-        color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+private fun TrackState(peaks: FloatArray?, failed: Boolean, analysing: Boolean) {
+    if (!analysing && (peaks != null && peaks.isNotEmpty())) return
+    val text = when {
+        failed -> tr("Трек не читается", "The track could not be read")
+        analysing || peaks == null || peaks.isEmpty() -> tr("Анализируем трек…", "Analysing the track…")
+        else -> null
+    } ?: return
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (analysing) {
+            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+            Spacer(Modifier.width(5.dp))
+        }
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /**

@@ -104,6 +104,8 @@ dependencies {
     // In-app preview of files still on the camera (the system player cannot reach the camera's Wi-Fi).
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    // The preview's disk cache needs the standalone cache database (not pulled by exoplayer).
+    implementation("androidx.media3:media3-database:1.11.1")
     // Colour over I-Log videos in the viewer: a LUT, brightness, saturation (GL effects in the player).
     implementation("androidx.media3:media3-effect:1.11.1")
     implementation("androidx.media3:media3-transformer:1.11.1")

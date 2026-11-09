@@ -196,9 +196,22 @@ data class Project(
      * авто». The mix, the track and the scenario stay exactly as they are; only the pieces and their undo snapshot move.
      */
     fun autoMontaged(next: List<ProjectClip>): Project {
-        if (next.isEmpty() || next == clips) return this
-        return copy(previous = clips, clips = next)
+        if (next.isEmpty()) return this
+        val base = montageBase()
+        if (next == clips) return this
+        // Rebuilding an existing auto montage must keep the original pieces as the one undo point: using the last
+        // result as the new snapshot made «отменить авто» return a previous montage instead of the user's material.
+        if (next == base) return copy(clips = base, previous = null)
+        return copy(previous = base, clips = next)
     }
+
+    /**
+     * The material a new auto montage is built from. Once a montage exists, its result is not material: the snapshot
+     * taken before it is. Otherwise every rerun would chop the previous montage's small pieces again and lose the
+     * original ranges that undo promises to bring back.
+     */
+    fun montageBase(): List<ProjectClip> =
+        if (previous != null && clips.isNotEmpty() && clips.all { it.auto }) previous else clips
 
     /** «Отменить авто»: the pieces as they were before the last auto montage; one undo, as the plan says. */
     fun undoAutoMontage(): Project = previous?.let { copy(clips = it, previous = null) } ?: this

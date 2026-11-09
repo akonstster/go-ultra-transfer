@@ -222,6 +222,33 @@ class ProjectTest {
     }
 
     @Test
+    fun `a rebuilt auto montage keeps the original pieces as its one undo`() {
+        val original = Project(
+            id = "1", name = "Повтор",
+            clips = listOf(
+                ProjectClip("a.mp4", 0, 30_000),
+                ProjectClip("b.mp4", 0, 30_000),
+            ),
+        )
+        val auto1 = original.autoMontaged(
+            listOf(ProjectClip("a.mp4", 0, 5_000, auto = true), ProjectClip("b.mp4", 0, 5_000, auto = true)),
+        )
+        // The second run is built from the original takes, not from the first run's small pieces.
+        assertEquals(original.clips, auto1.montageBase())
+        val auto2 = auto1.autoMontaged(
+            listOf(ProjectClip("b.mp4", 0, 8_000, auto = true), ProjectClip("a.mp4", 10_000, 18_000, auto = true)),
+        )
+        assertEquals(original.clips, auto2.montageBase())
+        assertEquals(original.clips, auto2.previous)
+        assertEquals(original.clips, auto2.undoAutoMontage().clips)
+        assertNull(auto2.undoAutoMontage().previous)
+        // And the snapshot survives a save and load just as it did before.
+        val back = Project.decode(Project.encode(auto2))!!
+        assertEquals(original.clips, back.montageBase())
+        assertEquals(original.clips, back.undoAutoMontage().clips)
+    }
+
+    @Test
     fun `a clip taken out by hand does not come back with an edit`() {
         val base = sample().copy(clips = sample().clips.map { it.copy(auto = false) })
         val p = base.copy(clips = base.clips + ProjectClip("VID_20261105_211421_165.mp4", 6_000, 7_000))

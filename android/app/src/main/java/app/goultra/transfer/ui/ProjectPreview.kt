@@ -56,10 +56,13 @@ import androidx.media3.exoplayer.image.BitmapFactoryImageDecoder
 import androidx.media3.exoplayer.image.ImageOutput
 import androidx.media3.exoplayer.image.ImageRenderer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
+import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.jpeg.JpegExtractor
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicInteger
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.ProjectClip
 import app.goultra.transfer.camera.ProjectMusic
@@ -69,9 +72,11 @@ import app.goultra.transfer.camera.ProjectMusic
  * its length is how long the picture stands: the player holds it that long and moves on to the next piece.
  */
 @androidx.annotation.OptIn(UnstableApi::class)
-private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile): MediaItem {
+private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile, id: String): MediaItem {
     val uri = if (file.isOnPhone) file.localUri ?: clip.file else vm.previewUrl(file)
-    val builder = MediaItem.Builder().setUri(uri)
+    // A stable per-card id: the same piece may legally appear twice in a project, and the preload manager keys
+    // sources by MediaItem equality, while the player needs two independent items.
+    val builder = MediaItem.Builder().setUri(uri).setMediaId(id)
     if (clip.role == ProjectClip.Role.STILL) {
         return builder.setImageDurationMs(clip.durationMs.coerceAtLeast(1L)).build()
     }
@@ -197,9 +202,15 @@ internal fun ProjectPreview(
     }
     // Where the picture of a still lands.
     val photo = remember { PhotoSink() }
+    // The preload manager reads the pieces around the current one into the same disk cache the player uses. The
+    // target control keeps it to the neighbours: a project may hold hundreds of pieces, but only a few are useful now.
+    val preloadIndex = remember { AtomicInteger(0) }
+    // Photos and offline frames are skipped: their decode is local and quick, and their image renderer shares the
+    // PhotoSink the preview draws — a preloaded next photo must not appear over the current piece.
+    val noPreload = remember { java.util.concurrent.ConcurrentHashMap.newKeySet<Int>() }
     // The stock renderers, and an image renderer after them: a still is shown by the player itself, so the playlist
     // plays photos and pieces alike and one clock counts them both.
-    val player = remember(factory, photo) {
+    val engine = remember(factory, photo) {
         // In place of the stock image renderer, not after it: the track selector gives a picture to the first one
         // that takes it, so a renderer added at the end never saw a photo (the stock one decoded it whole, to nowhere).
         val renderers = object : DefaultRenderersFactory(context) {
@@ -207,10 +218,31 @@ internal fun ProjectPreview(
                 out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory(context).setMaxOutputSize(STILL_SIDE), photo))
             }
         }
-        ExoPlayer.Builder(context, factory)
+        val target = TargetPreloadStatusControl<Int, DefaultPreloadManager.PreloadStatus> { index ->
+            if (index in noPreload) {
+                DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_NOT_PRELOADED
+            } else when (kotlin.math.abs(index - preloadIndex.get())) {
+                // A montage piece is often 2–4 s: 1.5 s left the tail of the next piece to be fetched during
+                // playback, which showed up as a hitch at the join. Cover a whole ordinary piece.
+                1, 2 -> DefaultPreloadManager.PreloadStatus.specifiedRangeLoaded(4_000L)
+                3 -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_SOURCE_PREPARED
+                else -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_NOT_PRELOADED
+            }
+        }
+        val builder = DefaultPreloadManager.Builder(context, target)
+            .setMediaSourceFactory(factory)
             .setRenderersFactory(renderers)
-            .build()
-            .apply { playWhenReady = false }
+        val player = builder.buildExoPlayer(ExoPlayer.Builder(context)).apply { playWhenReady = false }
+        player to builder.build()
+    }
+    val player = engine.first
+    val preload = engine.second
+    // The media items currently held by the manager, so a changed playlist releases exactly those.
+    val loadedMedia = remember(player) { mutableListOf<MediaItem>() }
+    fun preloadAt(index: Int) {
+        preloadIndex.set(index)
+        preload.setCurrentPlayingIndex(index)
+        preload.invalidate()
     }
     // What the player holds right now: its indices mean this list, not the one just composed.
     val inPlayer = remember(player) { mutableListOf<Piece>() }
@@ -242,6 +274,7 @@ internal fun ProjectPreview(
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 current = player.currentMediaItemIndex
+                preloadAt(current)
                 photo.shown = null
             }
 
@@ -258,6 +291,7 @@ internal fun ProjectPreview(
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
+            preload.release()
             player.release()
         }
     }
@@ -265,9 +299,10 @@ internal fun ProjectPreview(
     LaunchedEffect(carrying) {
         if (carrying) player.pause()
     }
-    // The video's own sound under the music: at the project's level while there is music (P2).
-    LaunchedEffect(music?.uri, videoVolume) {
-        player.volume = if (music == null) 1f else videoVolume.toFloat().coerceIn(0f, 1f)
+    // The video's own sound: the project's slider always controls it, with or without a track. (Without music the
+    // slider used to fall back to 1.0, so moving it changed the saved project and nothing that was heard.)
+    LaunchedEffect(videoVolume) {
+        player.volume = videoVolume.toFloat().coerceIn(0f, 1f)
     }
     // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
     // sound need not. Its own reading of that time is what the click keeps time with: what is heard, not what is drawn.
@@ -284,17 +319,38 @@ internal fun ProjectPreview(
             ?: resume
         // A piece out of reach plays as a picture held for its length: the clock and the order stay the project's own.
         val media = items.map { piece ->
-            if (!piece.offline) mediaItem(vm, piece.clip, piece.file)
+            // The playlist signature keeps an old item from comparing equal to its replacement when a rebuild keeps
+            // the same card (moving a card changes indices, adding one shifts them), so releasing the old is safe.
+            val id = "piece-${signature.hashCode()}-${piece.at.index}"
+            if (!piece.offline) mediaItem(vm, piece.clip, piece.file, id)
             else MediaItem.Builder()
+                .setMediaId(id)
                 .setUri(vm.offlineStill(piece.file, piece.clip.fromMs))
                 .setImageDurationMs(piece.clip.durationMs.coerceAtLeast(1L))
                 .build()
         }
-        player.setMediaItems(media)
+        // The preloader reads the neighbours into the same disk cache; the player then opens its own sources and
+        // finds those bytes already cached. Keeping the two source sets apart means a playlist rebuild can never
+        // release a source out from under the player.
+        val oldMedia = loadedMedia.toList()
+        loadedMedia.clear()
+        noPreload.clear()
+        items.forEachIndexed { index, piece ->
+            if (piece.offline || piece.clip.role == ProjectClip.Role.STILL) noPreload.add(index)
+        }
+        preload.addMediaItems(media, media.indices.toList())
+        loadedMedia.addAll(media)
+        // The player takes the preloaded sources themselves: setMediaItems(MediaItem) would build fresh sources
+        // and throw away everything the preloader has read into the cache.
+        val sources = media.map { item -> preload.getMediaSource(item) ?: factory.createMediaSource(item) }
+        player.setMediaSources(sources)
+        if (oldMedia.isNotEmpty()) preload.removeMediaItems(oldMedia)
         inPlayer.clear()
         inPlayer.addAll(items)
         player.prepare()
         val at = if (was == null) -1 else items.indexOfFirst { it.clip == was.first }
+        val startAt = if (at >= 0) at else 0
+        preloadAt(startAt)
         if (at >= 0) player.seekTo(at, minOf(was!!.second, items[at].clip.durationMs))
     }
     // The clock follows the player whether or not it plays, and it counts the whole timeline, not the item played.
@@ -310,7 +366,9 @@ internal fun ProjectPreview(
             // And the project's own clock, for the timeline: the line it draws must move with the picture, so the loop
             // is quick while the film plays and slow while it stands.
             onClockNow(shown, player.isPlaying)
-            delay(if (player.isPlaying) 50 else 250)
+            // The line and the slider need a moving clock, not a 20 Hz recomposition of the whole screen: at
+            // 20 Hz the UI missed ~21 % of frame deadlines on the phone while the film was playing (gfxinfo).
+            delay(if (player.isPlaying) 100 else 500)
         }
     }
     // A card tapped: the preview jumps to that piece — video or photo alike — and plays on from it.
@@ -318,6 +376,7 @@ internal fun ProjectPreview(
         val at = inPlayer.indexOfFirst { it.at.index == play }
         if (at >= 0) {
             player.seekTo(at, 0L)
+            preloadAt(at)
             player.play()
         }
         if (play != null) onPlayed()
@@ -329,6 +388,7 @@ internal fun ProjectPreview(
         if (inPlayer.isEmpty()) return@LaunchedEffect
         val (i, at) = seekPoint(lengthsOf(inPlayer.map { it.clip }), ms)
         player.seekTo(i, at)
+        preloadAt(i)
         onSeekedNow()
     }
 
@@ -383,7 +443,10 @@ internal fun ProjectPreview(
                 onValueChangeFinished = {
                     dragging?.let { ms ->
                         val (i, at) = seekPoint(lengthsOf(inPlayer.map { it.clip }), ms.toLong())
-                        if (inPlayer.isNotEmpty()) player.seekTo(i, at)
+                        if (inPlayer.isNotEmpty()) {
+                            player.seekTo(i, at)
+                            preloadAt(i)
+                        }
                         shown = ms.toLong()
                     }
                     dragging = null

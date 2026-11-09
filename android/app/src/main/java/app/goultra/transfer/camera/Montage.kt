@@ -15,10 +15,16 @@ import kotlin.random.Random
  */
 object Montage {
     /** A piece shorter than this is not worth a card (and a cut no eye can follow): it is left in the source. */
-    const val MIN_PIECE_MS = 250L
+    const val MIN_PIECE_MS = 400L
 
     /** The longest slot the beat-count rule may ask for: a slow track still gets a cut inside a long stretch. */
     const val MAX_PIECE_MS = 16_000L
+
+    /** Ordinary plans are kept at least this long; shorter pieces are reserved for accents and drops. */
+    const val MIN_REGULAR_MS = 900L
+
+    /** Three quick pieces in a row are a rhythm; a fourth starts to look like a broken screen. */
+    const val MAX_SHORT_RUN = 3
 
     /**
      * One source range: [clip] as the project knows it, plus the part of it the montage may still take. They are the
@@ -47,6 +53,8 @@ object Montage {
         val lengthMs: Long = 0L,
         val offsetMs: Long = 0L,
         val activeDropMs: Long? = null,
+        /** Every drop the analysis found: each one is a boundary, while [activeDropMs] is the main accent. */
+        val drops: List<Long> = emptyList(),
         val energy: List<Float> = emptyList(),
         val energyStepMs: Long = 1_000L,
         val fallbackBeatMs: Long = 500L,
@@ -59,6 +67,8 @@ object Montage {
         val usedMs: Long,
         val exhausted: Boolean,
         val slots: Int,
+        /** The result is editorially the same as the pool: saving it would only add joins, not change the film. */
+        val unchanged: Boolean = false,
     )
 
     /** A musical slot between two cuts: its place in the project and the loudness there. */
@@ -75,7 +85,14 @@ object Montage {
     fun slots(scenario: Scenario, dynamics: Dynamics, track: Track, targetMs: Long, seed: Long = 0L): List<Slot> {
         if (targetMs < MIN_PIECE_MS) return emptyList()
         val offset = track.offsetMs.coerceAtLeast(0L)
-        val drop = track.activeDropMs
+        val drops = (track.drops + listOfNotNull(track.activeDropMs))
+            .asSequence()
+            .map { it - offset }
+            .filter { it > 0L && it < targetMs }
+            .distinct()
+            .sorted()
+            .toList()
+        val activeDrop = track.activeDropMs
             ?.let { it - offset }
             ?.takeIf { it > 0L && it < targetMs }
         val fallback = track.fallbackBeatMs.coerceIn(120L, 2_000L)
@@ -86,30 +103,38 @@ object Montage {
             .sorted()
             .toList()
         // A track the analysis could not beat out is still cut evenly: the fallback grid plays the part of the beats,
-        // and every slot lasts the same number of its steps.
+        // and every slot lasts a whole number of its steps.
         val beatCuts = found.ifEmpty {
             (fallback until targetMs step fallback).map { it }.toList()
         }
-        val cuts = (listOf(0L) + beatCuts + listOfNotNull(drop) + listOf(targetMs))
+        val cuts = (listOf(0L) + beatCuts + drops + listOf(targetMs))
             .distinct()
             .sorted()
         if (cuts.size < 2) return listOf(Slot(0L, targetMs, intensity(track, 0L)))
         // The indices of the real beat boundaries, so the step counts beats and not arbitrary forced cuts.
         val beatSet = beatCuts.toHashSet()
-        val dropIndex = drop?.let { cuts.indexOf(it) }?.takeIf { it > 0 } ?: -1
+        val forcedSet = drops.toHashSet()
+        val dropIndices = drops.mapNotNull { at -> cuts.indexOf(at).takeIf { it > 0 } }
         val slots = ArrayList<Slot>(cuts.size)
         var i = 0
         var guard = 0
         while (i < cuts.lastIndex && guard++ < 100_000) {
             var j = i + 1
-            val beats = step(scenario, dynamics, cuts[i], targetMs, drop, fallback, seed, i)
+            // A run of very short pieces is allowed as an accent, but never as the normal way of cutting: the next
+            // step is made long before a fourth short piece can follow.
+            val shortRun = slots.takeLastWhile { it.durationMs < MIN_REGULAR_MS }.size
+            val beats = step(
+                scenario, dynamics, cuts[i], targetMs, activeDrop, drops, fallback, seed, i,
+                intensity(track, cuts[i]), shortRun,
+            )
             // Forced cuts (a drop, a stray beat found apart from the fixed grid) count as one boundary each.
-            var taken = if (cuts[j] in beatSet || cuts[j] == drop) 1 else 0
+            var taken = if (cuts[j] in beatSet || cuts[j] in forcedSet) 1 else 0
             while (j < cuts.lastIndex && taken < beats) {
                 j++
-                if (cuts[j] in beatSet || cuts[j] == drop) taken++
+                if (cuts[j] in beatSet || cuts[j] in forcedSet) taken++
             }
-            if (dropIndex in (i + 1) until j) j = dropIndex
+            // Every drop is a boundary, not only the active one the pattern accents.
+            dropIndices.firstOrNull { it in (i + 1) until j }?.let { j = it }
             slots += Slot(cuts[i], cuts[j], intensity(track, cuts[i]))
             i = j
         }
@@ -227,51 +252,124 @@ object Montage {
             if (exhausted) break
             filledSlots++
         }
-        val used = out.sumOf { it.durationMs }
-        return Result(out, targetMs, used, exhausted || used < targetMs, filledSlots)
+        // Slots are editorial, joins are technical: two neighbouring pieces of one uninterrupted range are one piece.
+        // This also makes «did the montage change anything?» an honest question.
+        val clips = coalesced(out)
+        val used = clips.sumOf { it.durationMs }
+        val unchanged = editSignature(clips) == editSignature(sources.map { it.clip })
+        return Result(clips, targetMs, used, exhausted || used < targetMs, filledSlots, unchanged)
     }
 
-    /** The number of beats a slot should last under the chosen scenario and dynamics. */
+    /** Merge adjacent pieces of one source when their ranges touch: the cut adds nothing the eye can see. */
+    private fun coalesced(clips: List<ProjectClip>): List<ProjectClip> {
+        if (clips.size < 2) return clips
+        val out = ArrayList<ProjectClip>(clips.size)
+        for (clip in clips) {
+            val prev = out.lastOrNull()
+            val join = prev != null &&
+                prev.role != ProjectClip.Role.STILL &&
+                clip.role != ProjectClip.Role.STILL &&
+                prev.file == clip.file &&
+                prev.role == clip.role &&
+                prev.atMs == clip.atMs &&
+                prev.toMs == clip.fromMs
+            if (join) out[out.lastIndex] = prev!!.copy(toMs = clip.toMs) else out += clip
+        }
+        return out
+    }
+
+    /** What the editor sees: a run of pieces, without the bookkeeping of auto/energy. */
+    private data class EditKey(
+        val file: String,
+        val fromMs: Long,
+        val toMs: Long,
+        val role: ProjectClip.Role,
+        val atMs: Long?,
+    )
+
+    private fun editSignature(clips: List<ProjectClip>): List<EditKey> =
+        clips.map { EditKey(it.file, it.fromMs, it.toMs, it.role, it.atMs) }
+
+    private val EVEN_PATTERNS = arrayOf(
+        intArrayOf(8, 8, 12, 8),
+        intArrayOf(8, 12, 8, 8),
+        intArrayOf(12, 8, 8, 12),
+    )
+    private val RHYTHMIC_PATTERNS = arrayOf(
+        intArrayOf(8, 4, 12, 4, 4, 8),
+        intArrayOf(4, 8, 4, 4, 8, 12),
+        intArrayOf(8, 4, 4, 2, 4, 8),
+    )
+    private val CALM_PATTERN = intArrayOf(8, 8, 12, 8)
+    private val BUILD_PATTERN = intArrayOf(8, 4, 4, 2, 2)
+    private val PEAK_PATTERN = intArrayOf(4, 2, 2, 1, 1, 4, 8)
+    private val MOOD_PATTERNS = arrayOf(
+        intArrayOf(12, 8, 16, 12),
+        intArrayOf(8, 12, 12, 16),
+    )
+    private val SHUFFLE_PATTERNS = arrayOf(
+        intArrayOf(8, 4, 8, 4, 4, 8),
+        intArrayOf(12, 8, 16, 12),
+        intArrayOf(8, 12, 8, 8),
+        intArrayOf(4, 8, 4, 12, 4),
+    )
+
+    /**
+     * The number of beats a slot should last. The old rule asked for one fixed count per dynamic (RHYTHMIC was always
+     * two), which turned a three-minute track into the same mechanical flicker. A slot now takes its place in a short
+     * pattern, the pattern follows the loudness and the nearest drop, and a run of quick pieces forces a long one.
+     */
     private fun step(
         scenario: Scenario,
         dynamics: Dynamics,
         atMs: Long,
         targetMs: Long,
-        drop: Long?,
+        activeDrop: Long?,
+        drops: List<Long>,
         fallbackBeatMs: Long,
         seed: Long,
         slotIndex: Int,
+        intensity: Float,
+        shortRun: Int,
     ): Int {
         val share = if (targetMs <= 0L) 0.0 else atMs.toDouble() / targetMs
-        var beats = when (dynamics) {
-            Dynamics.EVEN -> 4
-            Dynamics.RHYTHMIC -> 2
-            Dynamics.MOOD -> if (share < 0.2 || share > 0.82) 8 else 4
+        val nearDrop = drops.any { drop ->
+            abs(atMs - drop) <= 2L * fallbackBeatMs ||
+                (drop > atMs && drop - atMs <= 4L * fallbackBeatMs)
+        }
+        val afterDrop = drops.any { it in ((atMs - 2L * fallbackBeatMs)..atMs) }
+        val phrase = (slotIndex / 4).coerceAtLeast(0)
+        val pattern = when (dynamics) {
+            Dynamics.EVEN -> EVEN_PATTERNS[phrase % EVEN_PATTERNS.size]
+            Dynamics.RHYTHMIC -> RHYTHMIC_PATTERNS[phrase % RHYTHMIC_PATTERNS.size]
+            Dynamics.MOOD -> MOOD_PATTERNS[phrase % MOOD_PATTERNS.size]
             Dynamics.DYNAMIC -> when {
-                drop != null && abs(atMs - drop) <= 2L * fallbackBeatMs -> 1
-                share < 0.18 -> 4
-                share > 0.86 -> 4
-                else -> 2
+                nearDrop && atMs < (activeDrop ?: Long.MAX_VALUE) -> PEAK_PATTERN
+                afterDrop -> CALM_PATTERN
+                intensity < 0.30f -> CALM_PATTERN
+                intensity > 0.82f -> BUILD_PATTERN
+                share < 0.18 || share > 0.86 -> CALM_PATTERN
+                else -> RHYTHMIC_PATTERNS[phrase % RHYTHMIC_PATTERNS.size]
             }
             Dynamics.SHUFFLE -> {
-                val r = Random(seed xor (slotIndex.toLong() * 0x9E3779B9L)).nextInt(100)
-                when {
-                    r < 25 -> 2
-                    r < 80 -> 4
-                    else -> 8
-                }
+                val pick = Random(seed xor (phrase.toLong() * 0x9E3779B9L)).nextInt(SHUFFLE_PATTERNS.size)
+                SHUFFLE_PATTERNS[pick]
             }
         }
-        // A scenario is a bias, not a cage: it makes the cutting shorter or longer by at most one step.
+        var beats = pattern[(slotIndex + phrase) % pattern.size]
+        if (shortRun >= MAX_SHORT_RUN) beats = maxOf(beats, 8)
+        // A scenario is a bias, not a cage: it shifts the pattern, while the limits below still apply.
         beats = when (scenario) {
-            Scenario.MUSIC, Scenario.ACTION -> if (beats > 1) beats - 1 else beats
-            Scenario.VLOG -> (beats + 2).coerceAtMost(8)
-            Scenario.SLIDESHOW -> beats.coerceAtLeast(4)
-            Scenario.TIMELAPSE -> beats.coerceAtMost(2).coerceAtLeast(1)
+            Scenario.MUSIC -> beats
+            Scenario.ACTION -> (beats * 3 / 4).coerceAtLeast(2)
+            Scenario.VLOG -> (beats * 3 / 2).coerceAtMost(16)
+            Scenario.SLIDESHOW -> (beats * 2).coerceAtMost(16)
+            Scenario.TIMELAPSE -> (beats / 2).coerceAtLeast(2)
             Scenario.TRAVEL, Scenario.CUSTOM -> beats
         }
-        // One beat is the smallest musical unit; a hand grid with very close beats still gets a visible piece.
-        val minBeats = ((MIN_PIECE_MS + fallbackBeatMs - 1) / fallbackBeatMs).toInt().coerceAtLeast(1)
+        // The drop itself may be an accent of one beat; everywhere else a plan lasts at least the regular minimum.
+        val floorMs = if (nearDrop) MIN_PIECE_MS else MIN_REGULAR_MS
+        val minBeats = ((floorMs + fallbackBeatMs - 1) / fallbackBeatMs).toInt().coerceAtLeast(1)
         val maxBeats = (MAX_PIECE_MS / fallbackBeatMs).toInt().coerceAtLeast(minBeats)
         return beats.coerceIn(minBeats, maxBeats)
     }

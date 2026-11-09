@@ -30,6 +30,26 @@ class MontageTest {
     private fun boundaries(clips: List<ProjectClip>): List<Long> =
         clips.runningFold(0L) { at, clip -> at + clip.durationMs }.drop(1)
 
+    private fun median(values: List<Long>): Long {
+        if (values.isEmpty()) return 0L
+        return values.sorted()[values.size / 2]
+    }
+
+    private fun threeMinutes(dynamics: Dynamics, drops: List<Long> = emptyList()): Montage.Result =
+        Montage.montage(
+            Scenario.MUSIC,
+            dynamics,
+            four(),
+            Montage.Track(
+                beats = grid(period = 480L, length = 180_000L),
+                lengthMs = 180_000L,
+                activeDropMs = drops.firstOrNull(),
+                drops = drops,
+                energy = List(180) { 0.55f },
+            ),
+            seed = 42L,
+        )
+
     @Test
     fun `four long takes are cut into a whole track`() {
         val result = Montage.montage(
@@ -40,7 +60,7 @@ class MontageTest {
         assertEquals(60_000L, result.targetMs)
         assertFalse(result.exhausted)
         // Not one card per file: the music asked for many pieces, and each file's material is behind several of them.
-        assertTrue("only ${result.clips.size} pieces", result.clips.size >= 20)
+        assertTrue("only ${result.clips.size} pieces", result.clips.size >= 10)
         assertEquals(setOf("a.mp4", "b.mp4", "c.mp4", "d.mp4"), result.clips.map { it.file }.toSet())
         assertTrue(result.clips.all { it.auto && it.atMs == null })
         // Every file is read forward, once: no range of it is used twice.
@@ -67,8 +87,9 @@ class MontageTest {
         )
         assertEquals(60_000L, result.usedMs)
         assertTrue(result.clips.size > 1)
-        // VLOG holds longer (6 fallback beats = 3 s), and the pieces still cover the whole track without gaps.
-        assertTrue(result.clips.all { it.durationMs == 3_000L })
+        // VLOG holds longer, and the pieces still cover the whole track without gaps; the pattern may vary them.
+        assertTrue(result.clips.all { it.durationMs >= Montage.MIN_PIECE_MS })
+        assertTrue(result.clips.map { it.durationMs }.distinct().size >= 2)
         assertEquals(60_000L, boundaries(result.clips).last())
     }
 
@@ -95,7 +116,8 @@ class MontageTest {
             Scenario.TRAVEL, Dynamics.EVEN, four(),
             Montage.Track(beats = beats, lengthMs = 6_000L, fallbackBeatMs = 500L),
         )
-        assertEquals(2_600L, result.clips.first().durationMs)
+        // The first plan is a whole number of real beats, not a fixed number of 500 ms steps.
+        assertTrue("first piece ${result.clips.first().durationMs}", result.clips.first().durationMs in beats.drop(1))
         assertTrue(boundaries(result.clips).dropLast(1).all { it in beats })
     }
 
@@ -168,14 +190,14 @@ class MontageTest {
         val result = Montage.montage(
             Scenario.MUSIC, Dynamics.EVEN, pool,
             Montage.Track(
-                beats = grid(length = 4_000L),
-                lengthMs = 4_000L,
-                energy = listOf(0.9f, 0.9f, 0.9f, 0.9f),
+                beats = grid(length = 12_000L),
+                lengthMs = 12_000L,
+                energy = List(12) { 0.9f },
             ),
         )
         assertEquals("busy.mp4", result.clips.first().file)
-        // The busy source is not used over and over: the second piece is the other take's turn.
-        assertEquals("quiet.mp4", result.clips[1].file)
+        // The busy source is not used over and over: one of the following pieces is the other take's turn.
+        assertTrue(result.clips.drop(1).any { it.file == "quiet.mp4" })
     }
 
     @Test
@@ -211,5 +233,68 @@ class MontageTest {
         assertEquals(60_000L, slots.last().endMs)
         assertTrue(slots.zipWithNext().all { (a, b) -> a.endMs == b.startMs })
         assertTrue(slots.all { it.durationMs > 0L })
+    }
+
+    @Test
+    fun `a three minute rhythmic cut is varied and keeps breathing room`() {
+        val result = threeMinutes(Dynamics.RHYTHMIC)
+        assertEquals(180_000L, result.usedMs)
+        assertTrue("only ${result.clips.size} pieces", result.clips.size in 20..120)
+        val lengths = result.clips.map { it.durationMs }
+        assertTrue("lengths: ${lengths.distinct()}", lengths.distinct().size >= 4)
+        assertTrue("median ${median(lengths)}", median(lengths) >= 1_500L)
+        var shortRun = 0
+        for (ms in lengths) {
+            shortRun = if (ms < 1_000L) shortRun + 1 else 0
+            assertTrue("four short plans in a row at $ms: $lengths", shortRun <= Montage.MAX_SHORT_RUN)
+        }
+    }
+
+    @Test
+    fun `mood is calmer than rhythmic and even is not one fixed length`() {
+        val rhythmic = threeMinutes(Dynamics.RHYTHMIC)
+        val mood = threeMinutes(Dynamics.MOOD)
+        val even = threeMinutes(Dynamics.EVEN)
+        assertTrue(median(mood.clips.map { it.durationMs }) > median(rhythmic.clips.map { it.durationMs }))
+        assertTrue(even.clips.map { it.durationMs }.distinct().size >= 2)
+    }
+
+    @Test
+    fun `every drop is a boundary and the plan after it breathes`() {
+        val drops = listOf(45_000L, 90_000L, 135_000L)
+        val result = threeMinutes(Dynamics.DYNAMIC, drops)
+        val cuts = boundaries(result.clips)
+        assertTrue("drops missing from $cuts", cuts.containsAll(drops))
+        for (drop in drops) {
+            val at = cuts.indexOf(drop)
+            val after = result.clips.getOrNull(at + 1) ?: result.clips.getOrNull(at)
+            assertTrue("after drop $drop: ${after?.durationMs}", (after?.durationMs ?: 0L) >= 3_000L)
+        }
+    }
+
+    @Test
+    fun `one uninterrupted file without music is not a montage`() {
+        val result = Montage.montage(
+            Scenario.TRAVEL, Dynamics.EVEN, listOf(src("a.mp4", 0L, 10_000L)),
+            Montage.Track(beats = emptyList(), lengthMs = 0L, fallbackBeatMs = 500L),
+        )
+        assertEquals(10_000L, result.usedMs)
+        assertEquals(1, result.clips.size)
+        assertTrue(result.unchanged)
+    }
+
+    @Test
+    fun `a cut to the same music length is unchanged and a shorter one is a real cut`() {
+        val same = Montage.montage(
+            Scenario.TRAVEL, Dynamics.EVEN, listOf(src("a.mp4", 0L, 10_000L)),
+            Montage.Track(beats = grid(length = 10_000L), lengthMs = 10_000L),
+        )
+        assertTrue(same.unchanged)
+        val shorter = Montage.montage(
+            Scenario.TRAVEL, Dynamics.EVEN, listOf(src("a.mp4", 0L, 10_000L)),
+            Montage.Track(beats = grid(length = 6_000L), lengthMs = 6_000L),
+        )
+        assertFalse(shorter.unchanged)
+        assertEquals(6_000L, shorter.usedMs)
     }
 }

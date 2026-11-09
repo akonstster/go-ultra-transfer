@@ -2506,9 +2506,33 @@ class CameraController(private val app: Application) {
         if (file.isOnPhone || conn == ConnState.Connected) viewing = file else message = tr("Чтобы посмотреть файл с камеры, подключитесь", "Connect to view a file from the camera")
     }
 
+    /**
+     * One disk cache for camera media, shared by the viewer and the project preview. A project's pieces are many
+     * short ranges of the same large files; a cache turns a second viewing (and the next piece) into a local read.
+     * 512 MB, LRU: enough for a project without competing with gallery space.
+     */
+    private val previewCache: androidx.media3.datasource.cache.SimpleCache by lazy {
+        androidx.media3.datasource.cache.SimpleCache(
+            File(app.cacheDir, "project-preview"),
+            androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(512L * 1024L * 1024L),
+            androidx.media3.database.StandaloneDatabaseProvider(app),
+        )
+    }
+
     /** Player data source for the in-app viewer, or null without the camera Wi-Fi. */
     fun previewSource(): androidx.media3.datasource.DataSource.Factory? =
-        session.wifiLink?.let { CameraHttpDataSource.Factory(it) }
+        session.wifiLink?.let { link ->
+            // Only the camera's HTTP source goes through the cache; DefaultDataSource above it still sends content://
+            // and file:// to the phone's own readers.
+            androidx.media3.datasource.cache.CacheDataSource.Factory()
+                .setCache(previewCache)
+                .setUpstreamDataSourceFactory(CameraHttpDataSource.Factory(link))
+                // The same path on another camera (the alpha models) must not hit this camera's bytes.
+                .setCacheKeyFactory { data ->
+                    (session.cameraName ?: "camera") + "|" + data.uri
+                }
+                .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        }
 
     fun previewUrl(file: CameraFile): String =
         // The camera's low-res copy is the preview; a video whose .lrv turned out to be gone plays itself.
@@ -3267,12 +3291,34 @@ class CameraController(private val app: Application) {
             )
             return
         }
+        val music = open.music
+        if (music != null && (music.uri in musicAnalysing || music.lengthMs <= 0L)) {
+            montageNote = if (music.uri in musicFailed) {
+                Phrase("Не удалось определить длительность трека", "The track's length could not be read")
+            } else {
+                Phrase("Дождитесь анализа трека", "Wait for the track analysis")
+            }
+            return
+        }
+        if (music != null && music.lengthMs <= music.offsetMs) {
+            montageNote = Phrase(
+                "В выбранной части трека нет длительности",
+                "The chosen part of the track has no length",
+            )
+            return
+        }
+        // A rerun is built from the material before the last auto montage, never from its small result pieces.
+        val base = open.montageBase()
+        if (base.isEmpty()) {
+            montageNote = Phrase("Не из чего собирать — проверьте куски проекта", "Nothing to cut — check the project's clips")
+            return
+        }
         montageRunning = true
         montageNote = null
         val before = open.clips
         scope.launch {
             try {
-                var project = open
+                var project = open.copy(clips = base)
                 if (project.scenario == Scenario.MUSIC || project.scenario == Scenario.ACTION) {
                     project = project.copy(clips = measureEnergies(project))
                 }
@@ -3282,14 +3328,15 @@ class CameraController(private val app: Application) {
                     montageNote = Phrase("Проект изменился — АВТО не тронул его", "The project changed — the montage left it alone")
                     return@launch
                 }
-                val music = project.music
-                val beats = music?.beats.orEmpty()
-                val peaks = music?.uri?.let(::musicPeaks)
+                val currentMusic = project.music
+                val beats = currentMusic?.beats.orEmpty()
+                val peaks = currentMusic?.uri?.let(::musicPeaks)
                 val track = Montage.Track(
                     beats = beats,
-                    lengthMs = music?.lengthMs ?: 0L,
-                    offsetMs = music?.offsetMs ?: 0L,
-                    activeDropMs = music?.activeDropMs,
+                    lengthMs = currentMusic?.lengthMs ?: 0L,
+                    offsetMs = currentMusic?.offsetMs ?: 0L,
+                    activeDropMs = currentMusic?.activeDropMs,
+                    drops = currentMusic?.drops.orEmpty(),
                     energy = peaks?.let { Montage.intensities(it) }.orEmpty(),
                     fallbackBeatMs = fallbackBeat(beats),
                 )
@@ -3300,11 +3347,25 @@ class CameraController(private val app: Application) {
                     track = track,
                     seed = project.createdMs xor System.currentTimeMillis(),
                 )
+                if (result.unchanged) {
+                    montageNote = Phrase(
+                        "Содержимое и порядок не изменятся — добавьте другие файлы или музыку",
+                        "The content and order would not change — add other files or music",
+                    )
+                    return@launch
+                }
                 if (result.clips.isEmpty()) {
                     montageNote = Phrase("Не из чего собирать — проверьте куски проекта", "Nothing to cut — check the project's clips")
                     return@launch
                 }
                 val next = project.autoMontaged(result.clips)
+                if (next == project) {
+                    montageNote = Phrase(
+                        "Содержимое и порядок не изменятся — добавьте другие файлы или музыку",
+                        "The content and order would not change — add other files or music",
+                    )
+                    return@launch
+                }
                 saveProject(next)
                 montageNote = if (result.usedMs < result.targetMs - 1_000L) {
                     Phrase(
@@ -3459,8 +3520,13 @@ class CameraController(private val app: Application) {
     var musicFailed by mutableStateOf<Set<String>>(emptySet())
         private set
 
-    /** Tracks being read right now: the lane's effect and a fresh pick must not decode the same file twice. */
-    private val musicAnalysing = HashSet<String>()
+    /**
+     * Tracks being read right now: the lane's effect and a fresh pick must not decode the same file twice. It is
+     * observable because the wave lands before the grid and drops do, so «peaks are here» no longer means «analysis
+     * has finished» — the lane has to keep saying that it is still working.
+     */
+    var musicAnalysing by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     /**
      * The project's track, picked through SAF: the app keeps the link and a lasting permission to read it (the file is
@@ -3685,24 +3751,30 @@ class CameraController(private val app: Application) {
     fun addToProject(p: Project, files: List<CameraFile>) {
         scope.launch {
             var skipped = 0
-            val added = files.flatMap { file ->
-                if (file.kind == MediaKind.PHOTO) {
-                    listOf(ProjectClip(file.name, 0L, STILL_MS, role = ProjectClip.Role.STILL))
-                } else {
-                    val limit = file.durationSec?.let { (it + 1) * 1000L }
-                    val length = file.durationSec?.let { it * 1000L }
-                    val pieces = Highlights.inEffect(editedPieces(file), highlights(file), limit, length)
-                    // A file nobody marked and nobody edited goes in as one whole take; its marked pieces as inserts.
-                    val whole = length != null && pieces.size == 1 && pieces[0].startMs == 0L && pieces[0].endMs == length
-                    if (pieces.isEmpty()) {
-                        skipped++
-                        emptyList()
+            // Reading a duration may touch the camera or the phone's media store: keep it off the main thread.
+            val added = withContext(Dispatchers.IO) {
+                files.flatMap { file ->
+                    if (file.kind == MediaKind.PHOTO) {
+                        listOf(ProjectClip(file.name, 0L, STILL_MS, role = ProjectClip.Role.STILL))
                     } else {
-                        pieces.map {
-                            ProjectClip(
-                                file.name, it.startMs, it.endMs!!,
-                                role = if (whole) ProjectClip.Role.TAKE else ProjectClip.Role.INSERT,
-                            )
+                        // The camera's list does not always carry field 10 (length). Ask the file itself before
+                        // calling it «without a duration» and dropping it from the project.
+                        val durationMs = file.durationSec?.let { it * 1000L } ?: videoDurationMs(file)
+                        val limit = durationMs?.let { it + 1000L }
+                        val length = durationMs
+                        val pieces = Highlights.inEffect(editedPieces(file), highlights(file), limit, length)
+                        // A file nobody marked and nobody edited goes in as one whole take; its marked pieces as inserts.
+                        val whole = length != null && pieces.size == 1 && pieces[0].startMs == 0L && pieces[0].endMs == length
+                        if (pieces.isEmpty()) {
+                            skipped++
+                            emptyList()
+                        } else {
+                            pieces.map {
+                                ProjectClip(
+                                    file.name, it.startMs, it.endMs!!,
+                                    role = if (whole) ProjectClip.Role.TAKE else ProjectClip.Role.INSERT,
+                                )
+                            }
                         }
                     }
                 }
@@ -3716,6 +3788,31 @@ class CameraController(private val app: Application) {
             }
             message = tr("В «%s»: +%s кусков", "Into «%s»: +%s clips").format(p.name, added.size) +
                 if (skipped > 0) tr(", %s без длины пропущено", ", %s without a duration skipped").format(skipped) else ""
+        }
+    }
+
+    /**
+     * A video's length when [CameraFile.durationSec] is missing: read it from the phone's copy or from the camera's
+     * light preview. Null only when the file cannot be opened or reports no duration at all.
+     */
+    private suspend fun videoDurationMs(file: CameraFile): Long? = withContext(Dispatchers.IO) {
+        file.durationSec?.let { return@withContext it * 1000L }
+        val source = file.localUri ?: if (conn == ConnState.Connected) previewUrl(file) else null
+        if (source == null) return@withContext null
+        val retriever = android.media.MediaMetadataRetriever()
+        try {
+            if (source.startsWith("http://", ignoreCase = true) || source.startsWith("https://", ignoreCase = true)) {
+                retriever.setDataSource(source)
+            } else {
+                retriever.setDataSource(app, android.net.Uri.parse(source))
+            }
+            retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()?.takeIf { it > 0L }
+        } catch (e: Exception) {
+            log("длительность ${file.name}: ${e.message}")
+            null
+        } finally {
+            retriever.release()
         }
     }
 
@@ -4107,7 +4204,10 @@ class CameraController(private val app: Application) {
                 factor.coerceIn(0f, 1f)
 
             override fun isUnityUntil(samplePosition: Long, channelCount: Int): Long =
-                if (factor >= 1f) Long.MAX_VALUE else samplePosition
+                // Media3 expects C.TIME_END_OF_SOURCE here. Long.MAX_VALUE overflowed
+                // (readFrames - Long.MAX_VALUE) * bytesPerFrame and made GainProcessor call
+                // ByteBuffer.limit(negative), which crashed the whole save.
+                if (factor >= 1f) androidx.media3.common.C.TIME_END_OF_SOURCE else samplePosition
         })
 
     /** The project's file name in the gallery: its own name, then …2, …3 if taken. */
@@ -4374,7 +4474,20 @@ class CameraController(private val app: Application) {
                 // The pieces as one sequence; the track, if there is one, as another one beside it — the transformer
                 // mixes the two. Cut to the music's offset and to the project's own length: a longer track must not
                 // stretch the film past its last piece (and a shorter one simply ends).
-                val sequences = mutableListOf(androidx.media3.transformer.EditedMediaItemSequence.Builder(items).build())
+                // Media3 1.11 rejects the deprecated Composition.forceAudioTrack path: it merges the old
+                // TRACK_TYPE_NONE default with TRACK_TYPE_AUDIO and fails on «trackTypes must only contain…».
+                // Name the tracks on each sequence instead; that is the supported way and says exactly what is heard.
+                val mainTypes = if (sound) {
+                    setOf(
+                        androidx.media3.common.C.TRACK_TYPE_AUDIO,
+                        androidx.media3.common.C.TRACK_TYPE_VIDEO,
+                    )
+                } else {
+                    setOf(androidx.media3.common.C.TRACK_TYPE_VIDEO)
+                }
+                val sequences = mutableListOf(
+                    androidx.media3.transformer.EditedMediaItemSequence.Builder(mainTypes).addItems(items).build(),
+                )
                 val lengthMs = p.clips.sumOf { it.durationMs }
                 if (music != null && sound && lengthMs > 0L) {
                     // Where the track is heard: from its own start (or from [from] in it, when its head is cut off) for
@@ -4394,20 +4507,21 @@ class CameraController(private val app: Application) {
                         .setRemoveVideo(true)
                         .setEffects(androidx.media3.transformer.Effects(listOf<androidx.media3.common.audio.AudioProcessor>(gain(p.musicVolume.toFloat())), emptyList()))
                         .build()
+                    val audio = setOf(androidx.media3.common.C.TRACK_TYPE_AUDIO)
                     sequences += if ((-music.offsetMs).coerceAtLeast(0L) > 0L) {
                         // The track starts after the picture: a gap of silence leads into it.
-                        androidx.media3.transformer.EditedMediaItemSequence.Builder()
+                        androidx.media3.transformer.EditedMediaItemSequence.Builder(audio)
                             .addGap(-music.offsetMs * 1000L) // µs
                             .addItem(track)
                             .build()
                     } else {
-                        androidx.media3.transformer.EditedMediaItemSequence.Builder(listOf(track)).build()
+                        androidx.media3.transformer.EditedMediaItemSequence.Builder(audio)
+                            .addItems(listOf(track))
+                            .build()
                     }
                 }
                 val composition = androidx.media3.transformer.Composition.Builder(sequences)
                     .setEffects(androidx.media3.transformer.Effects(emptyList(), listOf(fit)))
-                    // A photo has no sound: silence stands in for it, so the pieces around it keep theirs.
-                    .experimentalSetForceAudioTrack(sound)
                     .build()
                 tmp.delete()
                 runComposition(composition, tmp, source, null, camera) { export = ExportProgress(name, it) }
@@ -4426,7 +4540,11 @@ class CameraController(private val app: Application) {
                 lastResult = tr("Проект не сохранён: остановлено", "Project not saved: stopped")
                 throw e
             } catch (e: Exception) {
-                log("проект точно: ${e.javaClass.simpleName}: ${e.message} ${e.cause?.message ?: ""}")
+                log(
+                    "проект точно: ${e.javaClass.name}: ${e.message}; " +
+                        "cause=${e.cause?.javaClass?.name ?: "нет"}: ${e.cause?.message ?: ""}\n" +
+                        e.stackTraceToString().take(4000),
+                )
                 lastResult = if (retryWhenBack(p, true, sound, retried, fromCamera, e)) {
                     tr("Связь с камерой прервалась — сохраню заново, когда она вернётся", "The camera's link dropped — saving again once it is back")
                 } else {
