@@ -442,6 +442,10 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "A project is only a list of references: the files themselves stay on the camera and on the phone — nothing is deleted." to "Proje yalnızca bir başvuru listesidir: dosyalar kamerada ve telefonda kalır — hiçbir şey silinmez.",
     "%s clips" to "%s klip",
     "Add to project" to "Projeye ekle",
+    "Where to add the files?" to "Dosyalar nereye eklensin?",
+    "To the start" to "Başa",
+    "To the end" to "Sona",
+    "By date" to "Tarihe göre",
     "Into «%s»: +%s clips" to "«%s»: +%s klip",
     ", %s without a duration skipped" to ", süresi olmayan %s atlandı",
     "Empty: add files from the list with «Add to project»" to "Boş: listeye «Projeye ekle» ile dosya ekleyin",
@@ -639,5 +643,16 @@ internal val TEXT_TR: Map<String, String> = mapOf(
     "Long 8–16-beat shots: mood matters more than a quick rhythm" to "8–16 vuruşluk uzun çekimler: hızlı ritimden çok atmosfer önemli",
     "Changes order and length from run to run while keeping breathing room" to "Her çalıştırmada sırayı ve uzunluğu değiştirir, nefes alanlarını korur",
 
+    "Preview cache" to "Önizleme önbelleği",
+    "For smooth playback of large videos." to "Büyük videoların akıcı oynatılması için.",
+    "Light copies: %s of %s" to "Hafif kopyalar: %s / %s",
+    "Clear the preview cache?" to "Önizleme önbelleği temizlensin mi?",
+    "Delete the light copies and fetched fragments? Originals and projects stay untouched." to "Hafif kopyalar ve indirilen parçalar silinsin mi? Orijinaller ve projeler etkilenmez.",
+    "Clear" to "Temizle",
+    "Clear the preview cache" to "Önizleme önbelleğini temizle",
+    "Clearing…" to "Temizleniyor…",
+    "Not now — a save is running" to "Şimdi olmaz — bir kayıt sürüyor",
+    "The preview cache is cleared" to "Önizleme önbelleği temizlendi",
+    "Preparing the preview cache: file %s of %s" to "Önizleme önbelleği hazırlanıyor: dosya %s / %s",
 )
 

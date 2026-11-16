@@ -98,6 +98,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.MediaKind
+import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.ProjectPlacement
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -206,7 +208,7 @@ fun GalleryScreen(
                     var showSettings by remember { mutableStateOf(false) }
                     var showCamera by remember { mutableStateOf(false) }
                     var showAbout by remember { mutableStateOf(false) }
-                    if (showSettings) AppSettingsDialog { showSettings = false }
+                    if (showSettings) AppSettingsDialog(vm) { showSettings = false }
                     if (showCamera) CameraInfoDialog(vm) { showCamera = false }
                     if (showAbout) AboutDialog { showAbout = false }
                     // A newer build of our own channel: offered by the daily check or ⋮ → «Проверить обновление».
@@ -717,6 +719,14 @@ private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
 private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
     var picking by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var placing by remember { mutableStateOf<Project?>(null) }
+    fun take(p: Project, at: ProjectPlacement) {
+        vm.addToProject(p, selection, at)
+        vm.clearSelection()
+        picking = false
+        creating = false
+        placing = null
+    }
     IconButton({ vm.reloadProjects(); picking = true }) {
         Icon(Icons.AutoMirrored.Filled.PlaylistAdd, tr("В проект", "Add to project"), tint = MaterialTheme.colorScheme.primary)
     }
@@ -727,7 +737,12 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
             text = {
                 Column {
                     vm.projects.forEach { p ->
-                        TextButton({ vm.addToProject(p, selection); vm.clearSelection(); picking = false }) { Text(p.name) }
+                        TextButton({
+                            if (p.clips.isEmpty()) take(p, ProjectPlacement.END) else {
+                                picking = false
+                                placing = p
+                            }
+                        }) { Text(p.name) }
                     }
                     TextButton({ picking = false; creating = true }) { Text(tr("Новый проект", "New project")) }
                 }
@@ -743,10 +758,24 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
             initial = "",
             onDismiss = { creating = false },
             onDone = { name ->
-                vm.addToProject(vm.createProject(name), selection)
-                vm.clearSelection()
-                creating = false
+                take(vm.createProject(name), ProjectPlacement.END)
             },
+        )
+    }
+    placing?.let { p ->
+        AlertDialog(
+            onDismissRequest = { placing = null },
+            title = { Text(tr("Куда добавить файлы?", "Where to add the files?")) },
+            text = {
+                Column {
+                    Text(p.name)
+                    TextButton({ take(p, ProjectPlacement.START) }) { Text(tr("В начало", "To the start")) }
+                    TextButton({ take(p, ProjectPlacement.END) }) { Text(tr("В конец", "To the end")) }
+                    TextButton({ take(p, ProjectPlacement.BY_DATE) }) { Text(tr("По дате", "By date")) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ placing = null }) { Text(tr("Отмена", "Cancel")) } },
         )
     }
 }

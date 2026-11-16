@@ -442,6 +442,10 @@ internal val TEXT_PT: Map<String, String> = mapOf(
     "A project is only a list of references: the files themselves stay on the camera and on the phone — nothing is deleted." to "Um projeto é só uma lista de referências: os ficheiros ficam na câmara e no telefone — nada é apagado.",
     "%s clips" to "%s clipes",
     "Add to project" to "Adicionar ao projeto",
+    "Where to add the files?" to "Onde adicionar os ficheiros?",
+    "To the start" to "No início",
+    "To the end" to "No fim",
+    "By date" to "Por data",
     "Into «%s»: +%s clips" to "Em «%s»: +%s clipes",
     ", %s without a duration skipped" to ", %s sem duração ignorados",
     "Empty: add files from the list with «Add to project»" to "Vazio: adiciona ficheiros da lista com «Adicionar ao projeto»",
@@ -639,5 +643,16 @@ internal val TEXT_PT: Map<String, String> = mapOf(
     "Long 8–16-beat shots: mood matters more than a quick rhythm" to "Planos longos de 8–16 tempos: o clima importa mais que o ritmo rápido",
     "Changes order and length from run to run while keeping breathing room" to "Muda a ordem e a duração a cada execução, mantendo as pausas",
 
+    "Preview cache" to "Cache de pré-visualização",
+    "For smooth playback of large videos." to "Para reproduzir vídeos grandes sem travamentos.",
+    "Light copies: %s of %s" to "Cópias leves: %s de %s",
+    "Clear the preview cache?" to "Limpar o cache de pré-visualização?",
+    "Delete the light copies and fetched fragments? Originals and projects stay untouched." to "Excluir as cópias leves e os trechos baixados? Originais e projetos não são afetados.",
+    "Clear" to "Limpar",
+    "Clear the preview cache" to "Limpar cache de pré-visualização",
+    "Clearing…" to "Limpando…",
+    "Not now — a save is running" to "Agora não — uma gravação está em andamento",
+    "The preview cache is cleared" to "O cache de pré-visualização foi limpo",
+    "Preparing the preview cache: file %s of %s" to "Preparando o cache de pré-visualização: arquivo %s de %s",
 )
 

@@ -442,6 +442,10 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "A project is only a list of references: the files themselves stay on the camera and on the phone — nothing is deleted." to "项目只是一份引用列表：文件本身留在相机和手机上，什么也不会删除。",
     "%s clips" to "%s 个片段",
     "Add to project" to "添加到项目",
+    "Where to add the files?" to "将文件添加到何处？",
+    "To the start" to "开头",
+    "To the end" to "末尾",
+    "By date" to "按日期",
     "Into «%s»: +%s clips" to "「%s」：+%s 个片段",
     ", %s without a duration skipped" to "，跳过 %s 个没有时长的",
     "Empty: add files from the list with «Add to project»" to "空：用列表里的「添加到项目」加入文件",
@@ -639,5 +643,16 @@ internal val TEXT_ZH: Map<String, String> = mapOf(
     "Long 8–16-beat shots: mood matters more than a quick rhythm" to "8–16拍的长镜头：氛围比快速节奏更重要",
     "Changes order and length from run to run while keeping breathing room" to "每次运行都会改变顺序和长度，同时保留呼吸",
 
+    "Preview cache" to "预览缓存",
+    "For smooth playback of large videos." to "让大视频播放更流畅。",
+    "Light copies: %s of %s" to "轻量副本：%s，共 %s",
+    "Clear the preview cache?" to "清除预览缓存？",
+    "Delete the light copies and fetched fragments? Originals and projects stay untouched." to "删除轻量副本和已获取的片段？原始文件和项目不会被改动。",
+    "Clear" to "清除",
+    "Clear the preview cache" to "清除预览缓存",
+    "Clearing…" to "正在清除…",
+    "Not now — a save is running" to "暂时无法操作——正在保存",
+    "The preview cache is cleared" to "预览缓存已清除",
+    "Preparing the preview cache: file %s of %s" to "正在准备预览缓存：文件 %s，共 %s",
 )
 

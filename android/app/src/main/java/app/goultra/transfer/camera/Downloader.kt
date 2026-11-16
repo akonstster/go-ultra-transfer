@@ -73,8 +73,16 @@ object Downloader {
     const val PHONE_PREFIX = "/phone/"
 
     /**
+     * The date to show for a phone item: the later of DATE_TAKEN (milliseconds) and DATE_ADDED (seconds). A file's
+     * DATE_TAKEN can be the date of the take it was cut from, while DATE_ADDED is when this phone actually got it.
+     */
+    internal fun newestStamp(takenAtMs: Long?, addedAtSeconds: Long?): Long? =
+        maxOf(takenAtMs ?: 0L, (addedAtSeconds ?: 0L) * 1000L).takeIf { it > 0L }
+
+    /**
      * Files this app saved to the gallery, as list items for the Files tab without the camera (newest first).
-     * Date from the name like on the camera, else DATE_TAKEN; duration from MediaStore (videos only).
+     * Date from the name like on the camera, else the later of DATE_TAKEN and DATE_ADDED; duration from MediaStore
+     * (videos only).
      */
     fun phoneFiles(context: Context): List<CameraFile> {
         val out = mutableListOf<Pair<CameraFile, Boolean>>()
@@ -91,6 +99,7 @@ object Downloader {
                     MediaStore.MediaColumns.WIDTH,
                     MediaStore.MediaColumns.HEIGHT,
                     MediaStore.MediaColumns.DURATION,
+                    MediaStore.MediaColumns.DATE_ADDED,
                 ),
                 OUR_FOLDERS,
                 null,
@@ -101,6 +110,10 @@ object Downloader {
                     val name = LivePhoto.cameraName(storedName)
                     if (name != storedName) motionNames += name
                     val taken = if (c.isNull(3)) null else c.getLong(3)
+                    // DATE_ADDED is seconds. It is the fallback for an item whose DATE_TAKEN the media scanner took
+                    // from the file's own metadata (a freshly exported clip kept the old source date on the Huawei).
+                    val addedMs = if (c.isNull(7)) null else c.getLong(7)
+                    val stamp = newestStamp(taken, addedMs)
                     out += CameraFile(
                         uri = "$PHONE_PREFIX$name",
                         size = if (c.isNull(2)) null else c.getLong(2),
@@ -108,7 +121,7 @@ object Downloader {
                         width = if (c.isNull(4)) null else c.getInt(4),
                         height = if (c.isNull(5)) null else c.getInt(5),
                         fps = null,
-                        created = CameraFile.createdFromName(name) ?: taken?.let {
+                        created = CameraFile.createdFromName(name) ?: stamp?.let {
                             java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(it), java.time.ZoneId.systemDefault())
                         },
                         localUri = ContentUris.withAppendedId(collection, c.getLong(0)).toString(),
@@ -290,7 +303,7 @@ object Downloader {
                 )
             }
             if (old != null) {
-                publishReplacement(resolver, item, targetName, old, oldName)
+                publishReplacement(resolver, item, targetName, old, oldName, takenAtMillis)
             } else {
                 val changed = resolver.update(
                     item,
@@ -307,6 +320,7 @@ object Downloader {
                     if (it.moveToFirst()) it.getString(0) else null
                 }
                 if (stored != targetName) throw AlreadyInGalleryException(targetName)
+                keepTakenDate(resolver, item, takenAtMillis)
             }
             item
         } catch (e: AlreadyInGalleryException) {
@@ -417,11 +431,18 @@ object Downloader {
             }
             throw e
         }
-        publishReplacement(resolver, item, name, old, oldName)
+        publishReplacement(resolver, item, name, old, oldName, takenAtMillis)
         return item
     }
 
-    private fun publishReplacement(resolver: ContentResolver, item: Uri, name: String, old: Uri?, oldName: String = name) {
+    private fun publishReplacement(
+        resolver: ContentResolver,
+        item: Uri,
+        name: String,
+        old: Uri?,
+        oldName: String = name,
+        takenAtMillis: Long? = null,
+    ) {
         val extension = name.substringAfterLast('.', "")
         val suffix = if (extension.isEmpty()) "" else ".$extension"
         val backup = name.removeSuffix(suffix) + ".backup-${UUID.randomUUID()}" + suffix
@@ -453,11 +474,38 @@ object Downloader {
                     }
                 },
             )
+            // The media scanner may replace DATE_TAKEN from the file's own metadata when the item is published
+            // (a freshly saved clip kept the previous take's date on the Huawei). Put the wanted date back after
+            // IS_PENDING = 0, and read it once to make sure the item really carries it.
+            keepTakenDate(resolver, item, takenAtMillis)
         } catch (e: Exception) {
             if (e.suppressed.isNotEmpty()) {
                 throw IOException("${e.message}; ошибка восстановления: ${e.suppressed.joinToString { it.message ?: it.javaClass.simpleName }}; проверьте резервную копию $backup", e)
             }
             throw e
+        }
+    }
+
+    /**
+     * Re-applies [takenAtMillis] after an item has been published. MediaProvider derives DATE_TAKEN from the MP4's own
+     * metadata on the final update, so the value given at insert time is not necessarily the value the gallery sees.
+     * A read-back catches a provider that ignored the update; the second write is best effort — the file itself is
+     * already saved, and failing the download over a timeline date would be worse.
+     */
+    private fun keepTakenDate(resolver: ContentResolver, item: Uri, takenAtMillis: Long?) {
+        if (takenAtMillis == null) return
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DATE_TAKEN, takenAtMillis)
+            put(MediaStore.MediaColumns.DATE_MODIFIED, System.currentTimeMillis() / 1000L)
+        }
+        runCatching { resolver.update(item, values, null, null) }
+        val stored = runCatching {
+            resolver.query(item, arrayOf(MediaStore.MediaColumns.DATE_TAKEN), null, null, null)?.use {
+                if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null
+            }
+        }.getOrNull()
+        if (stored != null && kotlin.math.abs(stored - takenAtMillis) > 1_000L) {
+            runCatching { resolver.update(item, values, null, null) }
         }
     }
 

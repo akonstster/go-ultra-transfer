@@ -1,6 +1,7 @@
 package app.goultra.transfer.ui
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -52,6 +53,7 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.image.BitmapFactoryImageDecoder
 import androidx.media3.exoplayer.image.ImageOutput
 import androidx.media3.exoplayer.image.ImageRenderer
@@ -73,7 +75,7 @@ import app.goultra.transfer.camera.ProjectMusic
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 private fun mediaItem(vm: CameraController, clip: ProjectClip, file: CameraFile, id: String): MediaItem {
-    val uri = if (file.isOnPhone) file.localUri ?: clip.file else vm.previewUrl(file)
+    val uri = vm.previewPlaybackUri(file)
     // A stable per-card id: the same piece may legally appear twice in a project, and the preload manager keys
     // sources by MediaItem equality, while the player needs two independent items.
     val builder = MediaItem.Builder().setUri(uri).setMediaId(id)
@@ -182,10 +184,11 @@ internal fun ProjectPreview(
     val context = LocalContext.current
     // Every piece with its file: the real one, or — out of reach — a stand-in played as its card's frame.
     val items = clips.map { e ->
-        val real = vm.projectFile(e.value.file)
+        val real = vm.previewFile(e.value.file)
         Piece(e, real ?: vm.offlineFile(e.value.file), offline = real == null)
     }
-    val signature = items.joinToString("|") { "${it.clip.file}:${it.clip.fromMs}-${it.clip.toMs}:${it.offline}" }
+    val signature = items.joinToString("|") { "${it.clip.file}:${it.clip.fromMs}-${it.clip.toMs}:${it.offline}" } +
+        ":proxy${vm.previewProxyVersion}"
     // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
     val itemsNow by rememberUpdatedState(items)
     val onPlayingNow by rememberUpdatedState(onPlaying)
@@ -222,10 +225,10 @@ internal fun ProjectPreview(
             if (index in noPreload) {
                 DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_NOT_PRELOADED
             } else when (kotlin.math.abs(index - preloadIndex.get())) {
-                // A montage piece is often 2–4 s: 1.5 s left the tail of the next piece to be fetched during
-                // playback, which showed up as a hitch at the join. Cover a whole ordinary piece.
-                1, 2 -> DefaultPreloadManager.PreloadStatus.specifiedRangeLoaded(4_000L)
-                3 -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_SOURCE_PREPARED
+                // A montage piece is often 2–4 s, but a hand-cut one can be longer: eight seconds ahead covers a whole
+                // ordinary piece without leaving its tail to be fetched during playback.
+                1, 2 -> DefaultPreloadManager.PreloadStatus.specifiedRangeLoaded(8_000L)
+                3, 4 -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_SOURCE_PREPARED
                 else -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_NOT_PRELOADED
             }
         }
@@ -267,6 +270,7 @@ internal fun ProjectPreview(
     var shownTotal by remember { mutableLongStateOf(totalMs) }
 
     DisposableEffect(player) {
+        var joinAt = 0L
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playing = isPlaying
@@ -276,6 +280,8 @@ internal fun ProjectPreview(
                 current = player.currentMediaItemIndex
                 preloadAt(current)
                 photo.shown = null
+                joinAt = SystemClock.elapsedRealtime()
+                vm.log("предпросмотр: стык ${player.currentMediaItemIndex + 1} из ${inPlayer.size}")
             }
 
             // A picture the phone cannot read must not stop the film: the piece is passed over and the rest plays on.
@@ -289,7 +295,48 @@ internal fun ProjectPreview(
             }
         }
         player.addListener(listener)
+        // The decoder a join has to rebuild is the reason a playlist of tiny pieces can still hitch. The log names
+        // it and its start-up time, so a stutter can be told apart from a slow read.
+        val analytics = object : AnalyticsListener {
+            override fun onVideoDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long,
+            ) {
+                vm.log("предпросмотр: видеодекодер $decoderName, запуск $initializationDurationMs мс")
+            }
+
+            override fun onRenderedFirstFrame(
+                eventTime: AnalyticsListener.EventTime,
+                surface: Any,
+                renderTimeMs: Long,
+            ) {
+                if (joinAt > 0L) {
+                    vm.log("предпросмотр: первый кадр после стыка через ${SystemClock.elapsedRealtime() - joinAt} мс")
+                }
+            }
+
+            override fun onAudioUnderrun(
+                eventTime: AnalyticsListener.EventTime,
+                bufferSize: Int,
+                bufferSizeMs: Long,
+                elapsedSinceLastFeedMs: Long,
+            ) {
+                vm.log("предпросмотр: нехватка звука $bufferSize байт, пусто $bufferSizeMs мс")
+            }
+
+            override fun onDroppedVideoFrames(
+                eventTime: AnalyticsListener.EventTime,
+                droppedFrames: Int,
+                elapsedMs: Long,
+            ) {
+                if (droppedFrames > 0) vm.log("предпросмотр: пропущено кадров $droppedFrames за $elapsedMs мс")
+            }
+        }
+        player.addAnalyticsListener(analytics)
         onDispose {
+            player.removeAnalyticsListener(analytics)
             player.removeListener(listener)
             preload.release()
             player.release()

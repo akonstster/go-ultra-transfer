@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -18,6 +20,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +68,10 @@ object AppPrefs {
     /** Languages with a text table of their own (the rest fall back to English). */
     private val SUPPORTED = setOf("ru", "en", "fr", "it", "es", "de", "pt", "tr", "zh", "ja")
 
+    /** Proxy cache sizes offered in Settings, MB. Stored in MB so a half-gigabyte choice stays exact. */
+    val PREVIEW_CACHE_MB = listOf(512, 1024, 2048, 4096, 8192)
+    const val PREVIEW_CACHE_DEFAULT_MB = 2048
+
     /** Phones set to a language of the Russian-speaking region get Russian, as they always did. */
     private val RUSSIAN_REGION = setOf("ru", "be", "uk", "kk")
 
@@ -84,6 +91,10 @@ object AppPrefs {
     var clickNudge by mutableStateOf(0)
         private set
 
+    /** The most disk space the low-resolution preview copies may take, MB (kept between launches). */
+    var previewCacheMb by mutableStateOf(PREVIEW_CACHE_DEFAULT_MB)
+        private set
+
     fun init(context: Context) {
         this.context = context.applicationContext
         val prefs = context.getSharedPreferences(FILE, 0)
@@ -92,6 +103,8 @@ object AppPrefs {
         metronome = prefs.getBoolean("metronome", false)
         val nudgeVersion = prefs.getInt("clickNudgeVersion", 1)
         clickNudge = if (nudgeVersion < CLICK_NUDGE_VERSION) 0 else clampNudge(prefs.getInt("clickNudge", 0))
+        previewCacheMb = prefs.getInt("previewCacheMb", PREVIEW_CACHE_DEFAULT_MB)
+            .takeIf { it in PREVIEW_CACHE_MB } ?: PREVIEW_CACHE_DEFAULT_MB
         if (nudgeVersion < CLICK_NUDGE_VERSION) {
             prefs.edit()
                 .putInt("clickNudge", 0)
@@ -128,6 +141,13 @@ object AppPrefs {
         context?.getSharedPreferences(FILE, 0)?.edit()?.putString("language", mode.name)?.apply()
     }
 
+    /** One of [PREVIEW_CACHE_MB]; anything else keeps the current choice. */
+    fun choosePreviewCacheMb(mb: Int) {
+        if (mb !in PREVIEW_CACHE_MB) return
+        previewCacheMb = mb
+        context?.getSharedPreferences(FILE, 0)?.edit()?.putInt("previewCacheMb", mb)?.apply()
+    }
+
     /** The language in use: the chosen one, or the phone's (Russian for the Russian-speaking region, else English). */
     val languageTag: String
         get() {
@@ -145,15 +165,39 @@ object AppPrefs {
     fun text(en: String): String = TABLES[languageTag]?.get(en) ?: en
 }
 
-/** Menu ⋮ → Settings: the theme as one-tap choices, the language as a dropdown list. */
+/** Menu ⋮ → Settings: the theme as one-tap choices, the language as a dropdown list, the preview cache. */
 @Composable
-fun AppSettingsDialog(onDismiss: () -> Unit) {
+fun AppSettingsDialog(vm: CameraController, onDismiss: () -> Unit) {
     var languagesOpen by remember { mutableStateOf(false) }
+    var cacheSizesOpen by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { vm.refreshPreviewCacheUsage() }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text(tr("Очистить кэш превью?", "Clear the preview cache?")) },
+            text = {
+                Text(
+                    tr(
+                        "Удалить облегчённые копии и загруженные фрагменты? Оригиналы и проекты не пострадают.",
+                        "Delete the light copies and fetched fragments? Originals and projects stay untouched.",
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton({
+                    confirmClear = false
+                    vm.clearPreviewCaches()
+                }) { Text(tr("Очистить", "Clear")) }
+            },
+            dismissButton = { TextButton({ confirmClear = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(tr("Настройки", "Settings")) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(tr("Тема", "Theme"), style = MaterialTheme.typography.titleSmall)
                 ChoiceRow(
                     listOf(
@@ -179,10 +223,73 @@ fun AppSettingsDialog(onDismiss: () -> Unit) {
                         }
                     }
                 }
+                Spacer(Modifier.height(16.dp))
+                Text(tr("Кэш предпросмотра", "Preview cache"), style = MaterialTheme.typography.titleSmall)
+                Text(
+                    tr(
+                        "Для плавного воспроизведения больших видео.",
+                        "For smooth playback of large videos.",
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Box(Modifier.padding(top = 6.dp)) {
+                    OutlinedButton({ cacheSizesOpen = true }, Modifier.fillMaxWidth()) {
+                        Text(cacheSize(AppPrefs.previewCacheMb))
+                    }
+                    DropdownMenu(expanded = cacheSizesOpen, onDismissRequest = { cacheSizesOpen = false }) {
+                        AppPrefs.PREVIEW_CACHE_MB.forEach { mb ->
+                            DropdownMenuItem(
+                                text = { Text(cacheSize(mb)) },
+                                onClick = {
+                                    AppPrefs.choosePreviewCacheMb(mb)
+                                    vm.trimPreviewCache()
+                                    cacheSizesOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    tr("Облегчённые копии: %s из %s", "Light copies: %s of %s")
+                        .format(bytesText(vm.previewCacheUsedBytes), cacheSize(AppPrefs.previewCacheMb)),
+                    Modifier.padding(top = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(
+                    onClick = { confirmClear = true },
+                    enabled = !vm.previewCacheClearing && vm.export == null && vm.download == null,
+                ) {
+                    Text(
+                        if (vm.previewCacheClearing) tr("Очищаю…", "Clearing…")
+                        else tr("Очистить кэш превью", "Clear the preview cache"),
+                    )
+                }
             }
         },
         confirmButton = { TextButton(onDismiss) { Text(tr("Готово", "Done")) } },
     )
+}
+
+/** A cache size as the user picked it: half a gigabyte, or whole gigabytes. */
+private fun cacheSize(mb: Int): String {
+    val value = when {
+        mb % 1024 == 0 -> "${mb / 1024}"
+        AppPrefs.languageTag == "ru" -> "0,5"
+        else -> "0.5"
+    }
+    return "$value " + tr("ГБ", "GB")
+}
+
+/** Bytes as megabytes below a gigabyte, else gigabytes with one decimal, in the language's decimal separator. */
+private fun bytesText(bytes: Long): String {
+    val mb = bytes / (1024.0 * 1024.0)
+    val (value, unit) = if (mb < 1024.0) {
+        String.format(Locale.ROOT, "%.1f", mb) to tr("МБ", "MB")
+    } else {
+        String.format(Locale.ROOT, "%.1f", mb / 1024.0) to tr("ГБ", "GB")
+    }
+    return (if (AppPrefs.languageTag == "ru") value.replace('.', ',') else value) + " " + unit
 }
 
 /** «Как в телефоне» for [LanguageMode.SYSTEM], else the language's own name (never translated). */

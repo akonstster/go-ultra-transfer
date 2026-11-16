@@ -14,6 +14,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -80,6 +81,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var clockMs by remember(p.id) { mutableLongStateOf(0L) }
     var clockPlaying by remember(p.id) { mutableStateOf(false) }
     var seekTo by remember(p.id) { mutableStateOf<Long?>(null) }
+    // Low-resolution copies are made only while the film stands still: the encoder and the player share the phone's
+    // hardware, so encoding during playback is exactly the stutter the copies are meant to remove.
+    LaunchedEffect(p.id, clockPlaying) {
+        vm.prepareProjectProxies(p, clockMs, paused = !clockPlaying)
+    }
+    DisposableEffect(p.id) {
+        onDispose { vm.stopProjectProxies() }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -101,6 +110,21 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 // button read that way stayed off for good after a failed save.
                 IconButton({ saving = true }, enabled = vm.download == null && vm.export == null) {
                     Icon(Icons.Filled.Save, tr("Сохранить видео", "Save the video"))
+                }
+            }
+        }
+        // The low-resolution copy is being encoded: show it, otherwise a paused project looks idle while the phone
+        // is busy for a minute or more.
+        vm.previewCacheTask?.let { task ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        tr("Готовлю кэш предпросмотра: файл %s из %s", "Preparing the preview cache: file %s of %s")
+                            .format(task.file, task.count),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 2.dp))
                 }
             }
         }

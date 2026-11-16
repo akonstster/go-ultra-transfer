@@ -8,6 +8,7 @@ import android.util.Log
 import android.util.LruCache
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -49,8 +50,12 @@ import app.goultra.transfer.camera.PbWriter
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
 import app.goultra.transfer.camera.ProjectExport
+import app.goultra.transfer.camera.ProjectPlacement
 import app.goultra.transfer.camera.ProjectSound
 import app.goultra.transfer.camera.Projects
+import app.goultra.transfer.camera.clipsAdded
+import app.goultra.transfer.camera.filesInProjectOrder
+import app.goultra.transfer.camera.PreviewProxyCache
 import app.goultra.transfer.camera.ProjectMusic
 import app.goultra.transfer.camera.TrackAudio
 import app.goultra.transfer.camera.Proto
@@ -67,6 +72,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.ensureActive
@@ -78,6 +84,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.LocalDateTime
 
 sealed interface ConnState {
     data object Idle : ConnState
@@ -152,6 +159,9 @@ data class DownloadProgress(
     val total: Long,
     val bytesPerSec: Long,
 )
+
+/** The low-resolution preview copy being made: file [file] of [count] in the project's order. */
+data class PreviewCacheTask(val file: Int, val count: Int)
 
 /**
  * App-wide camera state: lives as long as the process (kept alive by [CameraService] while connected),
@@ -2509,14 +2519,24 @@ class CameraController(private val app: Application) {
     /**
      * One disk cache for camera media, shared by the viewer and the project preview. A project's pieces are many
      * short ranges of the same large files; a cache turns a second viewing (and the next piece) into a local read.
-     * 512 MB, LRU: enough for a project without competing with gallery space.
+     * 512 MB, LRU: enough for a project without competing with gallery space. The cache is recreated after Settings
+     * clears it, so its data source is fetched from here rather than kept in one immutable field.
      */
-    private val previewCache: androidx.media3.datasource.cache.SimpleCache by lazy {
-        androidx.media3.datasource.cache.SimpleCache(
+    private var previewHttpCache: androidx.media3.datasource.cache.SimpleCache? = null
+
+    @Synchronized
+    private fun httpPreviewCache(): androidx.media3.datasource.cache.SimpleCache =
+        previewHttpCache ?: androidx.media3.datasource.cache.SimpleCache(
             File(app.cacheDir, "project-preview"),
             androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(512L * 1024L * 1024L),
             androidx.media3.database.StandaloneDatabaseProvider(app),
-        )
+        ).also { previewHttpCache = it }
+
+    @Synchronized
+    private fun releaseHttpPreviewCache() {
+        val cache = previewHttpCache ?: return
+        previewHttpCache = null
+        runCatching { cache.release() }
     }
 
     /** Player data source for the in-app viewer, or null without the camera Wi-Fi. */
@@ -2525,7 +2545,7 @@ class CameraController(private val app: Application) {
             // Only the camera's HTTP source goes through the cache; DefaultDataSource above it still sends content://
             // and file:// to the phone's own readers.
             androidx.media3.datasource.cache.CacheDataSource.Factory()
-                .setCache(previewCache)
+                .setCache(httpPreviewCache())
                 .setUpstreamDataSourceFactory(CameraHttpDataSource.Factory(link))
                 // The same path on another camera (the alpha models) must not hit this camera's bytes.
                 .setCacheKeyFactory { data ->
@@ -2533,6 +2553,166 @@ class CameraController(private val app: Application) {
                 }
                 .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         }
+
+    // ---------- preview cache: low-resolution copies for the project preview ----------
+
+    private val previewProxyCache = PreviewProxyCache(app, ::log)
+    private var previewProxyJob: Job? = null
+    private var previewProxyRunKey: String? = null
+    /** file key → source URI, so a 10 Hz preview recomposition does no disk lookups for every card. */
+    private val previewUriCache = mutableMapOf<String, String>()
+
+    /** Bumped when a copy becomes ready: the preview rebuilds its playlist from the new source. */
+    var previewProxyVersion by mutableIntStateOf(0)
+        private set
+
+    /** Bytes taken by the low-resolution copies, shown in Settings. */
+    var previewCacheUsedBytes by mutableLongStateOf(0L)
+        private set
+
+    var previewCacheClearing by mutableStateOf(false)
+        private set
+
+    /** Shown while a low-resolution copy is being encoded: null when nothing is being prepared. */
+    var previewCacheTask by mutableStateOf<PreviewCacheTask?>(null)
+        private set
+
+    /** The source the project preview plays for [file]: its low-resolution copy when ready, else its local original. */
+    fun previewPlaybackUri(file: CameraFile): String {
+        if (!file.isOnPhone) return previewUrl(file)
+        val key = "${file.localUri}|${file.name}|${file.size}|${file.created}"
+        previewUriCache[key]?.let { return it }
+        val proxy = previewProxyCache.proxyFor(file)
+        val uri = proxy?.let { android.net.Uri.fromFile(it).toString() }
+            ?: file.localUri ?: file.uri
+        previewUriCache[key] = uri
+        log(
+            if (proxy != null) "предпросмотр ${file.name}: копия 540p"
+            else if (file.isOnPhone) "предпросмотр ${file.name}: локальный оригинал (копии нет)"
+            else "предпросмотр ${file.name}: LRV камеры",
+        )
+        return uri
+    }
+
+    /**
+     * Makes low-resolution copies for the project's phone videos while the preview is paused: the current piece first,
+     * then the rest. An encoder and the player compete for the same hardware, so playback cancels the work rather than
+     * stuttering; the next pause resumes it. Camera files already play their own light copy (LRV) and are skipped.
+     */
+    fun prepareProjectProxies(p: Project, atMs: Long, paused: Boolean) {
+        if (!paused) {
+            previewProxyJob?.cancel()
+            previewProxyJob = null
+            previewProxyRunKey = null
+            previewCacheTask = null
+            return
+        }
+        val ordered = previewProxyOrder(p, atMs)
+        if (ordered.isEmpty()) return
+        val key = p.id + "|" + ordered.joinToString(",") { it.name }
+        if (previewProxyJob?.isActive == true && previewProxyRunKey == key) return
+        previewProxyJob?.cancel()
+        previewProxyRunKey = key
+        previewProxyJob = scope.launch {
+            // Let the player prepare the first pieces before the encoder starts: they share the phone's hardware.
+            delay(1_500)
+            try {
+                for ((index, file) in ordered.withIndex()) {
+                    coroutineContext.ensureActive()
+                    if (previewProxyCache.proxyFor(file) != null) {
+                        previewProxyCache.touch(file)
+                        continue
+                    }
+                    previewCacheTask = PreviewCacheTask(index + 1, ordered.size)
+                    val made = previewProxyCache.ensure(file)
+                    if (made != null) {
+                        previewProxyCache.trim(AppPrefs.previewCacheMb * 1024L * 1024L, made)
+                        previewUriCache.clear()
+                        previewProxyVersion++
+                        refreshPreviewCacheUsage()
+                    }
+                }
+            } finally {
+                previewCacheTask = null
+            }
+        }
+    }
+
+    /** The project's phone videos in the order they will be needed: the current piece first, then the rest. */
+    private fun previewProxyOrder(p: Project, atMs: Long): List<CameraFile> {
+        if (p.clips.isEmpty()) return emptyList()
+        val lengths = p.clips.map { it.durationMs }
+        var index = 0
+        var left = atMs.coerceAtLeast(0L)
+        while (index < lengths.lastIndex && left >= lengths[index]) {
+            left -= lengths[index]
+            index++
+        }
+        val fromNow = p.clips.drop(index) + p.clips.take(index)
+        return fromNow.mapNotNull { clip -> previewFile(clip.file) }
+            .filter { it.isOnPhone && it.kind == MediaKind.VIDEO }
+            .distinctBy { it.name }
+    }
+
+    /** Leaving the project: no encoder in the background under a closed screen. */
+    fun stopProjectProxies() {
+        previewProxyJob?.cancel()
+        previewProxyJob = null
+        previewProxyRunKey = null
+        previewCacheTask = null
+    }
+
+    fun refreshPreviewCacheUsage() {
+        scope.launch {
+            previewCacheUsedBytes = withContext(Dispatchers.IO) { previewProxyCache.bytes() }
+        }
+    }
+
+    /** The setting changed: free space now rather than on the next copy. */
+    fun trimPreviewCache() {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                previewProxyCache.trim(AppPrefs.previewCacheMb * 1024L * 1024L)
+            }
+            previewUriCache.clear()
+            refreshPreviewCacheUsage()
+        }
+    }
+
+    /**
+     * Settings → «Очистить кэш превью»: the low-resolution copies and the camera ranges. Saving reads the camera
+     * through the same cache, so it waits; originals, projects and saved clips are never touched.
+     */
+    fun clearPreviewCaches() {
+        if (previewCacheClearing) return
+        if (download != null || export != null || exportJob?.isActive == true) {
+            message = tr("Сейчас нельзя: идёт сохранение", "Not now — a save is running")
+            return
+        }
+        previewCacheClearing = true
+        scope.launch {
+            try {
+                previewProxyJob?.cancelAndJoin()
+                previewProxyJob = null
+                previewProxyRunKey = null
+                previewCacheTask = null
+                // Transformer.cancel is asynchronous: give it a moment to let go of the .part file before the
+                // directory is deleted (otherwise the encoder can recreate it after the clear).
+                delay(500)
+                withContext(Dispatchers.IO) {
+                    previewProxyCache.clear()
+                    releaseHttpPreviewCache()
+                    File(app.cacheDir, "project-preview").deleteRecursively()
+                }
+                previewProxyVersion++
+                previewUriCache.clear()
+                previewCacheUsedBytes = 0L
+                message = tr("Кэш предпросмотра очищен", "The preview cache is cleared")
+            } finally {
+                previewCacheClearing = false
+            }
+        }
+    }
 
     fun previewUrl(file: CameraFile): String =
         // The camera's low-res copy is the preview; a video whose .lrv turned out to be gone plays itself.
@@ -3450,6 +3630,18 @@ class CameraController(private val app: Application) {
         (files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name })
             ?.also { if (!it.isOnPhone) seenFiles[name] = it }
 
+    /** The shooting time of a project's source: the list's date first, then the name (it survives the file being away). */
+    private fun projectClipCreated(name: String): LocalDateTime? =
+        projectFile(name)?.created ?: seenFiles[name]?.created ?: CameraFile.createdFromName(name)
+
+    /**
+     * The file the preview should play: a local copy when there is one, even with the camera connected — it is faster,
+     * carries no Wi-Fi latency at the joins, and is the one the low-resolution proxy is made from. The camera's LRV is
+     * only a fallback for a file that has not been downloaded.
+     */
+    fun previewFile(name: String): CameraFile? =
+        localFiles.firstOrNull { it.name == name } ?: projectFile(name)
+
     /** The camera's files of projects as last seen: the project goes on showing them while the camera is away. */
     private val seenFiles = HashMap<String, CameraFile>()
 
@@ -3745,16 +3937,18 @@ class CameraController(private val app: Application) {
 
     /**
      * Adds the selected files to [p]: each video's pieces as they stand (edited on the phone, or the camera's marks; a
-     * video without marks goes in whole), each photo as a still — see `memory-bank/projects-plan.md`. The camera's
-     * files are only read: nothing is copied, cut or changed here.
+     * video without marks goes in whole), each photo as a still — see `memory-bank/projects-plan.md`. The batch itself
+     * goes oldest first; an empty project just takes it, while [placement] says where it joins a project that already
+     * has clips. The camera's files are only read: nothing is copied, cut or changed here.
      */
-    fun addToProject(p: Project, files: List<CameraFile>) {
+    fun addToProject(p: Project, files: List<CameraFile>, placement: ProjectPlacement = ProjectPlacement.END) {
         scope.launch {
             var skipped = 0
+            val ordered = filesInProjectOrder(files)
             // Reading a duration may touch the camera or the phone's media store: keep it off the main thread.
-            val added = withContext(Dispatchers.IO) {
-                files.flatMap { file ->
-                    if (file.kind == MediaKind.PHOTO) {
+            val groups = withContext(Dispatchers.IO) {
+                ordered.mapNotNull { file ->
+                    val group = if (file.kind == MediaKind.PHOTO) {
                         listOf(ProjectClip(file.name, 0L, STILL_MS, role = ProjectClip.Role.STILL))
                     } else {
                         // The camera's list does not always carry field 10 (length). Ask the file itself before
@@ -3777,13 +3971,18 @@ class CameraController(private val app: Application) {
                             }
                         }
                     }
+                    group.takeIf { it.isNotEmpty() }
                 }
             }
+            val added = groups.flatten()
             // Added again on purpose: pieces taken out of that file by hand are welcome back.
             if (added.isNotEmpty()) {
                 val names = added.map { it.file }.toSet()
                 saveProject(
-                    p.copy(clips = p.clips + added, hidden = p.hidden.filterNot { it.file in names }).editedByHand(),
+                    p.copy(
+                        clips = clipsAdded(p.clips, groups, placement, ::projectClipCreated),
+                        hidden = p.hidden.filterNot { it.file in names },
+                    ).editedByHand(),
                 )
             }
             message = tr("В «%s»: +%s кусков", "Into «%s»: +%s clips").format(p.name, added.size) +

@@ -442,6 +442,10 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "A project is only a list of references: the files themselves stay on the camera and on the phone — nothing is deleted." to "プロジェクトは参照の一覧にすぎません。ファイル自体はカメラとスマホに残り、何も削除されません。",
     "%s clips" to "%s クリップ",
     "Add to project" to "プロジェクトへ追加",
+    "Where to add the files?" to "ファイルをどこに追加しますか？",
+    "To the start" to "先頭へ",
+    "To the end" to "末尾へ",
+    "By date" to "日付順",
     "Into «%s»: +%s clips" to "「%s」に +%s クリップ",
     ", %s without a duration skipped" to "、長さ不明の %s 件をスキップ",
     "Empty: add files from the list with «Add to project»" to "空です。一覧から「プロジェクトへ追加」でファイルを入れてください",
@@ -639,5 +643,16 @@ internal val TEXT_JA: Map<String, String> = mapOf(
     "Long 8–16-beat shots: mood matters more than a quick rhythm" to "8〜16拍の長いショット。速いリズムより雰囲気を重視",
     "Changes order and length from run to run while keeping breathing room" to "実行ごとに順序と長さを変えますが、余白は保ちます",
 
+    "Preview cache" to "プレビューキャッシュ",
+    "For smooth playback of large videos." to "大きな動画を滑らかに再生するため。",
+    "Light copies: %s of %s" to "軽量コピー: %s / %s",
+    "Clear the preview cache?" to "プレビューキャッシュを消去しますか？",
+    "Delete the light copies and fetched fragments? Originals and projects stay untouched." to "軽量コピーと取得済みの断片を削除しますか？元の動画とプロジェクトはそのまま残ります。",
+    "Clear" to "消去",
+    "Clear the preview cache" to "プレビューキャッシュを消去",
+    "Clearing…" to "消去中…",
+    "Not now — a save is running" to "今はできません — 保存中です",
+    "The preview cache is cleared" to "プレビューキャッシュを消去しました",
+    "Preparing the preview cache: file %s of %s" to "プレビューキャッシュを準備中: ファイル %s / %s",
 )
 
