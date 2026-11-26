@@ -180,6 +180,8 @@ internal fun ProjectPreview(
     /** A jump asked from outside (a tap on the timeline), in project ms; [onSeeked] says it has been taken. */
     seek: Long? = null,
     onSeeked: () -> Unit = {},
+    editorOpen: Boolean,
+    openEditor: (() -> Unit)?,
 ) {
     val context = LocalContext.current
     // Every piece with its file: the real one, or — out of reach — a stand-in played as its card's frame.
@@ -343,8 +345,10 @@ internal fun ProjectPreview(
         }
     }
     // A card in the hand: the preview stands still (its own playing got in the way of carrying a piece about).
-    LaunchedEffect(carrying) {
-        if (carrying) player.pause()
+    val openingEditor = openEditor != null
+    LaunchedEffect(carrying, editorOpen, openingEditor) {
+        if (carrying || editorOpen || openingEditor) player.pause()
+        openEditor?.invoke()
     }
     // The video's own sound: the project's slider always controls it, with or without a track. (Without music the
     // slider used to fall back to 1.0, so moving it changed the saved project and nothing that was heard.)
@@ -354,9 +358,11 @@ internal fun ProjectPreview(
     // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
     // sound need not. Its own reading of that time is what the click keeps time with: what is heard, not what is drawn.
     val heard = remember { MusicClock() }
-    ProjectMusicSound(music, musicVolume, shown, playing, heard)
-    // And the click on the grid, when it is asked for.
-    ProjectMetronome(music, shown, playing, heard, vm::log)
+    if (!editorOpen && !openingEditor) {
+        ProjectMusicSound(music, musicVolume, shown, playing, heard)
+        // And the click on the grid, when it is asked for.
+        ProjectMetronome(music, shown, playing, heard, vm::log)
+    }
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
     LaunchedEffect(signature, factory) {
@@ -419,9 +425,9 @@ internal fun ProjectPreview(
         }
     }
     // A card tapped: the preview jumps to that piece — video or photo alike — and plays on from it.
-    LaunchedEffect(play, signature) {
+    LaunchedEffect(play, signature, editorOpen, openingEditor) {
         val at = inPlayer.indexOfFirst { it.at.index == play }
-        if (at >= 0) {
+        if (at >= 0 && !editorOpen && !openingEditor) {
             player.seekTo(at, 0L)
             preloadAt(at)
             player.play()

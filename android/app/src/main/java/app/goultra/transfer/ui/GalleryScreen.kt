@@ -261,7 +261,7 @@ fun GalleryScreen(
                         val open = vm.seenProject
                         if (open == null) ProjectsTab(vm) else ProjectScreen(vm, open)
                         // The file editor opens over the project screen as well: a card taps through to its piece.
-                        vm.viewing?.let { FileViewer(vm, it, snackbar) { vm.viewing = null } }
+                        vm.viewing?.let { FileViewer(vm, it, snackbar, vm.projectEditorStartMs) { vm.viewing = null } }
                     }
                     vm.conn == ConnState.Connected -> FileGrid(vm, snackbar)
                     // No camera: what is already on the phone, with the way to connect above it.

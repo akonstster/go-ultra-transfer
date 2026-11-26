@@ -148,6 +148,7 @@ internal fun ProjectStrip(
     playingNow: Int?,
     onPlay: (Int) -> Unit,
     onCarrying: (Boolean) -> Unit,
+    onEdit: (CameraFile, ProjectClip) -> Unit,
 ) {
     val density = LocalDensity.current
     val cardWpx = with(density) { CARD_W.toPx() }
@@ -422,7 +423,7 @@ internal fun ProjectStrip(
                         missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
                         width = CARD_W,
                         playing = i == playingNow,
-                        onEdit = { vm.viewing = vm.projectFile(clip.file) },
+                        onEdit = { vm.projectFile(clip.file)?.let { onEdit(it, clip) } },
                     )
                 }
             }

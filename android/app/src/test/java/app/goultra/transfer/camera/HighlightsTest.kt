@@ -78,6 +78,35 @@ class HighlightsTest {
     }
 
     @Test
+    fun splitUsesTheExactCursorAndKeepsBothPieces() {
+        val pieces = listOf(Highlight(1000, 3000), Highlight(5000, 8000))
+        val split = Highlights.splitAt(pieces, selected = 0, atMs = 1753)
+        assertEquals(listOf(Highlight(1000, 1753), Highlight(1753, 3000), pieces[1]), split)
+        assertEquals(split, Highlights.normalize(requireNotNull(split), 10_000))
+        assertEquals(null, Highlights.splitAt(pieces, selected = 1, atMs = 1753))
+        assertEquals(null, Highlights.splitAt(pieces, selected = 0, atMs = 2750))
+        assertEquals(null, Highlights.splitAt(pieces, selected = 0, atMs = 4000))
+    }
+
+    @Test
+    fun cursorInAGapExtendsTheNearestPieceOnEachSide() {
+        val pieces = listOf(Highlight(1000, 3000), Highlight(5000, 8000))
+        fun at(ms: Long) = Highlights.cursorTargets(pieces, selected = 0, atMs = ms, durationMs = 10_000)
+        assertEquals(Highlights.CursorTargets(null, 1, 0, true), at(4000))
+        assertEquals(Highlights.CursorTargets(null, 0, null, true), at(500))
+        assertEquals(Highlights.CursorTargets(null, null, 1, true), at(9000))
+        assertEquals(Highlights.CursorTargets(null, 1, null, true), at(3000))
+        assertEquals(Highlights.CursorTargets(null, null, null, false), at(6500))
+    }
+
+    @Test
+    fun navigationIncludesTheFileEndsAndVisitsTouchingPiecesOnce() {
+        val pieces = listOf(Highlight(1000, 2000), Highlight(2000, 3000), Highlight(9000, 11_000))
+        assertEquals(listOf(0L, 1000L, 2000L, 3000L, 9000L, 10_000L), Highlights.navigationPoints(pieces, 10_000))
+        assertEquals(listOf(0L, 10_000L), Highlights.navigationPoints(emptyList(), 10_000))
+    }
+
+    @Test
     fun addedPieceFindsAFreeSpot() {
         val one = listOf(Highlight(4000, 6000))
         fun at(pieces: List<Highlight>, ms: Long) = Highlights.pieceAt(pieces, ms, 10_000)

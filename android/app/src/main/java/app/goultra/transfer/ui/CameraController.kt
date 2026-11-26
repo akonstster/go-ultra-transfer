@@ -2498,7 +2498,20 @@ class CameraController(private val app: Application) {
     // ---------- viewing ----------
 
     /** File shown in the in-app viewer: still on the camera (the link is kept alive while it is open) or a phone copy. */
-    var viewing by mutableStateOf<CameraFile?>(null)
+    var projectEditorStartMs by mutableStateOf<Long?>(null)
+        private set
+    private var viewedFile by mutableStateOf<CameraFile?>(null)
+    var viewing: CameraFile?
+        get() = viewedFile
+        set(value) {
+            viewedFile = value
+            projectEditorStartMs = null
+        }
+
+    fun viewProjectPiece(file: CameraFile, fromMs: Long) {
+        viewing = file
+        if (file.kind == MediaKind.VIDEO) projectEditorStartMs = fromMs
+    }
 
     /**
      * A downloaded file opens from the phone even with the camera there: full quality, no Wi-Fi traffic. The item

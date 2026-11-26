@@ -33,6 +33,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.TextButton
+import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.ProjectExport
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
@@ -74,6 +75,8 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     // Cards are told apart by their place in [Project.clips], not by equality: the same piece may be in twice.
     var play by remember(p.id) { mutableStateOf<Int?>(null) }
     var playingNow by remember(p.id) { mutableStateOf<Int?>(null) }
+    var pieceToEdit by remember(p.id) { mutableStateOf<Pair<CameraFile, Long>?>(null) }
+    val editorOpen = vm.viewing != null
 
     var carrying by remember(p.id) { mutableStateOf(false) }
     var saving by remember(p.id) { mutableStateOf(false) }
@@ -83,8 +86,8 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var seekTo by remember(p.id) { mutableStateOf<Long?>(null) }
     // Low-resolution copies are made only while the film stands still: the encoder and the player share the phone's
     // hardware, so encoding during playback is exactly the stutter the copies are meant to remove.
-    LaunchedEffect(p.id, clockPlaying) {
-        vm.prepareProjectProxies(p, clockMs, paused = !clockPlaying)
+    LaunchedEffect(p.id, clockPlaying, editorOpen) {
+        vm.prepareProjectProxies(p, clockMs, paused = !clockPlaying && !editorOpen)
     }
     DisposableEffect(p.id) {
         onDispose { vm.stopProjectProxies() }
@@ -170,6 +173,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 },
                 seek = seekTo,
                 onSeeked = { seekTo = null },
+                editorOpen = editorOpen,
+                openEditor = pieceToEdit?.let { (file, fromMs) ->
+                    {
+                        play = null
+                        pieceToEdit = null
+                        vm.viewProjectPiece(file, fromMs)
+                    }
+                },
             )
         }
         if (p.clips.isEmpty()) {
@@ -182,7 +193,10 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            ProjectStrip(vm, p, stale, playingNow, onPlay = { play = it }, onCarrying = { carrying = it })
+            ProjectStrip(
+                vm, p, stale, playingNow, onPlay = { play = it }, onCarrying = { carrying = it },
+                onEdit = { file, clip -> pieceToEdit = file to clip.fromMs },
+            )
             // The same pieces in time: as wide as they last, the track under them, one line for the clock.
             ProjectTimeline(vm, p, clockMs, clockPlaying, onSeek = { seekTo = it })
         }

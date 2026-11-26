@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -89,6 +90,7 @@ internal fun ProjectTimeline(
     var zoomMul by remember(p.id) { mutableFloatStateOf(1f) }
     var scroll by remember(p.id) { mutableFloatStateOf(0f) }
     var touchedAt by remember(p.id) { mutableLongStateOf(0L) }
+    var zoomClock by remember(p.id) { mutableStateOf<Long?>(null) }
     // The music under the finger: the shift is shown at once, written into the project only when the finger is let go.
     var shifting by remember(p.id) { mutableStateOf(false) }
     var shiftPx by remember(p.id) { mutableFloatStateOf(0f) }
@@ -98,6 +100,7 @@ internal fun ProjectTimeline(
     val totalNow by rememberUpdatedState(totalMs)
     val musicNow by rememberUpdatedState(music)
     val seekNow by rememberUpdatedState(onSeek)
+    val clockNow by rememberUpdatedState(clockMs)
 
     fun zoomNow(): Float = (fitZoom(totalNow, width, edge) * zoomMul).coerceIn(0f, TIMELINE_MAX_PX_PER_MS)
     fun geomNow(): TimelineGeometry = TimelineGeometry(startsNow, totalNow, zoomNow(), edge, width)
@@ -112,6 +115,7 @@ internal fun ProjectTimeline(
     }
 
     val scrollState = rememberScrollableState { delta ->
+        if (zoomClock != null) return@rememberScrollableState 0f
         // As the card strip has it: the page moves against the finger, and what is reported back is what was used.
         val old = scroll
         scroll = (scroll - delta).coerceIn(0f, geomNow().maxScroll)
@@ -138,30 +142,36 @@ internal fun ProjectTimeline(
 
     // While the clock runs and nobody is touching the lane, it follows the line and keeps it a third from the left.
     LaunchedEffect(playing, clockMs) {
-        if (!playing || width <= 0f) return@LaunchedEffect
+        if (!playing || width <= 0f || zoomClock != null) return@LaunchedEffect
         if (System.currentTimeMillis() - touchedAt < TIMELINE_FOLLOW_PAUSE_MS) return@LaunchedEffect
         val target = geomNow().scrollToKeep(clockMs, width * TIMELINE_FOLLOW_SHARE)
         if (abs(target - scroll) > 1f) scroll = target
     }
-    // Two fingers zoom about the point between them; one finger is left to the scroll (a pinch that took a single
-    // finger would leave nothing to scroll at all).
+    // Once a pinch starts, keep it exclusive until both fingers are up. The visible playhead is the zoom anchor.
     val pinch = Modifier.pointerInput(p.id, p.clips) {
         awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false)
-            while (true) {
-                val event = awaitPointerEvent()
-                if (event.changes.count { it.pressed } < 2) break
-                val zoomChange = event.calculateZoom()
-                val centroid = event.calculateCentroid(useCurrent = true)
-                if (!zoomChange.isFinite() || zoomChange <= 0f || !centroid.x.isFinite()) continue
-                val fitNow = fitZoom(totalNow, width, edge)
-                if (fitNow <= 0f || fitNow >= TIMELINE_MAX_PX_PER_MS) continue
-                val wanted = (zoomNow() * zoomChange).coerceIn(fitNow, TIMELINE_MAX_PX_PER_MS)
-                val (zoomed, at) = geomNow().zoomedAbout(wanted, centroid.x, scroll)
-                zoomMul = (wanted / fitNow).coerceAtLeast(1f)
-                scroll = at.coerceIn(0f, zoomed.maxScroll)
-                touchedAt = System.currentTimeMillis()
-                event.changes.forEach { it.consume() }
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            try {
+                do {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    if (event.changes.count { it.pressed } >= 2 && zoomClock == null) zoomClock = clockNow
+                    val anchorMs = zoomClock ?: continue
+                    event.changes.forEach { it.consume() }
+                    val zoomChange = event.calculateZoom()
+                    val fitNow = fitZoom(totalNow, width, edge)
+                    if (zoomChange == 1f || fitNow <= 0f || fitNow >= TIMELINE_MAX_PX_PER_MS) continue
+                    val geometry = geomNow()
+                    val x = geometry.x(anchorMs, scroll)
+                    val anchorX = if (x in 0f..width) x else event.calculateCentroid().x
+                    if (!zoomChange.isFinite() || zoomChange <= 0f || !anchorX.isFinite()) continue
+                    val wanted = (zoomNow() * zoomChange).coerceIn(fitNow, TIMELINE_MAX_PX_PER_MS)
+                    val (_, at) = geometry.zoomedAbout(wanted, anchorX, scroll)
+                    zoomMul = (wanted / fitNow).coerceAtLeast(1f)
+                    scroll = at
+                } while (event.changes.any { it.pressed })
+            } finally {
+                if (zoomClock != null) touchedAt = System.currentTimeMillis()
+                zoomClock = null
             }
         }
     }
@@ -170,8 +180,8 @@ internal fun ProjectTimeline(
         Modifier.fillMaxWidth().height(TIMELINE_VIDEO_H + TIMELINE_MUSIC_H)
             .clipToBounds()
             .onSizeChanged { width = it.width.toFloat() }
-            .scrollable(scrollState, Orientation.Horizontal)
-            .then(pinch),
+            .then(pinch)
+            .scrollable(scrollState, Orientation.Horizontal),
     ) {
         Lane(
             clips = p.clips,
@@ -180,7 +190,7 @@ internal fun ProjectTimeline(
             offline = offline,
             music = music,
             peaks = peaks,
-            clockMs = clockMs,
+            clockMs = zoomClock ?: clockMs,
             videoH = videoH,
             musicH = musicH,
             joint = joint,
