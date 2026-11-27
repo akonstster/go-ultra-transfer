@@ -90,6 +90,10 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var saving by remember(p.id) { mutableStateOf(false) }
     var choosingAudio by remember(p.id) { mutableStateOf(false) }
     var configuringMulticam by remember(p.id) { mutableStateOf(false) }
+    val multicamPickerRequest = vm.multicamPickerRequest?.takeIf { it.projectId == p.id }
+    LaunchedEffect(multicamPickerRequest) {
+        if (multicamPickerRequest != null) configuringMulticam = true
+    }
     var showingAngles by remember(p.id) { mutableStateOf(false) }
     val editingAngles = showingAngles && p.multicam != null
     var auditionAngle by remember(p.id) { mutableStateOf<String?>(null) }

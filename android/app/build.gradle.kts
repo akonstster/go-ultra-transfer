@@ -36,8 +36,8 @@ android {
         applicationId = "app.goultra.transfer"
         minSdk = 29 // WifiNetworkSpecifier, MediaStore without storage permission
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.17"
+        versionCode = 45
+        versionName = "0.18"
     }
 
     signingConfigs {

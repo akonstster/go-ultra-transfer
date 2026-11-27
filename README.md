@@ -141,17 +141,27 @@ The protocol was reverse-engineered; see [docs/PROTOCOL.md](docs/PROTOCOL.md). N
 - Menu ⋮ → «Camera»: connection state, model, firmware, serial number, camera and Pod battery, memory card;
   disconnect / connect.
 
+## Editing on your phone
+
+Open **Projects** to edit local video, photos and audio on Android. Camera connection is optional for editing.
+
+- **Concerts and performances.** Bring together a wide stage shot, phone close-ups and a recording from the sound desk. Multicam sync scans the full recording for matching sections. Use matched sections, keep a whole take or place independent footage as cutaways. Listen to individual angles, drag a section by its waveform, add or move a cut, and change the camera inside an existing shot.
+- **Music videos, travel films and sports highlights.** Build a first cut on the phone with automatic montage using beats and musical accents. Each audio clip has its own beat grid. Check the current BPM, listen to the metronome, set a fixed tempo or adjust drop markers on the timeline.
+- **Longer edits.** Trim and split footage, arrange several audio clips with fades and crossfades, and undo or redo changes from History. A multicam group can move with its reference audio inside a larger project.
+
+See the [project website](https://akonstster.github.io/go-ultra-transfer/) for examples and the [0.18 release notes](../../releases/tag/v0.18) for the complete overview.
+
 ## Requirements
 
 - Android 10 or newer. The app uses no Google services. Tested on a Huawei Mate 80 Pro and a Xiaomi Poco X3 NFC.
-- Insta360 GO Ultra. Tested with firmware v1.9.29.
+- Camera control and Wi-Fi transfers require an Insta360 GO Ultra. Tested with firmware v1.9.29.
 
 ## Installation
 
 Download the APK from the [Releases](../../releases) section and install it (you may need to allow installing from
 unknown sources).
 
-On the first run the app walks you through:
+To connect a GO Ultra, follow the setup steps:
 1. Switch the camera on with its button and put it next to the phone.
 2. Confirm the **pairing** — Android shows the request as a notification in the shade.
 3. Confirm the **connection on the camera's screen**.

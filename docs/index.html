@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GO Ultra Transfer — Android app for the Insta360 GO Ultra</title>
-<meta name="description" content="Open-source Android app for the Insta360 GO Ultra. Connect over Bluetooth, download files, edit clips, and synchronise multicam projects by sound. No account, ads, or cloud.">
+<title>GO Ultra Transfer — Android video editor and Insta360 GO Ultra companion</title>
+<meta name="description" content="Edit on Android with or without a camera. Synchronise multicam footage by sound, cut to the beat, mix audio and edit Insta360 GO Ultra footage.">
 <meta name="theme-color" content="#2B3A4E">
 <style>
   :root { --bg:#0f141b; --card:#18202b; --text:#e8edf3; --muted:#9aa7b6; --accent:#f2c94c; --link:#7cc4ff; }
@@ -33,6 +33,15 @@
   .card p { margin:0; color:var(--muted); font-size:.95rem; }
   .grid.adv .card { border-left:3px solid var(--accent); }
   .card.alpha { border-left:3px solid var(--accent); }
+  .editor { margin-top:20px; padding:clamp(18px,4vw,36px); border-radius:20px;
+    background:linear-gradient(140deg,#171f38,#233e55 60%,#164a47); color:#fff; }
+  .editor h2 { margin:0 0 10px; font-size:clamp(1.55rem,4vw,2.25rem); }
+  .editor .card { background:#172638; border:1px solid #496278; box-shadow:none; }
+  .editor .card h3 { color:#89e5dd; }
+  .editor .card:nth-child(2n) h3 { color:#ffd682; }
+  .editor .card p { color:#e1ebf4; }
+  .editor .grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr)); }
+  .editor .btn { margin-top:16px; }
   ol, ul { padding-left:1.2rem; }
   li { margin:4px 0; }
   code { background:rgba(127,127,127,.18); padding:1px 5px; border-radius:4px; }
@@ -54,8 +63,8 @@
   </div>
   <div class="wrap">
     <h1>GO Ultra Transfer</h1>
-    <p data-l="en">An open-source Android app for the Insta360 GO Ultra. Your files and the camera's controls — no account, no ads, no cloud.</p>
-    <p data-l="ru">Android-приложение с открытым кодом для Insta360 GO Ultra. Ваши файлы и управление камерой — без аккаунта, рекламы и облака.</p>
+    <p data-l="en">An Android video editor with multicam, beat detection and automatic montage. Edit files from your phone or connect an Insta360 GO Ultra. Open source, with no account, ads or cloud.</p>
+    <p data-l="ru">Видеоредактор для Android с мультикамом, поиском бита и автомонтажом. Монтируйте файлы с телефона или подключите Insta360 GO Ultra. Открытый код, без аккаунта, рекламы и облака.</p>
     <div class="buttons">
       <a class="btn primary" href="https://github.com/akonstster/go-ultra-transfer/releases/latest">
         <span data-l="en">Download the APK</span><span data-l="ru">Скачать APK</span>
@@ -68,6 +77,58 @@
 </header>
 
 <main class="wrap">
+
+  <section class="editor">
+    <h2 data-l="en">Edit entire projects on your phone</h2>
+    <h2 data-l="ru">Соберите весь ролик на телефоне</h2>
+    <p data-l="en">A gig from several angles, a clip cut to music or a travel video from your gallery. Start with local videos, photos and audio. The project editor works without a connected camera.</p>
+    <p data-l="ru">Концерт с нескольких ракурсов, клип под музыку или ролик из поездки. Добавьте видео, фото и звук с телефона. Для работы с проектом подключать камеру не нужно.</p>
+    <div class="grid">
+      <div class="card">
+        <h3 data-l="en">Multicam sync by sound</h3><h3 data-l="ru">Мультикам по звуку</h3>
+        <p data-l="en">Use a song or the sound from a video as the reference. The editor searches the entire recording for matching sections, including either side of a passage missing from one version. Add the matched sections, keep a take whole, or use unrelated footage as cutaways.</p>
+        <p data-l="ru">Возьмите за основу песню или звук из видео. Редактор ищет совпадения по всей записи, в том числе до и после пропущенного в одной версии проигрыша. Добавьте найденные части, оставьте дубль целиком или используйте видео с другим звуком как перебивку.</p>
+      </div>
+      <div class="card">
+        <h3 data-l="en">Refine a multicam edit</h3><h3 data-l="ru">Правка мультикам-монтажа</h3>
+        <p data-l="en">See each angle's waveform and listen to its own sound. Hold and drag a section to line it up, add or move a cut, or switch the camera inside an existing shot. Move the finished group together with its reference audio.</p>
+        <p data-l="ru">Смотрите волны ракурсов и слушайте их собственный звук. Удерживайте часть, чтобы сдвинуть её по волне. Добавляйте и двигайте склейки, меняйте камеру внутри готового плана. Перемещайте группу вместе с опорным звуком.</p>
+      </div>
+      <div class="card">
+        <h3 data-l="en">Beats, tempo and musical accents</h3><h3 data-l="ru">Бит, темп и музыкальные акценты</h3>
+        <p data-l="en">Find the beat in each audio file, see the current BPM, and listen to the grid with a metronome. Use a fixed tempo and shift the grid when needed. Analyse dynamics or musical structure to find accents, then adjust the markers on the timeline.</p>
+        <p data-l="ru">Находите бит отдельно в каждом файле, смотрите текущий BPM и слушайте сетку с метрономом. При необходимости задайте постоянный темп и сдвиньте сетку. Ищите акценты по динамике или структуре музыки и правьте метки на таймлайне.</p>
+      </div>
+      <div class="card">
+        <h3 data-l="en">Automatic montage you can edit</h3><h3 data-l="ru">Автомонтаж с ручной правкой</h3>
+        <p data-l="en">Build a first cut using beats and musical accents, then refine the shots yourself. Trim and split clips, mix multiple audio files with fades and crossfades, and use the edit history to undo or redo changes.</p>
+        <p data-l="ru">Соберите черновик по битам и музыкальным акцентам, затем поправьте планы вручную. Обрезайте и делите клипы, сводите несколько аудиофайлов с плавными переходами, отменяйте и возвращайте правки через историю.</p>
+      </div>
+    </div>
+    <a class="btn primary" href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.18">
+      <span data-l="en">What's in 0.18</span><span data-l="ru">Что вошло в 0.18</span>
+    </a>
+  </section>
+
+  <h2 data-l="en">What you can make</h2>
+  <h2 data-l="ru">Что можно смонтировать</h2>
+  <div class="grid adv">
+    <div class="card">
+      <h3 data-l="en">Concert or live session</h3><h3 data-l="ru">Концерт или лайв-сессия</h3>
+      <p data-l="en">Combine a wide shot of the stage, a phone close-up and a recording from the sound desk. Sync the angles, build a first cut on your phone, then choose which camera shows the solo or the audience.</p>
+      <p data-l="ru">Совместите общий план сцены, крупный план с телефона и запись с пульта. Соберите черновой монтаж прямо на телефоне, затем выберите ракурс для соло и добавьте кадры зала.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Talk, recital or dance performance</h3><h3 data-l="ru">Доклад, спектакль или танцевальный номер</h3>
+      <p data-l="en">Keep one angle wide and use another for close-ups. Sync recordings of the same performance by sound, keep a reference track for consistent audio and switch angles within the edit.</p>
+      <p data-l="ru">Оставьте одну камеру на общем плане, второй снимайте детали. Совместите записи одного выступления по звуку, оставьте опорную дорожку и меняйте ракурс внутри монтажа.</p>
+    </div>
+    <div class="card">
+      <h3 data-l="en">Music video, travel or sports recap</h3><h3 data-l="ru">Музыкальный клип, поездка или спортивная нарезка</h3>
+      <p data-l="en">Pick highlights from the gallery, add a soundtrack and let automatic montage find cut points in the music. Keep the shots you like and adjust cuts around the strongest moments.</p>
+      <p data-l="ru">Выберите лучшие моменты из галереи, добавьте музыку и запустите автомонтаж по битам и акцентам. Оставьте удачные планы и поправьте склейки в ключевых местах.</p>
+    </div>
+  </div>
 
   <h2 data-l="en">Why it stands out</h2>
   <h2 data-l="ru">Чем выделяется</h2>
@@ -92,12 +153,6 @@
   <h2 data-l="en">What it does</h2>
   <h2 data-l="ru">Что умеет</h2>
   <div class="grid">
-    <div class="card">
-      <h3 data-l="en">Projects and multicam in 0.17</h3><h3 data-l="ru">Проекты и мультикам в 0.17</h3>
-      <p data-l="en">Edit video and multiple audio clips on a timeline, cut to the beat, and synchronise camera angles against a reference track. When different parts require different offsets, you can place them separately or keep the whole recording.</p>
-      <p data-l="ru">Монтируйте видео и несколько аудиоклипов на таймлайне, режьте по биту и синхронизируйте ракурсы с основным звуком. Если разным участкам нужны разные сдвиги, можно расставить их отдельно или сохранить запись целиком.</p>
-      <p><a href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.17">v0.17</a></p>
-    </div>
     <div class="card">
       <h3 data-l="en">One-button connection</h3><h3 data-l="ru">Подключение одной кнопкой</h3>
       <p data-l="en">Wakes the camera over Bluetooth — even a switched-off one — and joins its Wi-Fi by itself.</p>
@@ -212,6 +267,8 @@
 
   <h2 data-l="en">Getting started</h2>
   <h2 data-l="ru">Как начать</h2>
+  <p data-l="en">To edit local files, open <strong>Projects</strong> or add media from <strong>Files</strong>. Follow the pairing steps below to control a GO Ultra or work with files on the camera.</p>
+  <p data-l="ru">Для монтажа с телефона откройте <strong>«Проекты»</strong> или добавьте материалы через <strong>«Файлы»</strong>. Следующие шаги нужны для управления GO Ultra и работы с файлами на камере.</p>
   <div data-l="en">
     <ol>
       <li>Download the APK from <a href="https://github.com/akonstster/go-ultra-transfer/releases/latest">Releases</a> and install it (you may need to allow installs from unknown sources).</li>
@@ -235,12 +292,12 @@
   <h2 data-l="ru">Требования</h2>
   <ul data-l="en">
     <li>Android 10 or newer; no Google Play Services needed.</li>
-    <li>Insta360 GO Ultra, tested with firmware v1.9.29.</li>
+    <li>For camera features: Insta360 GO Ultra, tested with firmware v1.9.29.</li>
     <li>A VPN on the phone can block the camera's Wi-Fi — switch it off or exclude the app.</li>
   </ul>
   <ul data-l="ru">
     <li>Android 10 или новее; сервисы Google не нужны.</li>
-    <li>Insta360 GO Ultra, проверено с прошивкой v1.9.29.</li>
+    <li>Для функций камеры нужна Insta360 GO Ultra, проверено с прошивкой v1.9.29.</li>
     <li>VPN на телефоне может мешать Wi-Fi камеры — отключите его или добавьте приложение в исключения.</li>
   </ul>
 

@@ -1,19 +1,28 @@
 package app.goultra.transfer.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.AlertDialog
@@ -22,36 +31,53 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import app.goultra.transfer.camera.MediaKind
+import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Multicam
+import app.goultra.transfer.camera.MulticamCutaway
 import app.goultra.transfer.camera.MulticamTake
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectAudioClip
 import app.goultra.transfer.camera.TrackAudio
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToLong
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withTimeoutOrNull
 
 private fun cameraLabel(camera: Int) = tr("Камера %s", "Angle %s").format(camera)
@@ -61,47 +87,103 @@ internal data class MulticamHighlight(val start: Long, val end: Long, val cut: L
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun MulticamSetup(vm: CameraController, project: Project, onDismiss: () -> Unit) {
-    val selected = remember(project.id) {
+    val saved = remember(project.id) { vm.multicamPickerSelection(project) }
+    val request = vm.multicamPickerRequest?.takeIf { it.projectId == project.id }
+    val selected = remember(project.id, request) {
         mutableStateMapOf<String, Int>().apply {
-            project.multicam?.takes?.forEach { put(it.file, it.camera) }
+            putAll(saved.cameras)
+            var next = (values.maxOrNull() ?: 0) + 1
+            for (name in request?.videos.orEmpty()) if (name !in this) put(name, next++)
         }
     }
-    val videos = vm.listedFiles.filter { it.kind == MediaKind.VIDEO }.distinctBy { it.name }
-    val audio = vm.projectAudioFiles.map { it.name }
-    var reference by remember(project.id) {
-        mutableStateOf(project.multicam?.referenceFile ?: project.audioClips.firstOrNull { it.source.name in audio }?.source?.name)
+    val videos = vm.multicamVideoFiles
+    val audioFiles = vm.projectAudioFiles
+    val audio = remember(audioFiles) { audioFiles.map { it.name } }
+    val available = remember(videos) { videos.associateBy { it.name } }
+    val configuredCutaways = remember(project.multicam) {
+        project.multicam?.takes.orEmpty().filter { it.cutaway }.map { it.file }.toSet()
+    }
+    var query by remember(project.id) { mutableStateOf("") }
+    var reference by remember(project.id, request) {
+        mutableStateOf(request?.audio?.takeIf { it in audio } ?: saved.reference ?: selected.keys.sorted().firstOrNull())
     }
     var choosingReference by remember { mutableStateOf(false) }
+    var choosingAngle by remember { mutableStateOf<String?>(null) }
+    var confirmReset by remember { mutableStateOf(false) }
+    val angleOptions = (selected.values.toSet() + ((selected.values.maxOrNull() ?: 0) + 1)).sorted()
     val referenceOptions = selected.keys.sorted() + audio.filter { it !in selected }
-    val master = reference.takeIf { it in referenceOptions }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
+    val master = reference?.takeIf { it in referenceOptions }
+    val chosen = selected.keys.toSet()
+    val missing = remember(chosen, available) { chosen.filter { it !in available }.sorted() }
+    val results = remember(videos, missing, query) {
+        val terms = query.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        (missing + videos.map { it.name }).filter { name -> terms.all { name.contains(it, ignoreCase = true) } }
+    }
+    val listState = rememberLazyListState()
+    fun close() {
+        vm.closeMulticamPicker(project, selected.toMap(), reference)
+        onDismiss()
+    }
+    fun toggle(name: String, checked: Boolean) {
+        if (checked) {
+            selected[name] = (selected.values.maxOrNull() ?: 0) + 1
+            if (reference == null) reference = name
+        } else {
+            selected.remove(name)
+            if (reference == name) reference = selected.keys.sorted().firstOrNull()
+        }
+    }
+    fun synchronise(reset: Boolean) {
+        val currentMaster = master ?: return
+        vm.buildMulticam(project, selected.toMap(), currentMaster, reset = reset)
+        close()
+    }
+    val ready = master != null && selected.values.toSet().size >= 2 && missing.isEmpty() && vm.multicamProgress == null
+    ModalBottomSheet(onDismissRequest = ::close) {
+        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 20.dp)) {
             Text(tr("Мультикам", "Multicam"), style = MaterialTheme.typography.titleLarge)
             Text(tr("Выбери записи и назначь один номер файлам с одной камеры.",
-                "Select recordings and give files from the same camera the same angle."))
-            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
-                items(videos, key = { it.name }) { file ->
-                    val angle = selected[file.name]
-                    var chooseAngle by remember { mutableStateOf(false) }
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(angle != null, onCheckedChange = { checked ->
-                            if (checked) {
-                                selected[file.name] = (selected.values.maxOrNull() ?: 0) + 1
-                                if (reference == null) reference = file.name
-                            } else {
-                                selected.remove(file.name)
-                                if (reference == file.name) reference = selected.keys.sorted().firstOrNull()
+                "Select recordings and give files from the same camera the same angle."),
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it; choosingAngle = null },
+                label = { Text(tr("Поиск по названию", "Search by name")) },
+                leadingIcon = { Icon(Icons.Filled.Search, null) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            )
+            Text(tr("%s шт.", "%s items").format(chosen.size), style = MaterialTheme.typography.labelMedium)
+            if (results.isEmpty()) Text(tr("Ничего не найдено", "No results"), style = MaterialTheme.typography.bodySmall)
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 310.dp), state = listState) {
+                items(results, key = { it }) { name ->
+                    val file = available[name]
+                    val angle = selected[name]
+                    Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(angle != null, onCheckedChange = { toggle(name, it) })
+                        Row(Modifier.weight(1f).clickable { toggle(name, angle == null) },
+                            verticalAlignment = Alignment.CenterVertically) {
+                            MulticamPickerThumbnail(vm, file, listState)
+                            Column(Modifier.padding(start = 8.dp)) {
+                                Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyMedium)
+                                val details = if (file == null) tr("Часть записей недоступна", "Some recordings are unavailable")
+                                else buildList {
+                                    file.created?.let { add(it.toLocalDate().toString() + " " + it.toLocalTime().toString().take(5)) }
+                                    file.durationSec?.takeIf { it > 0 }?.let { add(formatDuration(it)) }
+                                    if (name in configuredCutaways) add(tr("Перебивка", "Cutaway"))
+                                }.joinToString(" · ")
+                                if (details.isNotEmpty()) Text(details, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                        })
-                        Text(file.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         if (angle != null) Box {
-                            TextButton({ chooseAngle = true }) { Text(cameraLabel(angle)) }
-                            val angles = (selected.values.toSet() + ((selected.values.maxOrNull() ?: 0) + 1)).sorted()
-                            DropdownMenu(expanded = chooseAngle, onDismissRequest = { chooseAngle = false }) {
-                                angles.forEach { number ->
+                            TextButton({ choosingAngle = name }) { Text(cameraLabel(angle)) }
+                            if (choosingAngle == name) DropdownMenu(expanded = true, onDismissRequest = { choosingAngle = null }) {
+                                angleOptions.forEach { number ->
                                     DropdownMenuItem(text = { Text(cameraLabel(number)) }, onClick = {
-                                        selected[file.name] = number
-                                        chooseAngle = false
+                                        selected[name] = number
+                                        choosingAngle = null
                                     })
                                 }
                             }
@@ -112,9 +194,10 @@ internal fun MulticamSetup(vm: CameraController, project: Project, onDismiss: ()
             HorizontalDivider()
             Box {
                 TextButton({ choosingReference = true }, enabled = referenceOptions.isNotEmpty()) {
-                    Text(tr("Основной звук", "Reference sound") + " · " + master.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(tr("Основной звук", "Reference sound") + " · " + master.orEmpty(),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                DropdownMenu(expanded = choosingReference, onDismissRequest = { choosingReference = false }) {
+                if (choosingReference) DropdownMenu(expanded = true, onDismissRequest = { choosingReference = false }) {
                     referenceOptions.forEach { name ->
                         DropdownMenuItem(text = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = {
                             reference = name
@@ -123,19 +206,48 @@ internal fun MulticamSetup(vm: CameraController, project: Project, onDismiss: ()
                     }
                 }
             }
-            if (project.clips.isNotEmpty() || project.audioClips.isNotEmpty()) {
-                Text(tr("Синхронизированные ракурсы добавляются в проект как один клип со своим звуком.",
-                    "Synced angles are added as one clip with linked audio."),
-                    style = MaterialTheme.typography.bodySmall)
+            FilledTonalButton({ synchronise(reset = false) }, enabled = ready) {
+                Text(tr("Синхронизировать", "Synchronise"))
             }
-            FilledTonalButton(
-                onClick = {
-                    if (master != null) vm.buildMulticam(project, selected.toMap(), master)
-                    onDismiss()
-                },
-                enabled = master != null && selected.values.toSet().size >= 2 && vm.multicamProgress == null,
-            ) { Text(tr("Синхронизировать", "Synchronise")) }
+            if (project.multicam != null) TextButton({ confirmReset = true }, enabled = ready) {
+                Text(tr("Синхронизировать со сбросом", "Reset and synchronise"))
+            }
         }
+    }
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text(tr("Сбросить синхронизацию?", "Reset multicam sync?")) },
+            text = { Text(tr(
+                "Ракурсы пересчитаются заново. Раскладка мультикама, его склейки и отметки перебивок будут сброшены. Действие можно отменить в истории.",
+                "Angles will be analysed again. Multicam placements, cuts and cutaway choices will reset. You can undo this in History.",
+            )) },
+            confirmButton = {
+                TextButton({ confirmReset = false; synchronise(reset = true) }, enabled = ready) {
+                    Text(tr("Синхронизировать со сбросом", "Reset and synchronise"))
+                }
+            },
+            dismissButton = { TextButton({ confirmReset = false }) { Text(tr("Отмена", "Cancel")) } },
+        )
+    }
+}
+
+@Composable
+private fun MulticamPickerThumbnail(vm: CameraController, file: CameraFile?, listState: LazyListState) {
+    val thumb by produceState<ImageBitmap?>(null, file, vm.conn, listState) {
+        if (file == null) return@produceState
+        snapshotFlow { listState.isScrollInProgress }.collectLatest { scrolling ->
+            if (!scrolling && value == null) {
+                delay(100)
+                value = vm.thumbnail(file)
+            }
+        }
+    }
+    Box(Modifier.size(54.dp, 36.dp).background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center) {
+        val frame = thumb
+        if (frame != null) Image(frame, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Icon(Icons.Filled.Videocam, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -183,7 +295,6 @@ internal fun MulticamControls(
     var boundary by remember { mutableStateOf<Long?>(null) }
     var movingCut by remember { mutableStateOf(false) }
     var angles by remember { mutableStateOf(false) }
-    var confirmParts by remember { mutableStateOf<MulticamTake?>(null) }
     val pair = pairs.firstOrNull { it.second.start == boundary }
     fun edgeOf(current: Multicam.Shot): Long? =
         pairs.firstOrNull { it.second == current }?.second?.start
@@ -267,49 +378,92 @@ internal fun MulticamControls(
             }
         }
     }
-    val flagged = group.takes.count { it.needsReview || it.startMs == null }
-    if (flagged > 0 && expanded) {
-        Text(tr("Автосинхронизация не подтвердила %s записей целиком", "Auto sync could not verify %s full recordings").format(flagged),
-            Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelMedium)
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            group.takes.filter { it.proposedSpans.size >= 2 }.forEach { take ->
-                TextButton({ confirmParts = take }) {
-                    Text(tr("Совпавшие части · %s", "Matched parts · %s").format(cameraLabel(take.camera)))
-                }
-            }
+}
+
+private fun syncSeconds(at: Long): String =
+    String.format(Locale.ROOT, "%.3f", at / 1000.0).trimEnd('0').trimEnd('.')
+
+private enum class ReviewAction { Sections, Whole, AtPlayhead, Cutaway }
+
+@Composable
+private fun multicamDurationSummary(placedMs: Long, fullMs: Long): String =
+    tr("В монтаж попадёт %s из %s", "Will use %s of %s")
+        .format(formatDuration((placedMs / 1000).toInt()), formatDuration((fullMs / 1000).toInt()))
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MulticamReviewActions(vm: CameraController, group: Multicam, master: ProjectAudioClip,
+                                  take: MulticamTake, clock: () -> Long, onClose: () -> Unit) {
+    var manualStart by remember(take.id) { mutableStateOf(0L) }
+    var confirm by remember(take.id) { mutableStateOf<ReviewAction?>(null) }
+    var affected by remember(take.id) { mutableStateOf<List<Multicam.Shot>>(emptyList()) }
+    val confirmed = remember(take) { take.confirmedSpans() }
+    val conflicts = remember(take) {
+        take.proposedSpans.any { span -> take.proposedSpans.any { it != span && it.overlaps(span) } }
+    }
+    val coveredMs = remember(confirmed) { confirmed.sumOf { it.toMs - it.fromMs } }
+    fun save(action: ReviewAction) {
+        when (action) {
+            ReviewAction.Sections -> vm.resolveMulticamAlignment(take.id, keepWhole = false, spans = confirmed)
+            ReviewAction.Whole -> vm.resolveMulticamAlignment(take.id, keepWhole = true)
+            ReviewAction.AtPlayhead -> vm.placeMulticamTake(take.id, manualStart)
+            ReviewAction.Cutaway -> vm.useMulticamCutaway(take.id)
+        }
+        onClose()
+    }
+    fun prepare(action: ReviewAction) {
+        val next = when (action) {
+            ReviewAction.Sections -> group.acceptPartialAlignment(take.id, confirmed)
+            ReviewAction.Whole -> group.keepWholeTake(take.id)
+            ReviewAction.AtPlayhead -> group.alignWholeTake(take.id, manualStart)
+            ReviewAction.Cutaway -> group.keepCutaway(take.id)
+        } ?: return
+        val lost = group.lostCoverage(next, master.fromMs, master.sourceEndMs)
+        if (lost.isEmpty()) save(action) else {
+            affected = lost
+            confirm = action
         }
     }
-    confirmParts?.let { take ->
+    take.driftMs?.let { drift -> Text(tr("Замечен дрейф звука (%s мс). Проверьте синхрон в начале и в конце.",
+        "Audio drift detected (%s ms). Check sync at the start and end.").format(drift)) }
+    if (conflicts && confirmed.isEmpty()) Text(tr("Проверьте позицию",
+        "Check placement"),
+        Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelMedium)
+    else if (confirmed.isNotEmpty()) Text(multicamDurationSummary(coveredMs, take.lengthMs),
+        Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelMedium)
+    FlowRow(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (confirmed.isNotEmpty()) TextButton({
+            prepare(ReviewAction.Sections)
+        }) {
+            Text(tr("Добавить части", "Add sections") + " (${confirmed.size})")
+        }
+        if (take.startMs != null) TextButton({ prepare(ReviewAction.Whole) }) {
+            Text(tr("Оставить целым файлом", "Keep the full file"))
+        } else TextButton({
+            manualStart = master.sourceAt(clock()).coerceIn(master.fromMs, master.sourceEndMs - 1)
+            prepare(ReviewAction.AtPlayhead)
+        }) {
+            Text(tr("Поставить у курсора", "Place at playhead"))
+        }
+        if (take.lengthMs >= 500L && take.file != group.referenceFile) TextButton({ prepare(ReviewAction.Cutaway) }) {
+            Text(tr("Использовать как перебивку", "Use as cutaway"))
+        }
+    }
+    confirm?.let { action ->
         AlertDialog(
-            onDismissRequest = { confirmParts = null },
-            title = { Text(tr("Добавить совпавшие части?", "Add matching sections?")) },
+            onDismissRequest = { confirm = null },
+            title = { Text(tr("Планы без прежнего ракурса (%s)", "Shots losing their angle (%s)").format(affected.size)) },
             text = {
-                Text(take.file + "\n\n" + tr(
-                    "Найдено совпавших частей (%s). Можно добавить их отдельно или оставить целый файл с наиболее подтверждённым сдвигом.",
-                    "Found matching sections (%s). Add them separately or keep the full file at the best-supported offset.",
-                ).format(take.proposedSpans.size))
-            },
-            confirmButton = {
-                Column(horizontalAlignment = Alignment.End) {
-                    TextButton({
-                        vm.resolveMulticamAlignment(take.id, keepWhole = false)
-                        confirmParts = null
-                        onResult()
-                    }) { Text(tr("Добавить части", "Add sections")) }
-                    TextButton({
-                        vm.resolveMulticamAlignment(take.id, keepWhole = true)
-                        confirmParts = null
-                        onResult()
-                    }) { Text(tr("Оставить целым файлом", "Keep the full file")) }
-                    TextButton({ confirmParts = null }) { Text(tr("Не сейчас", "Not now")) }
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    Text(affected.joinToString(" · ") {
+                        "${syncSeconds(master.projectAt(it.start))}–${syncSeconds(master.projectAt(it.end))} s"
+                    }, maxLines = 1)
                 }
             },
+            confirmButton = { TextButton({ save(action) }) { Text(tr("Применить", "Apply")) } },
+            dismissButton = { TextButton({ confirm = null }) { Text(tr("Не сейчас", "Not now")) } },
         )
-    }
-    if (audition != null) {
-        Text(tr("Звук ракурса: %s", "Angle audio: %s").format(audition), Modifier.padding(horizontal = 8.dp),
-            maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -323,6 +477,8 @@ internal fun MulticamRows(
     scroll: () -> Float,
     clock: () -> Long,
     onInspect: (MulticamTake, Long?) -> Unit,
+    onResult: () -> Unit,
+    onSeekResult: (Long) -> Unit,
     onDraggingChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -330,123 +486,232 @@ internal fun MulticamRows(
         MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.error)
     val bg = MaterialTheme.colorScheme.surfaceVariant
     val line = MaterialTheme.colorScheme.onSurface
-    val warningColor = MaterialTheme.colorScheme.error
+    val reviewColor = MaterialTheme.colorScheme.onTertiaryContainer
     val shown by rememberUpdatedState(audition)
     val inspect by rememberUpdatedState(onInspect)
+    val layout by rememberUpdatedState(geometry)
+    val scrollNow by rememberUpdatedState(scroll)
+    val result by rememberUpdatedState(onResult)
+    val seekResult by rememberUpdatedState(onSeekResult)
+    val draggingChange by rememberUpdatedState(onDraggingChange)
+    var reviewId by remember(group.referenceFile) { mutableStateOf<String?>(null) }
+    val selectedReview = group.takes.firstOrNull { it.id == reviewId && !it.cutaway && (it.needsReview || it.startMs == null) }
     val origin = master.startMs - master.fromMs
-    fun shownStart(take: MulticamTake): Long {
-        val start = take.previewStartMs
-        return if ((take.needsReview || take.startMs == null) &&
-            (start >= master.sourceEndMs || start + take.lengthMs <= master.fromMs)) master.fromMs else start
-    }
-    val files = remember(group.takes) { group.takes.map { it.file } }
+    val files = remember(group.takes) { group.takes.map { it.file }.distinct() }
     val peaks = remember(files, vm.musicVersion) { files.associateWith(vm::multicamPeaks) }
+
     Column(modifier) {
         group.cameras.forEachIndexed { index, camera ->
             val color = colors[index % colors.size]
             val takes = group.takes.filter { it.camera == camera }
-            val placed = takes.filter { !it.needsReview && it.startMs != null }
-            val review = takes - placed.toSet()
-            val lanes = listOf(placed).filter { it.isNotEmpty() } + review.map(::listOf)
-            lanes.forEach { lane ->
-                val warning = lane.singleOrNull()?.takeIf { it.startMs == null || it.needsReview }
-                var pending by remember(lane.map { it.id }) { mutableStateOf<Pair<String, Long>?>(null) }
-                Box(Modifier.fillMaxWidth().height(50.dp).clipToBounds()) {
-                    Canvas(Modifier.matchParentSize().pointerInput(lane, master.startMs, master.fromMs, master.sourceEndMs) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val g = geometry()
-                            val at = g.msAt(down.position.x, scroll())
-                            if (!master.contains(at)) return@awaitEachGesture
-                            val hits = lane.filter { at - origin in shownStart(it) until shownStart(it) + it.lengthMs }
-                            val take = hits.firstOrNull { it.id == shown } ?: hits.lastOrNull()
-                                ?: return@awaitEachGesture
-                            val tap = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull false
-                                    if (change.isConsumed || event.changes.count { it.pressed } > 1 ||
-                                        (change.position - down.position).getDistance() > viewConfiguration.touchSlop
-                                    ) return@withTimeoutOrNull false
-                                    if (!change.pressed) {
-                                        change.consume()
-                                        return@withTimeoutOrNull true
-                                    }
-                                }
-                                @Suppress("UNREACHABLE_CODE")
-                                false
+            val cutaways = takes.filter { it.cutaway }
+            val inserts = group.cutaways.filter { cut -> cutaways.any { it.file == cut.file } }
+            val placed = takes.filter { !it.cutaway && !it.needsReview && it.startMs != null }
+            val pendingReviews = takes.filter { !it.cutaway && (it.needsReview || it.startMs == null) }
+            val review = selectedReview?.takeIf { it.camera == camera }
+            val previewParts = remember(review) { review?.confirmedSpans().orEmpty() }
+            val audible = placed.firstOrNull { it.id == audition }
+            val label = review?.file ?: audible?.file
+            var pendingDrag by remember(camera, placed) { mutableStateOf<Pair<String, Long>?>(null) }
+            var draggingCutaway by remember(camera, inserts) { mutableStateOf<Pair<MulticamCutaway, Long>?>(null) }
+            var selectedCutaway by remember(camera) { mutableStateOf<String?>(null) }
+            fun toggle(take: MulticamTake) {
+                if (reviewId == take.id) reviewId = null else {
+                    reviewId = take.id
+                    result()
+                }
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(cameraLabel(camera), style = MaterialTheme.typography.labelMedium)
+                if (audible != null) Icon(Icons.AutoMirrored.Filled.VolumeUp, tr("Звук", "Sound"),
+                    Modifier.padding(start = 4.dp).size(14.dp), tint = color)
+                Text(label.orEmpty(), Modifier.weight(1f).padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (pendingReviews.isNotEmpty()) {
+                    Row(Modifier.horizontalScroll(rememberScrollState())) {
+                        pendingReviews.forEach { take ->
+                            IconButton({ toggle(take) }, modifier = Modifier.size(36.dp)) {
+                                Icon(Icons.Filled.Warning, "${tr("Проверьте позицию", "Check placement")} · ${take.file}",
+                                    modifier = Modifier.size(if (review?.id == take.id) 21.dp else 17.dp), tint = reviewColor)
                             }
-                            if (tap == true) inspect(take, at)
-                            if (tap != null || take.file == group.referenceFile) return@awaitEachGesture
-                            var dragging = false
-                            val start = shownStart(take)
-                            var offset = start
-                            try {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (change.isConsumed || event.changes.count { it.pressed } > 1) break
-                                    if (!change.pressed) {
-                                        if (dragging) {
+                        }
+                    }
+                }
+            }
+            if (placed.isNotEmpty() || pendingReviews.isNotEmpty() || inserts.isNotEmpty()) Box(Modifier.fillMaxWidth().height(40.dp).clipToBounds()) {
+                Canvas(Modifier.matchParentSize().pointerInput(placed, pendingReviews, inserts, master, review?.id) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val g = layout()
+                        val scrollX = scrollNow()
+                        val at = g.msAt(down.position.x, scrollX)
+                        if (!master.contains(at)) return@awaitEachGesture
+                        val badge = pendingReviews.firstOrNull { item ->
+                            placed.firstOrNull { it.file == item.file }?.startMs?.let { begin ->
+                                val x = g.rawX(origin + maxOf(master.fromMs, begin), scrollX) + 7.dp.toPx()
+                                abs(x - down.position.x) <= 11.dp.toPx() && down.position.y <= 16.dp.toPx()
+                            } == true
+                        }
+                        val hits = placed.filter { it.available(at - origin) }
+                        val take = hits.firstOrNull { it.id == shown } ?: hits.lastOrNull()
+                        val insert = inserts.firstOrNull { at - origin in it.atMs until it.endMs }
+                        if (badge == null && take == null && insert == null) return@awaitEachGesture
+                        val tap = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull false
+                                if (change.isConsumed || event.changes.count { it.pressed } > 1 ||
+                                    (change.position - down.position).getDistance() > viewConfiguration.touchSlop
+                                ) return@withTimeoutOrNull false
+                                if (!change.pressed) {
+                                    change.consume()
+                                    return@withTimeoutOrNull true
+                                }
+                            }
+                            @Suppress("UNREACHABLE_CODE")
+                            false
+                        }
+                        if (tap == true) {
+                            if (badge != null) toggle(badge) else if (insert != null) {
+                                reviewId = null
+                                result()
+                                seekResult(at)
+                            } else if (take != null) {
+                                reviewId = null
+                                inspect(take, at)
+                            }
+                        }
+                        if (tap != null || badge != null ||
+                            (insert == null && (take == null || take.file == group.referenceFile)) ||
+                            (insert != null && insert.lengthMs > master.durationMs)) return@awaitEachGesture
+                        val start = insert?.atMs ?: checkNotNull(take).previewStartMs
+                        var offset = start
+                        var dragging = false
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.isConsumed || event.changes.count { it.pressed } > 1) break
+                                if (!change.pressed) {
+                                    if (dragging) {
+                                        if (insert != null) {
+                                            vm.moveMulticamCutaway(insert, offset)
+                                            result()
+                                        } else if (take != null) {
                                             vm.placeMulticamTake(take.id, offset)
                                             inspect(take, null)
                                         }
-                                        change.consume()
-                                        break
                                     }
-                                    val dx = change.position.x - down.position.x
-                                    if (!dragging && abs(dx) < 1f) continue
-                                    if (!dragging) onDraggingChange(true)
-                                    dragging = true
                                     change.consume()
-                                    offset = (start + (dx / g.pxPerMs.coerceAtLeast(0.0001f)).roundToLong())
-                                        .coerceIn(master.fromMs + 1L - take.lengthMs, master.sourceEndMs - 1L)
-                                    pending = take.id to offset
+                                    break
                                 }
-                            } finally {
-                                pending = null
-                                if (dragging) onDraggingChange(false)
+                                val dx = change.position.x - down.position.x
+                                if (!dragging && abs(dx) < 1f) continue
+                                if (!dragging) draggingChange(true)
+                                dragging = true
+                                change.consume()
+                                val target = start + (dx / g.pxPerMs.coerceAtLeast(0.0001f)).roundToLong()
+                                if (insert != null) {
+                                    offset = target.coerceIn(master.fromMs, master.sourceEndMs - insert.lengthMs)
+                                    draggingCutaway = insert to offset
+                                } else if (take != null) {
+                                    offset = target.coerceIn(master.fromMs + 1L - take.lengthMs, master.sourceEndMs - 1L)
+                                    pendingDrag = take.id to offset
+                                }
                             }
+                        } finally {
+                            pendingDrag = null
+                            draggingCutaway = null
+                            if (dragging) draggingChange(false)
                         }
-                    }) {
-                        val g = geometry()
-                        val at = scroll()
-                        drawRect(bg)
-                        val top = 17.dp.toPx()
-                        for (take in lane) {
-                            val start = origin + (pending?.takeIf { it.first == take.id }?.second ?: shownStart(take))
-                            val x = g.rawX(maxOf(start, master.startMs), at).coerceIn(0f, size.width)
-                            val end = g.rawX(minOf(start + take.lengthMs, master.endMs), at).coerceIn(0f, size.width)
-                            if (end <= x) continue
-                            val span = Size(end - x, size.height - top)
-                            val ink = if (warning != null) warningColor else color
-                            drawRect(ink.copy(alpha = 0.22f), Offset(x, top), span)
-                            if (shown == take.id || pending?.first == take.id) {
-                                drawRect(color, Offset(x, top), span, style = Stroke(2.dp.toPx()))
-                            }
-                            val samples = peaks[take.file] ?: continue
-                            val from = (g.rawMsAt(x, at) - start).coerceIn(0L, take.lengthMs)
-                            val to = (g.rawMsAt(end, at) - start).coerceIn(from, take.lengthMs)
-                            if (to <= from) continue
-                            val count = ((end - x) / 3f).toInt().coerceAtLeast(1)
-                            val wave = TrackAudio.window(samples, take.sourceFromMs + from, take.sourceFromMs + to, count)
-                            val middle = (top + size.height) / 2
-                            for ((column, peak) in wave.withIndex()) {
-                                val px = x + (column + 0.5f) * (end - x) / count
-                                val h = peak * (size.height - top) / 2
-                                drawLine(ink, Offset(px, middle - h), Offset(px, middle + h), 1.5f)
-                            }
-                        }
-                        val x = g.rawX(clock(), at)
-                        if (x in 0f..size.width) drawLine(line, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
                     }
-                    Text(
-                        cameraLabel(camera) + (warning?.let { " · ⚠ ${it.file}" }
-                            ?: lane.firstOrNull { it.id == audition }?.let { " · ${it.file}" }.orEmpty()),
-                        Modifier.padding(horizontal = 6.dp).align(Alignment.TopStart),
-                        style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
+                }) {
+                    val g = layout()
+                    val scrollX = scrollNow()
+                    drawRect(bg)
+                    for (take in placed) {
+                        val start = origin + (pendingDrag?.takeIf { it.first == take.id }?.second ?: take.previewStartMs)
+                        val x = g.rawX(maxOf(start, master.startMs), scrollX).coerceIn(0f, size.width)
+                        val end = g.rawX(minOf(start + take.lengthMs, master.endMs), scrollX).coerceIn(0f, size.width)
+                        if (end <= x) continue
+                        val span = Size(end - x, size.height)
+                        drawRect(color.copy(alpha = 0.22f), Offset(x, 0f), span)
+                        if (shown == take.id || pendingDrag?.first == take.id) {
+                            drawRect(color, Offset(x, 0f), span, style = Stroke(2.dp.toPx()))
+                        }
+                        val samples = peaks[take.file] ?: continue
+                        val from = (g.rawMsAt(x, scrollX) - start).coerceIn(0L, take.lengthMs)
+                        val to = (g.rawMsAt(end, scrollX) - start).coerceIn(from, take.lengthMs)
+                        if (to <= from) continue
+                        val count = ((end - x) / 3f).toInt().coerceAtLeast(1)
+                        val wave = TrackAudio.window(samples, take.sourceFromMs + from, take.sourceFromMs + to, count)
+                        for ((column, peak) in wave.withIndex()) {
+                            val px = x + (column + 0.5f) * (end - x) / count
+                            val middle = size.height / 2
+                            val h = peak * middle
+                            drawLine(color, Offset(px, middle - h), Offset(px, middle + h), 1.5f)
+                        }
+                    }
+                    for (cut in inserts) {
+                        val from = draggingCutaway?.takeIf { it.first == cut }?.second ?: cut.atMs
+                        val left = g.rawX(origin + maxOf(master.fromMs, from), scrollX).coerceIn(0f, size.width)
+                        val right = g.rawX(origin + minOf(master.sourceEndMs, from + cut.lengthMs), scrollX).coerceIn(0f, size.width)
+                        if (right <= left) continue
+                        val bar = Size(right - left, size.height - 12.dp.toPx())
+                        drawRect(color.copy(alpha = if (cut.manual || draggingCutaway?.first == cut) 0.64f else 0.37f),
+                            Offset(left, 6.dp.toPx()), bar)
+                        drawRect(color, Offset(left, 6.dp.toPx()), bar, style = Stroke(1.dp.toPx()))
+                    }
+                    if (review != null) {
+                        val dashed = Stroke(2.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 3.dp.toPx())))
+                        for (span in previewParts) {
+                            val from = maxOf(master.fromMs, span.timelineStart)
+                            val until = minOf(master.sourceEndMs, span.timelineEnd)
+                            val left = g.rawX(origin + from, scrollX).coerceIn(0f, size.width)
+                            val right = g.rawX(origin + until, scrollX).coerceIn(0f, size.width)
+                            if (right > left) drawRect(reviewColor, Offset(left, 2.dp.toPx()),
+                                Size(right - left, size.height - 4.dp.toPx()), style = dashed)
+                        }
+                    }
+                    for (item in pendingReviews) {
+                        val begin = placed.firstOrNull { it.file == item.file }?.startMs ?: continue
+                        val x = g.rawX(origin + maxOf(master.fromMs, begin), scrollX) + 7.dp.toPx()
+                        if (x in 0f..size.width) drawCircle(reviewColor, 3.dp.toPx(), Offset(x, 7.dp.toPx()))
+                    }
+                    val x = g.rawX(clock(), scrollX)
+                    if (x in 0f..size.width) drawLine(line, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
                 }
+            }
+            if (cutaways.isNotEmpty()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(tr("Перебивка", "Cutaway"), color = color, style = MaterialTheme.typography.labelMedium)
+                cutaways.forEach { take ->
+                    Box {
+                        TextButton({ selectedCutaway = take.id }) { Text(take.file, maxLines = 1) }
+                        if (selectedCutaway == take.id) DropdownMenu(expanded = true, onDismissRequest = { selectedCutaway = null }) {
+                            DropdownMenuItem(
+                                text = { Text(tr("Поставить у курсора", "Place at playhead")) },
+                                enabled = master.contains(clock()),
+                                onClick = {
+                                    selectedCutaway = null
+                                    vm.placeMulticamCutaway(take.id, clock())
+                                    onResult()
+                                },
+                            )
+                            DropdownMenuItem(text = { Text(tr("Вернуть в синхронизацию", "Return to sync")) }, onClick = {
+                                selectedCutaway = null
+                                vm.reopenMulticamCutaway(take.id)
+                                onResult()
+                            })
+                        }
+                    }
+                }
+            }
+            if (review != null) MulticamReviewActions(vm, group, master, review, clock) {
+                reviewId = null
+                onResult()
             }
         }
     }

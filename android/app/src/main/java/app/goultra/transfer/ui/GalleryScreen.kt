@@ -725,6 +725,7 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
     var picking by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
     var placing by remember { mutableStateOf<Project?>(null) }
+    val hasVideo = selection.any { it.kind == MediaKind.VIDEO }
     fun take(p: Project, at: ProjectPlacement) {
         vm.addToProject(p, selection, at)
         vm.clearSelection()
@@ -743,7 +744,9 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
                 Column {
                     vm.projects.forEach { p ->
                         TextButton({
-                            if (p.clips.isEmpty() || selection.all { it.kind == MediaKind.AUDIO }) take(p, ProjectPlacement.END) else {
+                            if (selection.all { it.kind == MediaKind.AUDIO } || p.clips.isEmpty() && !hasVideo) {
+                                take(p, ProjectPlacement.END)
+                            } else {
                                 picking = false
                                 placing = p
                             }
@@ -763,7 +766,11 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
             initial = "",
             onDismiss = { creating = false },
             onDone = { name ->
-                take(vm.createProject(name), ProjectPlacement.END)
+                val project = vm.createProject(name)
+                if (hasVideo) {
+                    creating = false
+                    placing = project
+                } else take(project, ProjectPlacement.END)
             },
         )
     }
@@ -777,6 +784,11 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
                     TextButton({ take(p, ProjectPlacement.START) }) { Text(tr("В начало", "To the start")) }
                     TextButton({ take(p, ProjectPlacement.END) }) { Text(tr("В конец", "To the end")) }
                     TextButton({ take(p, ProjectPlacement.BY_DATE) }) { Text(tr("По дате", "By date")) }
+                    if (hasVideo) TextButton({
+                        placing = null
+                        vm.openMulticamPicker(p, selection)
+                        vm.clearSelection()
+                    }) { Text(tr("Мультикам", "Multicam")) }
                 }
             },
             confirmButton = {},

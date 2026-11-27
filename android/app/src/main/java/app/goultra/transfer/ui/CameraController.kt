@@ -22,6 +22,8 @@ import app.goultra.transfer.camera.BeatGrid
 import app.goultra.transfer.camera.AudioAccents
 import app.goultra.transfer.camera.AudioAnalysisMode
 import app.goultra.transfer.camera.Multicam
+import app.goultra.transfer.camera.MulticamCutaway
+import app.goultra.transfer.camera.MulticamSpan
 import app.goultra.transfer.camera.MulticamTake
 import app.goultra.transfer.camera.MulticamSync
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -872,9 +874,7 @@ class CameraController(private val app: Application) {
         memCache.put(file.name, small.asImageBitmap())
     }
 
-    /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
-    val listedFiles: List<CameraFile> by derivedStateOf {
-        if (showsPhone) return@derivedStateOf localFiles
+    private val combinedGalleryFiles: List<CameraFile> by derivedStateOf {
         val paired = liveClips.values.map { it.name }.toSet()
         val onCard = files.filter { it.name !in paired }
         // With the camera there too: what is only on the phone — clips made here, files already deleted from the
@@ -883,6 +883,15 @@ class CameraController(private val app: Application) {
         val phoneOnly = localFiles.filter { it.name !in names }
         if (phoneOnly.isEmpty()) onCard
         else (onCard + phoneOnly).sortedWith(compareByDescending<CameraFile> { it.created }.thenByDescending { it.name })
+    }
+
+    /** The file list without live-photo clips (they belong to their photo's tile); the phone's copies without the camera. */
+    val listedFiles: List<CameraFile> by derivedStateOf {
+        if (showsPhone) localFiles else combinedGalleryFiles
+    }
+
+    val multicamVideoFiles: List<CameraFile> by derivedStateOf {
+        combinedGalleryFiles.filter { it.kind == MediaKind.VIDEO }.distinctBy { it.name }
     }
 
     val visibleFiles: List<CameraFile> by derivedStateOf {
@@ -3442,7 +3451,32 @@ class CameraController(private val app: Application) {
     internal var multicamProgress by mutableStateOf<MulticamProgress?>(null)
         private set
 
-    internal fun buildMulticam(p: Project, cameras: Map<String, Int>, referenceName: String) {
+    internal data class MulticamPickerRequest(val projectId: String, val videos: List<String>, val audio: String?)
+    internal data class MulticamPickerSelection(val cameras: Map<String, Int>, val reference: String?)
+    private val multicamSelections = mutableMapOf<String, MulticamPickerSelection>()
+    internal var multicamPickerRequest by mutableStateOf<MulticamPickerRequest?>(null)
+        private set
+
+    internal fun openMulticamPicker(p: Project, selection: List<CameraFile>) {
+        val videos = selection.filter { it.kind == MediaKind.VIDEO }.map { it.name }
+        if (videos.isEmpty()) return
+        multicamPickerRequest = MulticamPickerRequest(p.id, videos, selection.firstOrNull { it.kind == MediaKind.AUDIO }?.name)
+        showProject(p)
+    }
+
+    internal fun closeMulticamPicker(p: Project, cameras: Map<String, Int>, reference: String?) {
+        multicamSelections[p.id] = MulticamPickerSelection(cameras, reference)
+        if (multicamPickerRequest?.projectId == p.id) multicamPickerRequest = null
+    }
+
+    internal fun multicamPickerSelection(p: Project): MulticamPickerSelection =
+        multicamSelections[p.id] ?: MulticamPickerSelection(
+            p.multicam?.takes.orEmpty().associate { it.file to it.camera },
+            p.multicam?.referenceFile ?: p.audioClips.firstOrNull { clip -> projectAudioFiles.any { it.name == clip.source.name } }
+                ?.source?.name,
+        )
+
+    internal fun buildMulticam(p: Project, cameras: Map<String, Int>, referenceName: String, reset: Boolean = false) {
         if (multicamProgress != null || montageRunning || cameras.size < 2 || cameras.values.toSet().size < 2) return
         val reference = previewFile(referenceName) ?: return
         val files = cameras.mapNotNull { (name, id) -> previewFile(name)?.let { it to id } }
@@ -3450,7 +3484,8 @@ class CameraController(private val app: Application) {
             message = tr("Часть записей недоступна", "Some recordings are unavailable")
             return
         }
-        multicamProgress = MulticamProgress(p.id, 0, files.size + 1)
+        val stages = files.size * 2 + 1
+        multicamProgress = MulticamProgress(p.id, 0, stages)
         scope.launch {
             var keptAudio: File? = null
             var saved = false
@@ -3488,11 +3523,13 @@ class CameraController(private val app: Application) {
                     val referenceMs = master.durationMs
                     val masterPrint = try { MulticamSync.analyse(master, ::checkSync) } finally { master.release() }
                     if (referenceMs <= 0L) return@withContext null
-                    withContext(Dispatchers.Main) { multicamProgress = MulticamProgress(p.id, 1, files.size + 1) }
+                    withContext(Dispatchers.Main) { multicamProgress = MulticamProgress(p.id, 1, stages) }
                     val fingerprints = mutableMapOf<String, MulticamSync.Recording>()
+                    val acceptedCutaways = p.multicam?.takes.orEmpty().filter { !reset && it.cutaway }.associateBy { it.file }
                     val takes = files.mapIndexed { i, (file, camera) ->
                         checkSync()
-                        val take = try {
+                        val cutaway = acceptedCutaways[file.name]?.takeUnless { file.name == referenceName }
+                        val take = cutaway?.copy(camera = camera) ?: try {
                             val precise = withMulticamExtractor(file) { open ->
                                 android.media.MediaExtractor().let { extractor ->
                                     try {
@@ -3526,17 +3563,18 @@ class CameraController(private val app: Application) {
                             log("multicam ${file.name}: ${error.message}")
                             MulticamTake(file.name, camera, (file.durationSec ?: 0) * 1000L)
                         }
-                        withContext(Dispatchers.Main) { multicamProgress = MulticamProgress(p.id, i + 2, files.size + 1) }
+                        withContext(Dispatchers.Main) { multicamProgress = MulticamProgress(p.id, i + 2, stages) }
                         take
                     }
-                    val aligned = MulticamSync.alignRecordings(masterPrint, takes, fingerprints, ::checkSync)
-                    val existing = p.multicam?.takeIf { it.referenceFile == referenceName }
-                    val retainedAngles = existing?.takes.orEmpty().groupBy { it.camera }.filterValues { angle ->
-                        angle.any { cameras[it.file] == it.camera }
-                    }.keys
-                    val switches = existing?.switches.orEmpty().filterValues { it in retainedAngles }
-                    val group = Multicam(referenceName, referenceMs, aligned, switches,
-                        existing?.manualCuts.orEmpty().intersect(switches.keys))
+                    val aligned = MulticamSync.alignRecordings(masterPrint, takes, fingerprints, onCompared = { done ->
+                        scope.launch {
+                            if (multicamProgress?.projectId == p.id) {
+                                multicamProgress = MulticamProgress(p.id, files.size + 1 + done, stages)
+                            }
+                        }
+                    }, checkCancelled = ::checkSync)
+                    val group = p.multicam?.withNewAlignment(referenceName, referenceMs, aligned, cameras, reset)
+                        ?: Multicam(referenceName, referenceMs, aligned)
                     val audio = cachedMaster?.takeIf { it.uri == masterUri }?.copy(lengthMs = referenceMs)
                         ?: ProjectMusic(masterUri, reference.name, lengthMs = referenceMs)
                     group to audio
@@ -3555,7 +3593,8 @@ class CameraController(private val app: Application) {
                     ?: ProjectAudioClip(Multicam.MASTER_ID, audio)
                 saveProject(current.copy(multicam = group, baseFile = null, previous = null,
                     audioClips = current.audioClips.filterNot { it.id == master.id || it.source.uri == audio.uri } + master),
-                    Phrase("Создан мультикам", "Created multicam"))
+                    if (reset) Phrase("Сброшена синхронизация мультикама", "Reset multicam sync")
+                    else Phrase("Создан мультикам", "Created multicam"))
                 saved = true
                 musicVersion++
                 analyseMusic(audio)
@@ -3616,9 +3655,7 @@ class CameraController(private val app: Application) {
     internal fun placeMulticamTake(id: String, start: Long) {
         val p = seenProject ?: return
         val group = p.multicam ?: return
-        val updated = group.copy(takes = group.takes.map { take ->
-            if (take.id == id) take.copy(startMs = start, needsReview = false, proposedSpans = emptyList()) else take
-        })
+        val updated = group.alignWholeTake(id, start) ?: return
         saveProject(p.copy(multicam = updated, previous = null),
             Phrase("Выровнен ракурс", "Aligned camera angle"))
     }
@@ -3631,13 +3668,50 @@ class CameraController(private val app: Application) {
             Phrase("Сменён ракурс", "Switched camera angle"))
     }
 
-    internal fun resolveMulticamAlignment(id: String, keepWhole: Boolean) {
+    internal fun resolveMulticamAlignment(id: String, keepWhole: Boolean, spans: List<MulticamSpan>? = null) {
         val p = seenProject ?: return
         val current = p.multicam ?: return
-        val group = (if (keepWhole) current.keepWholeTake(id) else current.acceptPartialAlignment(id)) ?: return
+        val group = (if (keepWhole) current.keepWholeTake(id) else current.acceptPartialAlignment(id, spans)) ?: return
         saveProject(p.copy(multicam = group, previous = null),
             if (keepWhole) Phrase("Сохранён целый ракурс", "Kept the full take")
             else Phrase("Добавлены совпавшие части", "Added matching sections"))
+    }
+
+    internal fun useMulticamCutaway(id: String) {
+        val project = seenProject ?: return
+        val group = project.multicam?.keepCutaway(id) ?: return
+        saveProject(project.copy(multicam = group, previous = null),
+            Phrase("Добавлена перебивка", "Added cutaway"))
+    }
+
+    internal fun reopenMulticamCutaway(id: String) {
+        val project = seenProject ?: return
+        val group = project.multicam?.reopenCutaway(id) ?: return
+        saveProject(project.copy(multicam = group, previous = null),
+            Phrase("Перебивка возвращена к синхронизации", "Cutaway returned to sync"))
+    }
+
+    internal fun placeMulticamCutaway(id: String, projectMs: Long) {
+        val project = seenProject ?: return
+        val master = project.multicamMaster ?: return
+        if (!master.contains(projectMs)) return
+        val group = project.multicam?.placeCutaway(id, master.sourceAt(projectMs), master.sourceEndMs)
+        saveMulticamCutaway(project, group, Phrase("Перебивка поставлена у курсора", "Placed cutaway at playhead"))
+    }
+
+    internal fun moveMulticamCutaway(cut: MulticamCutaway, sourceMs: Long) {
+        val project = seenProject ?: return
+        val master = project.multicamMaster ?: return
+        val group = project.multicam?.moveCutaway(cut, sourceMs, master.fromMs, master.sourceEndMs)
+        saveMulticamCutaway(project, group, Phrase("Перемещена перебивка", "Moved cutaway"))
+    }
+
+    private fun saveMulticamCutaway(project: Project, group: Multicam?, action: Phrase) {
+        if (group == null) {
+            message = tr("Для перебивки здесь нет места", "No room for a cutaway here")
+            return
+        }
+        saveProject(project.copy(multicam = group, previous = null), action)
     }
 
     internal fun moveMulticamTo(at: Long) {
@@ -3729,6 +3803,7 @@ class CameraController(private val app: Application) {
     }
 
     fun closeProject() {
+        if (multicamPickerRequest?.projectId == seenProject?.id) multicamPickerRequest = null
         seenProject = null
         montageNote = null
     }

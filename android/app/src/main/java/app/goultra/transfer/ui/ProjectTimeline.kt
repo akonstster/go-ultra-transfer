@@ -524,7 +524,9 @@ internal fun ProjectTimeline(
     val master = p.multicamMaster
     if (showAngles && p.multicam != null && master != null) {
         MulticamRows(vm, p.multicam, master, audition, ::geomNow, { scroll }, { zoomClock ?: drawMusicMs ?: clockMs },
-            onInspect = onInspect, onDraggingChange = { draggingAngle = it }, modifier = Modifier.then(pinch))
+            onInspect = onInspect, onResult = onResult, onSeekResult = { seekNow(it, null) },
+            onDraggingChange = { draggingAngle = it },
+            modifier = Modifier.then(pinch))
     }
     val selection = dropSelection
     val clip = audio.firstOrNull { it.clip.id == dropEditorClipId }?.clip
