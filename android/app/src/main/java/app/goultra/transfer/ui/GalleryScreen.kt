@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -197,7 +198,7 @@ fun GalleryScreen(
                     // Videos and photos from elsewhere on the phone, to view, cut and colour (with or without the camera).
                     if (vm.tab == Tab.FILES && selectionCount == 0) {
                         val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addFiles(uris) }
-                        IconButton({ pick.launch(arrayOf("video/*", "image/*")) }) {
+                        IconButton({ pick.launch(arrayOf("video/*", "image/*", "audio/*")) }) {
                             Icon(Icons.Filled.LibraryAdd, tr("Добавить с телефона", "Add from the phone"))
                         }
                     }
@@ -473,7 +474,7 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                         // Already in a project (by name — the camera's file and its phone copy are the same shot).
                         inProject = file.name in vm.projectFiles,
                         // With the video's own colour on it; drawn again when a colour changes.
-                        loadThumbnail = vm::tileImage,
+                        loadThumbnail = { if (it.kind == MediaKind.AUDIO) null else vm.tileImage(it) },
                         colourKey = if (file.kind == MediaKind.VIDEO || vm.canColourPhoto(file)) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
@@ -481,6 +482,7 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                         onClick = {
                             when {
                                 missing -> vm.missingFileMessage()
+                                vm.selected.isEmpty() && file.kind == MediaKind.AUDIO -> vm.toggle(file)
                                 vm.selected.isEmpty() -> open(file)
                                 selectable(file) -> vm.toggle(file)
                                 else -> notSelectable()
@@ -549,13 +551,16 @@ private fun FileTile(
     ) {
         thumb?.let { Image(it, file.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
             ?: Text(
-                file.name.substringBefore('_'),
+                if (file.kind == MediaKind.AUDIO) file.name else file.name.substringBefore('_'),
                 Modifier.align(Alignment.Center),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
             )
         val label = when {
             missing -> null // the badge below says «нет на карте»
+            file.kind == MediaKind.AUDIO -> "♫ " + (file.durationSec?.let(::formatDuration) ?: "")
             file.kind == MediaKind.VIDEO -> "▶ " + (file.durationSec?.let(::formatDuration) ?: "")
             file.name.endsWith(".dng", ignoreCase = true) -> "RAW"
             file.isLive -> "LIVE"
@@ -738,7 +743,7 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
                 Column {
                     vm.projects.forEach { p ->
                         TextButton({
-                            if (p.clips.isEmpty()) take(p, ProjectPlacement.END) else {
+                            if (p.clips.isEmpty() || selection.all { it.kind == MediaKind.AUDIO }) take(p, ProjectPlacement.END) else {
                                 picking = false
                                 placing = p
                             }

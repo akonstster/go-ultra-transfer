@@ -9,6 +9,36 @@ import org.junit.Test
 /** The grid edited by hand ([MusicGrid]): shifting it, changing its pace, a tap tempo, and its tempo in beats a minute. */
 class MusicGridTest {
     @Test
+    fun `a rigid grid estimates a single tempo despite millisecond rounding`() {
+        val grid = MusicGrid.constantAt(emptyList(), 240_000L, 94.5, 318L)
+        assertEquals(94.5, MusicGrid.rigidBpm(grid)!!, 0.001)
+        assertNull(MusicGrid.rigidBpm(grid.toMutableList().apply { this[100] += 5L }))
+    }
+    @Test
+    fun `forcing an exact tempo keeps the phase at the playhead and covers the whole track`() {
+        val grid = MusicGrid.constantAt(listOf(100L, 600L, 1000L, 1450L, 1950L), 4000, 160.0, 1420)
+        assertEquals(325L, grid.first())
+        assertTrue(1450L in grid)
+        assertTrue(grid.zipWithNext { a, b -> b - a }.all { it == 375L })
+        assertEquals(3700L, grid.last())
+        assertFalse(MusicGrid.isVariable(grid))
+    }
+
+    @Test
+    fun `tempo at the cursor follows sections and ignores an omitted mark`() {
+        val beats = (0..12).map { it * 500L }.filterNot { it == 2500L } +
+            (1..12).map { 6000L + it * 375L }
+        assertEquals(120.0, MusicGrid.bpmAt(beats, 2500), 0.001)
+        assertEquals(160.0, MusicGrid.bpmAt(beats, 9000), 0.001)
+    }
+    @Test
+    fun `irregular placements inside a steady section do not change BPM`() {
+        val beats = (0..96).map { beat -> beat * 414L + listOf(0L, 35L, -28L, 12L)[beat % 4] }
+        assertFalse(MusicGrid.isVariable(beats))
+        assertEquals(60_000.0 / 414, MusicGrid.bpm(beats), 0.1)
+    }
+
+    @Test
     fun `a shifted grid never goes before the start`() {
         assertEquals(listOf(400L), MusicGrid.shifted(listOf(500L, 1000L), byMs = -600L))
         assertEquals(listOf(510L, 1010L), MusicGrid.shifted(listOf(500L, 1000L), byMs = 10L))

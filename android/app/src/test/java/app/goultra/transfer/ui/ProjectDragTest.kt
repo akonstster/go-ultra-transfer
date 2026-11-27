@@ -92,13 +92,28 @@ class ProjectDragTest {
     }
 
     @Test
-    fun `the music is eased back while it plays and seeks only on a jump`() {
-        assertEquals(1f, musicSpeed(20, playing = true)!!, 0f) // close enough
-        assertTrue(musicSpeed(150, playing = true)!! < 1f) // ahead: slower
-        assertTrue(musicSpeed(-150, playing = true)!! > 1f) // behind: faster
-        assertEquals(null, musicSpeed(900, playing = true)) // a jump: seek
-        assertEquals(null, musicSpeed(150, playing = false)) // paused: put it exactly there
-        assertEquals(1f, musicSpeed(10, playing = false)!!, 0f)
+    fun `ordinary drift changes video speed without replaying a frame range`() {
+        val sync = PreviewVideoSync()
+        assertEquals(PreviewVideoSync.Correction(1.04f), sync.update(3000, 3100, 0, 1f))
+        assertEquals(PreviewVideoSync.Correction(0.96f), sync.update(3500, 3000, 500, 1f))
+        assertEquals(PreviewVideoSync.Correction(0.96f), sync.update(8000, 6000, 3000, 0.96f))
+        assertEquals(PreviewVideoSync.Correction(0.96f), sync.update(8055, 8000, 5000, 0.96f))
+        assertEquals(PreviewVideoSync.Correction(), sync.update(8040, 8000, 5100, 0.96f))
+    }
+
+    @Test
+    fun `a sustained stall gets one forward recovery until video is back in range`() {
+        val sync = PreviewVideoSync()
+        assertEquals(null, sync.update(1000, 1950, 0, 1f).seekToMs)
+        assertEquals(null, sync.update(1200, 2200, 400, 1.04f).seekToMs)
+        assertEquals(2300L, sync.update(1300, 2300, 500, 1.04f).seekToMs)
+        // The recovery seek can buffer. One bad read after that must not start another seek.
+        assertEquals(PreviewVideoSync.Correction(), sync.update(1300, null, 600, 1.04f))
+        assertEquals(null, sync.update(2000, 3200, 1200, 1f).seekToMs)
+        assertEquals(null, sync.update(2400, 3600, 1600, 1.04f).seekToMs)
+        assertEquals(null, sync.update(3950, 4000, 2000, 1.04f).seekToMs)
+        assertEquals(null, sync.update(4000, 5000, 2100, 1f).seekToMs)
+        assertEquals(5500L, sync.update(4500, 5500, 2600, 1.04f).seekToMs)
     }
 
     @Test

@@ -1,7 +1,5 @@
 package app.goultra.transfer.ui
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,10 +8,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
@@ -21,17 +23,20 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
-import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Diamond
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -48,54 +53,36 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import app.goultra.transfer.camera.MusicGrid
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectMusic
+import app.goultra.transfer.camera.ProjectAudioClip
 import kotlin.math.roundToInt
 
 /** Which sheet stands open under the project (none, the sound's, the tempo's, the montage's). */
-private enum class Sheet { NONE, SOUND, TEMPO, MONTAGE }
+private enum class Sheet { NONE, SOUND, TEMPO, MONTAGE, HISTORY }
 
 /**
- * The project's music (see `memory-bank/projects-plan.md`, P2/P3): the track it holds, and a toolbox under it. All the
- * sound lives in the «Sound» sheet — the track itself and the two levels; all the rhythm in «Tempo» — the grid by hand,
- * the tap, the metronome and the drop. The cards and the timeline keep the room they need, and nothing is heard or
- * changed by accident.
+ * Project tools and audio analysis status. The timeline displays the tracks and edits their drop markers.
  */
 @Composable
-internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 0L) {
-    // SAF: the app keeps a lasting link to the track (no copy) — the same way files are added to the list.
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) vm.setProjectMusic(uri)
-    }
-    val music = p.music
-    // A track put in elsewhere (or picked a moment ago) is analysed here: the timeline draws its grid once it is done.
-    LaunchedEffect(music?.uri) { music?.let { vm.analyseMusic(it) } }
+internal fun ProjectMusicLane(
+    vm: CameraController, p: Project, clockMs: Long, choosingAudio: Boolean,
+    onChooseAudio: (Boolean) -> Unit, onOpenDrops: () -> Unit,
+) {
+    val audio = vm.activeAudioClip(p)
+    val music = audio?.source
+    val tracks = p.audioClips.map { it.source }.distinctBy { it.uri }
+    LaunchedEffect(tracks.map { it.uri }) { tracks.forEach(vm::analyseMusic) }
     val peaks = remember(music?.uri, vm.musicVersion) { music?.let { vm.musicPeaks(it.uri) } }
     val failed = music != null && music.uri in vm.musicFailed
     // The wave is written before the grid and drops are saved: the lane must not stop saying «analysing» at the wave.
     val analysing = music != null && music.uri in vm.musicAnalysing
     var sheet by remember { mutableStateOf(Sheet.NONE) }
 
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                Icons.Filled.LibraryMusic,
-                null,
-                Modifier.padding(end = 6.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                music?.name?.ifEmpty { tr("Трек", "The track") } ?: tr("Музыки нет", "No music"),
-                Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            // Only a track has a state to report: without one there is nothing being analysed.
-            if (music != null) TrackState(peaks, failed, analysing)
-        }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
         // An explicit panel with a scrolling row: three equal-weight buttons squeezed the last one («Монтаж» was cut)
         // on a phone, and a toolbox reads better as one surface than as loose chips over the cards.
         Surface(
@@ -105,28 +92,97 @@ internal fun ProjectMusicLane(vm: CameraController, p: Project, clockMs: Long = 
             tonalElevation = 2.dp,
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
-                Text(
-                    tr("Инструменты", "Tools"),
-                    Modifier.padding(start = 4.dp, bottom = 4.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Column(Modifier.padding(start = 4.dp, bottom = 4.dp)) {
+                    Text(
+                        tr("Инструменты", "Tools"),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (music != null) TrackState(peaks, failed, analysing)
+                }
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Tool(tr("Звук", "Sound"), Icons.Filled.VolumeUp) { sheet = Sheet.SOUND }
                     Tool(tr("Темп", "Tempo"), Icons.Filled.Speed) { sheet = Sheet.TEMPO }
+                    if (audio != null) Tool(tr("Дропы", "Drops"), Icons.Filled.Diamond, onOpenDrops)
                     Tool(tr("Монтаж", "Montage"), Icons.Filled.ContentCut) { sheet = Sheet.MONTAGE }
+                    Tool(tr("История", "History"), Icons.Filled.History) { sheet = Sheet.HISTORY }
                 }
             }
         }
     }
     when (sheet) {
-        Sheet.SOUND -> SoundSheet(vm, p, onPick = { pick.launch(arrayOf("audio/*")) }, onDismiss = { sheet = Sheet.NONE })
-        Sheet.TEMPO -> music?.let { TempoSheet(vm, it, clockMs, onDismiss = { sheet = Sheet.NONE }) }
+        Sheet.SOUND -> SoundSheet(vm, p, audio, onPick = { onChooseAudio(true) }, onDismiss = { sheet = Sheet.NONE })
+        Sheet.TEMPO -> audio?.let { TempoSheet(vm, it.source, it.sourceAt(clockMs), onDismiss = { sheet = Sheet.NONE }) }
         Sheet.MONTAGE -> MontageSheet(vm, p, onDismiss = { sheet = Sheet.NONE })
+        Sheet.HISTORY -> HistorySheet(vm, p.id, onDismiss = { sheet = Sheet.NONE })
         Sheet.NONE -> Unit
+    }
+    if (choosingAudio) {
+        ProjectAudioPicker(vm, p, onDismiss = { onChooseAudio(false) })
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HistorySheet(vm: CameraController, projectId: String, onDismiss: () -> Unit) {
+    val undo = vm.projectHistoryActions(projectId, redo = false)
+    val redo = vm.projectHistoryActions(projectId, redo = true)
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+            Text(tr("История", "History"), style = MaterialTheme.typography.titleMedium)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HistoryButton(Modifier.weight(1f), tr("Отменить", "Undo"), undo.firstOrNull()) {
+                    vm.restoreProjectEdit(redo = false)
+                }
+                HistoryButton(Modifier.weight(1f), tr("Повторить", "Redo"), redo.firstOrNull()) {
+                    vm.restoreProjectEdit(redo = true)
+                }
+            }
+            if (undo.isEmpty() && redo.isEmpty()) {
+                Text(tr("История пока пуста", "No edits yet"))
+            } else {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
+                    if (undo.isNotEmpty()) {
+                        item { HistoryHeading(tr("Применено", "Applied")) }
+                        itemsIndexed(undo) { index, action -> HistoryActionRow(action, index == 0) }
+                    }
+                    if (redo.isNotEmpty()) {
+                        item { HistoryHeading(tr("Отменено", "Undone")) }
+                        itemsIndexed(redo) { index, action -> HistoryActionRow(action, index == 0) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryButton(modifier: Modifier, label: String, next: Phrase?, onClick: () -> Unit) {
+    Column(modifier) {
+        FilledTonalButton(onClick, enabled = next != null) { Text(label) }
+        if (next != null) {
+            Text(next.text, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun HistoryHeading(title: String) {
+    Text(title, Modifier.padding(top = 10.dp, bottom = 4.dp), style = MaterialTheme.typography.labelLarge)
+}
+
+@Composable
+private fun HistoryActionRow(action: Phrase, next: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        color = if (next) colors.secondaryContainer else colors.surface,
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Text(action.text, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -153,8 +209,9 @@ private fun Tool(name: String, icon: ImageVector, onClick: () -> Unit) {
 /** All the sound there is: the track (picked, replaced, taken off) and the two levels under it. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SoundSheet(vm: CameraController, project: Project, onPick: () -> Unit, onDismiss: () -> Unit) {
-    val music = project.music
+private fun SoundSheet(vm: CameraController, project: Project, audio: ProjectAudioClip?, onPick: () -> Unit, onDismiss: () -> Unit) {
+    val music = audio?.source
+    var deleting by remember { mutableStateOf<ProjectAudioClip?>(null) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
@@ -170,27 +227,46 @@ private fun SoundSheet(vm: CameraController, project: Project, onPick: () -> Uni
                     overflow = TextOverflow.Ellipsis,
                 )
                 TextButton(onPick) {
-                    Text(if (music == null) tr("Выбрать трек", "Choose a track") else tr("Заменить трек", "Replace the track"))
+                    Icon(Icons.Filled.Add, tr("Добавить файлы", "Add files"))
                 }
-                if (music != null) {
-                    IconButton(vm::removeProjectMusic) { Icon(Icons.Filled.Close, tr("Убрать трек", "Remove the track")) }
+                if (audio != null) {
+                    IconButton({ deleting = audio }) { Icon(Icons.Filled.Close, tr("Убрать трек", "Remove the track")) }
                 }
             }
             // The mix is the project's own: it stays adjustable while no track is picked, and a new track inherits it.
             MusicSound(vm, project)
+            if (audio != null) {
+                Level(tr("Выбранный клип", "Selected clip"), audio.volume, audio.id) { level ->
+                    vm.updateAudioClip(audio.id, Phrase("Изменена громкость аудиоклипа", "Changed audio clip volume")) {
+                        it.copy(volume = level)
+                    }
+                }
+            }
         }
+    }
+    deleting?.let { clip ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text(tr("Убрать кусок из проекта?", "Remove the clip from the project?")) },
+            text = { Text(clip.source.name) },
+            confirmButton = {
+                TextButton({ vm.removeProjectMusic(clip.id); deleting = null }) { Text(tr("Убрать", "Remove")) }
+            },
+            dismissButton = { TextButton({ deleting = null }) { Text(tr("Отмена", "Cancel")) } },
+        )
     }
 }
 
 /** All the rhythm there is: the grid by hand, the tap, the metronome that sounds it, and the drop. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long, onDismiss: () -> Unit) {
-    val bpm = MusicGrid.bpm(music.beats)
-    // A tempo that moves is not one number: it is a range, and it must be said so — 118.6 BPM would be a lie about a
-    // track that goes from 100 to 130, and a nudge of a tenth would move it nowhere true.
-    val range = MusicGrid.tempoRange(music.beats)
-    val moving = MusicGrid.isVariable(music.beats)
+private fun TempoSheet(vm: CameraController, music: ProjectMusic, sourceClockMs: Long, onDismiss: () -> Unit) {
+    val bpm = remember(music.beats) { MusicGrid.bpm(music.beats) }
+    val range = remember(music.beats) { MusicGrid.tempoRange(music.beats) }
+    val moving = remember(music.beats) { MusicGrid.isVariable(music.beats) }
+    val rigidBpm = remember(music.beats) { MusicGrid.rigidBpm(music.beats) }
+    val currentBpm = rigidBpm ?: MusicGrid.bpmAt(music.beats, sourceClockMs)
+    var fixedTempo by remember(music.uri) { mutableStateOf<Pair<Long, String>?>(null) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
@@ -200,17 +276,21 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
                 Text(tr("Темп", "Tempo"), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 // A tenth of a beat a minute matters: 120.4 is not 120, and a grid a half BPM off walks away in a minute.
                 Text(
-                    when {
-                        bpm <= 0.0 -> "—"
-                        range != null && moving ->
-                            String.format(tr("переменный %.1f–%.1f", "variable %.1f–%.1f"), range.first, range.second)
-                        else -> "%.1f BPM".format(bpm)
-                    },
+                    if (currentBpm > 0.0) "%.1f BPM".format(currentBpm) else "—",
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                 )
             }
-            GridRow(vm, music)
+            Text(music.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (moving && range != null) {
+                Text(
+                    String.format(tr("переменный %.1f–%.1f", "variable %.1f–%.1f"), range.first, range.second),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            GridRow(vm, music, bpm, moving) {
+                fixedTempo = sourceClockMs to if (currentBpm > 0.0) "%.1f".format(currentBpm) else ""
+            }
             // The analysis says how sure it is; a low certainty is shown where the grid is corrected, not buried in a log.
             if (music.gridVersion >= app.goultra.transfer.camera.BeatGrid.ANALYSIS_VERSION &&
                 music.beats.isNotEmpty() && music.gridConfidence < 0.20
@@ -228,52 +308,32 @@ private fun TempoSheet(vm: CameraController, music: ProjectMusic, clockMs: Long,
                 Text(tr("Метроном", "Metronome"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 Switch(AppPrefs.metronome, { AppPrefs.chooseMetronome(it) })
             }
-            ClickNudge(AppPrefs.metronome)
-            DropControls(vm, music, clockMs)
-            Text(
-                tr(
-                    "Дроп — место, где энергия трека скачет: сюда автомонтаж поставит акцент",
-                    "The drop is where the track's energy leaps: the montage will put an accent there",
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
         }
     }
-}
-/**
- * All the drops the analysis found, one active at a time: ⇠/⇢ choose which the montage will accent; the button with the
- * clock puts a drop where the film stands, for a track the analysis could not read (that hand mark is never replaced).
- */
-@Composable
-private fun DropControls(vm: CameraController, music: ProjectMusic, clockMs: Long) {
-    val drops = music.drops
-    val active = music.activeDropMs
-    val at = drops.indexOf(active).takeIf { it >= 0 } ?: 0
-    if (drops.isNotEmpty()) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text(tr("Дроп", "Drop"), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-            IconButton(enabled = at > 0, onClick = { vm.activateProjectDrop(drops[at - 1]) }) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null)
-            }
-            Text(
-                "${at + 1} / ${drops.size} · " + formatDuration(((active ?: drops[at]) / 1000).toInt()),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            IconButton(enabled = at < drops.lastIndex, onClick = { vm.activateProjectDrop(drops[at + 1]) }) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
-            }
-        }
-    }
-    val here = (clockMs + music.offsetMs).coerceAtLeast(0L)
-    FilledTonalButton(
-        onClick = { vm.putProjectDropAt(here) },
-        modifier = Modifier.fillMaxWidth().padding(top = if (drops.isEmpty()) 8.dp else 0.dp),
-    ) {
-        Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(tr("Дроп", "Drop") + " · " + formatDuration((here / 1000).toInt()))
+    fixedTempo?.let { (anchor, suggestion) ->
+        var entered by remember { mutableStateOf(suggestion) }
+        val value = entered.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it in 20.0..400.0 }
+        AlertDialog(
+            onDismissRequest = { fixedTempo = null },
+            title = { Text(tr("Сделать темп постоянным", "Make tempo constant")) },
+            text = {
+                OutlinedTextField(
+                    value = entered,
+                    onValueChange = { entered = it },
+                    label = { Text("BPM") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton({
+                    val wanted = value ?: return@TextButton
+                    vm.editMusicGrid { beats, length -> MusicGrid.constantAt(beats, length, wanted, anchor) }
+                    fixedTempo = null
+                }, enabled = value != null) { Text(tr("Применить", "Apply")) }
+            },
+            dismissButton = { TextButton({ fixedTempo = null }) { Text(tr("Отмена", "Cancel")) } },
+        )
     }
 }
 /**
@@ -281,11 +341,9 @@ private fun DropControls(vm: CameraController, music: ProjectMusic, clockMs: Lon
  * pace halved or doubled, and the whole grid shifted a few ms. Two rows, the tempo over the shape, so nothing crowds.
  */
 @Composable
-private fun GridRow(vm: CameraController, music: ProjectMusic) {
-    val bpm = MusicGrid.bpm(music.beats)
+private fun GridRow(vm: CameraController, music: ProjectMusic, bpm: Double, moving: Boolean, onFixedTempo: () -> Unit) {
     // A tempo that moves cannot be nudged as one number — stretching the whole grid about its first beat would only put
     // the error somewhere else. The shift stays (the grid may sit early or late as a whole), the rest is off.
-    val moving = MusicGrid.isVariable(music.beats)
     // Taps: a few quick ones give the beat; two seconds of silence start them over.
     var taps by remember(music.uri) { mutableStateOf(emptyList<Long>()) }
     Column(Modifier.fillMaxWidth()) {
@@ -318,48 +376,12 @@ private fun GridRow(vm: CameraController, music: ProjectMusic) {
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null)
             }
         }
-        if (moving) {
-            Text(
-                tr(
-                    "Темп меняется по ходу трека — можно только сдвинуть всю сетку",
-                    "The tempo changes along the track — only the whole grid can be shifted",
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (music.lengthMs > 0L) {
+            TextButton(onFixedTempo) {
+                Text(tr("Сделать темп постоянным", "Make tempo constant"))
+            }
         }
     }
-}
-
-/**
- * The click a little earlier or later than the beat: a click goes through the phone's mixer, and no phone tells how long
- * that takes — so the ear has the last tenths. «⇠» moves it earlier, «⇢» later, and the number keeps the sign (+ later,
- * − earlier). The hardware latency stays compensated on its own, so the whole ±[AppPrefs.CLICK_NUDGE_LIMIT] really moves
- * the sound. Kept between launches, so it is set once.
- */
-@Composable
-private fun ClickNudge(enabled: Boolean) {
-    val nudge = AppPrefs.clickNudge
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(tr("Клик", "Click"), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-        IconButton(
-            { AppPrefs.chooseClickNudge(nudge - AppPrefs.CLICK_NUDGE_STEP) },
-            enabled = enabled && nudge > -AppPrefs.CLICK_NUDGE_LIMIT,
-        ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null) }
-        Text((if (nudge > 0) "+$nudge" else "$nudge") + " ms", style = MaterialTheme.typography.bodySmall)
-        IconButton(
-            { AppPrefs.chooseClickNudge(nudge + AppPrefs.CLICK_NUDGE_STEP) },
-            enabled = enabled && nudge < AppPrefs.CLICK_NUDGE_LIMIT,
-        ) { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) }
-    }
-    Text(
-        tr(
-            "«⇠» — раньше, «⇢» — позже. Клик проходит через микшер телефона.",
-            "\"⇠\" — earlier, \"⇢\" — later. The click goes through the phone's mixer.",
-        ),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
 }
 
 /**
@@ -395,6 +417,7 @@ private fun TrackState(peaks: FloatArray?, failed: Boolean, analysing: Boolean) 
 private fun MusicSound(vm: CameraController, project: Project) {
     Level(tr("Музыка", "Music"), project.musicVolume, "music") { v -> vm.setProjectMusicVolume(v) }
     Level(tr("Звук роликов", "Clips' sound"), project.videoVolume, "video") { v -> vm.setProjectVideoVolume(v) }
+    Level(tr("Клик", "Click"), project.clickVolume, "click") { v -> vm.setProjectClickVolume(v) }
 }
 
 /** One level: its name, a slider over the rest of the row, and its percent. Kept when the finger lets go. */

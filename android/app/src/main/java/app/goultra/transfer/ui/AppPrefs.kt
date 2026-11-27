@@ -58,13 +58,6 @@ object AppPrefs {
     private const val FILE = "ui"
     private var context: Context? = null
 
-    /** How far the ear may move the click either way, ms, and by how much one tap moves it. */
-    const val CLICK_NUDGE_LIMIT = 120
-    const val CLICK_NUDGE_STEP = 5
-
-    /** The meaning of the stored nudge changed with the signed click: a value saved under the old sign is let go. */
-    private const val CLICK_NUDGE_VERSION = 2
-
     /** Languages with a text table of their own (the rest fall back to English). */
     private val SUPPORTED = setOf("ru", "en", "fr", "it", "es", "de", "pt", "tr", "zh", "ja")
 
@@ -84,13 +77,6 @@ object AppPrefs {
     var metronome by mutableStateOf(false)
         private set
 
-    /**
-     * How much later (positive) or earlier (negative) than the beat the click is heard, ms. The phone's own latency is
-     * compensated separately: the ear has the last few tenths (`CLICK_NUDGE_LIMIT` either way). Kept between launches.
-     */
-    var clickNudge by mutableStateOf(0)
-        private set
-
     /** The most disk space the low-resolution preview copies may take, MB (kept between launches). */
     var previewCacheMb by mutableStateOf(PREVIEW_CACHE_DEFAULT_MB)
         private set
@@ -101,35 +87,14 @@ object AppPrefs {
         theme = runCatching { ThemeMode.valueOf(prefs.getString("theme", null)!!) }.getOrDefault(ThemeMode.SYSTEM)
         language = runCatching { LanguageMode.valueOf(prefs.getString("language", null)!!) }.getOrDefault(LanguageMode.SYSTEM)
         metronome = prefs.getBoolean("metronome", false)
-        val nudgeVersion = prefs.getInt("clickNudgeVersion", 1)
-        clickNudge = if (nudgeVersion < CLICK_NUDGE_VERSION) 0 else clampNudge(prefs.getInt("clickNudge", 0))
         previewCacheMb = prefs.getInt("previewCacheMb", PREVIEW_CACHE_DEFAULT_MB)
             .takeIf { it in PREVIEW_CACHE_MB } ?: PREVIEW_CACHE_DEFAULT_MB
-        if (nudgeVersion < CLICK_NUDGE_VERSION) {
-            prefs.edit()
-                .putInt("clickNudge", 0)
-                .putInt("clickNudgeVersion", CLICK_NUDGE_VERSION)
-                .apply()
-        }
     }
 
     fun chooseMetronome(on: Boolean) {
         metronome = on
         context?.getSharedPreferences(FILE, 0)?.edit()?.putBoolean("metronome", on)?.apply()
     }
-
-    /** The click a little later (positive) or earlier (negative) than the beat, ms. */
-    fun chooseClickNudge(ms: Int) {
-        val next = clampNudge(ms)
-        clickNudge = next
-        context?.getSharedPreferences(FILE, 0)?.edit()
-            ?.putInt("clickNudge", next)
-            ?.putInt("clickNudgeVersion", CLICK_NUDGE_VERSION)
-            ?.apply()
-    }
-
-    /** The nudge kept inside what is worth trying: further and the click is not a click on the beat any more. */
-    fun clampNudge(ms: Int): Int = ms.coerceIn(-CLICK_NUDGE_LIMIT, CLICK_NUDGE_LIMIT)
 
     fun chooseTheme(mode: ThemeMode) {
         theme = mode

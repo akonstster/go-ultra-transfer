@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import kotlin.math.PI
 import kotlin.math.abs
@@ -14,6 +15,52 @@ import kotlin.random.Random
 
 /** The beat detector on sound made here: clicks at a known tempo and phase, over a hum, and noise without a beat. */
 class BeatGridTest {
+    @Test
+    fun `a repeated kick pair anchors the grid at its first attack`() {
+        val sampleRate = 22_050
+        val period = 32 * 512_000.0 / sampleRate
+        val mains = (0 until 160).map { 20 + it * 32 }
+        val beats = mains.map { BeatGrid.frameMs(it.toDouble(), sampleRate) }
+        val grid = BeatGrid.Grid(60_000.0 / period, beats.first(), beats, 0.6)
+        val low = FloatArray(mains.last() + 20)
+        mains.forEach { low[it] = 1f }
+        assertEquals(grid, BeatGrid.phaseFromKickPairs(grid, low, sampleRate, beats.last() + 300L))
+        mains.forEach { low[it - 8] = 0.7f }
+        val result = BeatGrid.phaseFromKickPairs(grid, low, sampleRate, beats.last() + 300L)
+        assertEquals(BeatGrid.frameMs(12.0, sampleRate).toDouble(), result.offsetMs.toDouble(), 1.0)
+        assertEquals(grid.bpm, result.bpm, 0.0)
+    }
+    @Test
+    fun `repeated offbeats support the tempo without moving the grid phase`() {
+        val grid = BeatGrid.Grid(120.0, 110L, (0..239).map { 110L + 500L * it }, 0.5)
+        val windows = (0..11).map { i ->
+            val start = i * 10_000L
+            val offbeat = i in listOf(3, 5, 8, 10)
+            val strength = if (i == 2 || i == 7) 0.32 else 0.14
+            val section = BeatGrid.PulseSection(start, start + 10_000, start + if (offbeat) 360L else 110L, 500.0, strength)
+            BeatGrid.WindowFit(section, section)
+        }
+        assertTrue(BeatGrid.windowsConfirm(grid, windows))
+        assertFalse(BeatGrid.windowsConfirm(grid, windows.map { fit ->
+            val weak = fit.opening?.copy(support = 0.14)
+            BeatGrid.WindowFit(weak, weak)
+        }))
+    }
+    @Test
+    fun `weak intro and outro do not veto a confirmed steady tempo`() {
+        val whole = BeatGrid.Grid(160.0, 190L, (0..319).map { 190L + 375L * it }, 0.5)
+        val windows = (0..9).map { index ->
+            val start = index * 12_000L
+            val support = if (index in 1..8) 0.5 else 0.03
+            val section = BeatGrid.PulseSection(start, start + 12_000, start + 190, 375.0, support)
+            BeatGrid.WindowFit(section, section)
+        }
+        assertTrue(BeatGrid.windowsConfirm(whole, windows))
+        val conflicting = windows.toMutableList()
+        val other = BeatGrid.PulseSection(72_000, 84_000, 72_190, 450.0, 0.7)
+        conflicting[6] = BeatGrid.WindowFit(other, conflicting[6].opening)
+        assertFalse(BeatGrid.windowsConfirm(whole, conflicting))
+    }
     private val rate = 22050
 
     /** A drum-like hit every beat from [firstMs], over a quiet steady tone, for [seconds]. */
@@ -144,7 +191,7 @@ class BeatGridTest {
     fun `the confidence is kept once the grid is built`() {
         val g = BeatGrid.detectDrifting(clicks(120.0, 230, 20), rate)!!
         assertTrue("steady clicks are sure: ${g.confidence}", g.confidence > 0.3)
-        assertEquals(BeatGrid.ANALYSIS_VERSION, 9)
+        assertEquals(15, BeatGrid.ANALYSIS_VERSION)
     }
 
     @Test
@@ -373,10 +420,7 @@ class BeatGridTest {
     }
 
     @Test
-    fun `a drop after the detector's short grid lands on the full grid, not on its last beat`() {
-        // The grid the detector builds can stop where its path earned most (on a real track it ended at 30.8 s of 1:53),
-        // while the lane draws the same period on to the end. The profile must use that full grid: otherwise every later
-        // drop is put on the short grid's last beat — the «second drop before the pause» seen on the phone.
+    fun `a drop outside rhythmic sections keeps its own position`() {
         val seconds = 40
         val samples = FloatArray(rate * seconds) { i ->
             val t = i * 1000.0 / rate
@@ -387,7 +431,8 @@ class BeatGridTest {
         val full = (0L..40_000L step 500L).toList()
         val shortDrops = BeatGrid.profile(samples, rate, short, short.beats)?.drops.orEmpty()
         val fullDrops = BeatGrid.profile(samples, rate, short, full)?.drops.orEmpty()
-        assertEquals(listOf(15_000L), shortDrops)
+        assertEquals(1, shortDrops.size)
+        assertTrue("the drop must not jump back to the last beat: $shortDrops", shortDrops.single() in 20_000L..20_500L)
         assertEquals(1, fullDrops.size)
         assertTrue("the drop after 20 s is on the full grid: $fullDrops", fullDrops.single() in 20_000L..20_500L)
     }
@@ -504,6 +549,57 @@ class BeatGridTest {
             worst = maxOf(worst, abs(at - (firstMs + n * period)))
         }
         assertTrue("worst beat $worst ms off the constant pulse", worst <= 25.0)
+    }
+
+    @Test
+    fun `the exact period survives a long break full of unrelated accents`() {
+        val duration = 114_000
+        val period = 414.45
+        val first = 240.0
+        val out = FloatArray((rate.toLong() * duration / 1000).toInt())
+        fun hit(atMs: Double, hz: Double, volume: Double) {
+            val start = (atMs * rate / 1000).toInt()
+            for (n in 0 until minOf(1100, out.size - start)) {
+                out[start + n] += (volume * sin(2 * PI * hz * n / rate) * exp(-n / 240.0)).toFloat()
+            }
+        }
+        var at = first
+        while (at < duration) {
+            if (at < 25_000 || at >= 81_000) {
+                hit(at, 82.0, 0.82)
+                hit(at + period / 2, 460.0, 0.20)
+            }
+            at += period
+        }
+        val rnd = Random(49)
+        at = 25_000.0
+        while (at < 81_000) {
+            hit(at, 640.0 + rnd.nextDouble() * 580.0, 0.43)
+            at += 130 + rnd.nextDouble() * 540
+        }
+        val grid = BeatGrid.detectDrifting(out, rate)!!
+        assertEquals(60_000.0 / period, grid.bpm, 0.15)
+        assertTrue(grid.beats.zipWithNext().all { (a, b) -> abs(b - a - period) <= 1.0 })
+        val phaseError = grid.beats.maxOf { beat ->
+            val expected = first + ((beat - first) / period).roundToInt() * period
+            abs(beat - expected)
+        }
+        assertTrue("phase error ${phaseError} ms", phaseError <= 30.0)
+    }
+
+    @Test
+    fun `a bridge needs compatible time and phase on both sides`() {
+        val first = BeatGrid.PulseSection(0, 4000, 100, 500.0)
+        val compatible = BeatGrid.PulseSection(8000, 12_000, 8100, 500.0)
+        val aligned = BeatGrid.bridgeSections(listOf(first, compatible), 16_000)
+        assertEquals((100L until 12_000L step 500L).toList(), aligned)
+        val differentPhase = compatible.copy(firstBeatMs = 8300)
+        val differentTempo = compatible.copy(periodMs = 430.0)
+        for (other in listOf(differentPhase, differentTempo)) {
+            val unaligned = BeatGrid.bridgeSections(listOf(first, other), 16_000)
+            assertTrue(unaligned.none { it in 4000L until 8000L })
+            assertTrue(unaligned.contains(other.firstBeatMs))
+        }
     }
 
     @Test

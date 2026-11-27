@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -68,6 +69,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.ProjectClip
 import app.goultra.transfer.camera.ProjectMusic
+import app.goultra.transfer.camera.ProjectAudioClip
 
 /**
  * One piece as a media3 item: its file's URI, cut to its range. A still has no range to cut — it is one picture, and
@@ -170,16 +172,21 @@ internal fun ProjectPreview(
     onPlayed: () -> Unit,
     onPlaying: (Int?) -> Unit,
     carrying: Boolean,
-    music: ProjectMusic? = null,
+    audioClips: List<ProjectAudioClip>,
+    beats: List<Long>,
+    audioEndMs: Long,
+    clickVolume: Double,
     /** The project's own level for the clips' sound under the music (0 — music only, 1 — as recorded). */
     videoVolume: Double = ProjectMusic.UNDER_MUSIC,
     /** The project's own music level: it is kept whether a track is picked or not. */
     musicVolume: Double = 1.0,
+    heard: MusicClock,
     /** The project's own clock, told out every tick: where the film is, and whether it plays (the timeline draws by it). */
     onClock: (timeMs: Long, playing: Boolean) -> Unit = { _, _ -> },
     /** A jump asked from outside (a tap on the timeline), in project ms; [onSeeked] says it has been taken. */
     seek: Long? = null,
     onSeeked: () -> Unit = {},
+    onScrub: (Long) -> Unit,
     editorOpen: Boolean,
     openEditor: (() -> Unit)?,
 ) {
@@ -189,10 +196,17 @@ internal fun ProjectPreview(
         val real = vm.previewFile(e.value.file)
         Piece(e, real ?: vm.offlineFile(e.value.file), offline = real == null)
     }
+    var playing by remember { mutableStateOf(false) }
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val availableProxyVersion = vm.previewProxyVersion
+    var playlistProxyVersion by remember { mutableIntStateOf(availableProxyVersion) }
+    // A proxy can finish while Play is being pressed. Switch copies at the next pause, when rebuilding is safe.
+    SideEffect {
+        if (!playing && dragging == null) playlistProxyVersion = availableProxyVersion
+    }
     val signature = items.joinToString("|") { "${it.clip.file}:${it.clip.fromMs}-${it.clip.toMs}:${it.offline}" } +
-        ":proxy${vm.previewProxyVersion}"
+        ":proxy$playlistProxyVersion"
     // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
-    val itemsNow by rememberUpdatedState(items)
     val onPlayingNow by rememberUpdatedState(onPlaying)
     val onClockNow by rememberUpdatedState(onClock)
     val onSeekedNow by rememberUpdatedState(onSeeked)
@@ -215,22 +229,23 @@ internal fun ProjectPreview(
     val noPreload = remember { java.util.concurrent.ConcurrentHashMap.newKeySet<Int>() }
     // The stock renderers, and an image renderer after them: a still is shown by the player itself, so the playlist
     // plays photos and pieces alike and one clock counts them both.
-    val engine = remember(factory, photo) {
+    var prewarmVideo by remember { mutableStateOf(true) }
+    val engine = remember(factory, photo, prewarmVideo) {
         // In place of the stock image renderer, not after it: the track selector gives a picture to the first one
         // that takes it, so a renderer added at the end never saw a photo (the stock one decoded it whole, to nowhere).
         val renderers = object : DefaultRenderersFactory(context) {
             override fun buildImageRenderers(out: java.util.ArrayList<Renderer>) {
                 out.add(ImageRenderer(BitmapFactoryImageDecoder.Factory(context).setMaxOutputSize(STILL_SIDE), photo))
             }
-        }
+        }.experimentalSetEnableMediaCodecVideoRendererPrewarming(prewarmVideo)
         val target = TargetPreloadStatusControl<Int, DefaultPreloadManager.PreloadStatus> { index ->
             if (index in noPreload) {
                 DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_NOT_PRELOADED
-            } else when (kotlin.math.abs(index - preloadIndex.get())) {
+            } else when (index - preloadIndex.get()) {
                 // A montage piece is often 2–4 s, but a hand-cut one can be longer: eight seconds ahead covers a whole
                 // ordinary piece without leaving its tail to be fetched during playback.
                 1, 2 -> DefaultPreloadManager.PreloadStatus.specifiedRangeLoaded(8_000L)
-                3, 4 -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_SOURCE_PREPARED
+                -1, 3, 4 -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_SOURCE_PREPARED
                 else -> DefaultPreloadManager.PreloadStatus.PRELOAD_STATUS_NOT_PRELOADED
             }
         }
@@ -242,6 +257,7 @@ internal fun ProjectPreview(
     }
     val player = engine.first
     val preload = engine.second
+    val videoSync = remember(player) { PreviewVideoSync() }
     // The media items currently held by the manager, so a changed playlist releases exactly those.
     val loadedMedia = remember(player) { mutableListOf<MediaItem>() }
     fun preloadAt(index: Int) {
@@ -262,22 +278,89 @@ internal fun ProjectPreview(
     // The piece and the place in it, kept across a new player (the camera coming or going makes one): the preview goes
     // on from there instead of starting over.
     var resume by remember { mutableStateOf<Pair<ProjectClip, Long>?>(null) }
-    var playing by remember { mutableStateOf(false) }
-    var dragging by remember { mutableStateOf<Float?>(null) }
     // The piece the player is on: its picture is what the preview shows when that piece is a still.
     var current by remember(player) { mutableIntStateOf(0) }
     val totalMs = items.sumOf { it.clip.durationMs }
     // The clock of the whole timeline: absolute milliseconds, and its total.
     var shown by remember { mutableLongStateOf(0L) }
-    var shownTotal by remember { mutableLongStateOf(totalMs) }
+    val shownTotal = maxOf(totalMs, audioEndMs)
+    val musicPlayer = rememberProjectMusicPlayer(audioClips, shownTotal, beats, musicVolume, clickVolume)
+    var audioBuffering by remember(musicPlayer) { mutableStateOf(false) }
+    var audioFailed by remember(musicPlayer) { mutableStateOf(false) }
+
+    fun setVideoSpeed(speed: Float) {
+        if (player.playbackParameters.speed != speed) player.setPlaybackSpeed(speed)
+    }
+
+    fun setPlaying(enabled: Boolean) {
+        playing = enabled
+        if (enabled && musicPlayer?.playerError != null) musicPlayer.prepare()
+        musicPlayer?.playWhenReady = enabled && dragging == null
+        player.playWhenReady = enabled && dragging == null &&
+            (musicPlayer == null || musicPlayer.isPlaying || musicPlayer.playerError != null)
+        if (!enabled) {
+            videoSync.reset()
+            setVideoSpeed(1f)
+            val at = SystemClock.elapsedRealtime()
+            heard.told(heard.now(at), at, false)
+        }
+        onClockNow(shown, enabled)
+    }
+
+    fun seekMusic(projectMs: Long) {
+        val audio = musicPlayer ?: return
+        heard.discontinuity()
+        if (audio.currentPosition != projectMs || audio.playbackState == Player.STATE_ENDED) audio.seekTo(projectMs)
+        audio.playWhenReady = playing && dragging == null
+    }
+
+    fun seekProject(projectMs: Long) {
+        videoSync.reset()
+        setVideoSpeed(1f)
+        val lengths = lengthsOf(inPlayer.map { it.clip })
+        val target = projectMs.coerceIn(0L, shownTotal)
+        if (lengths.isNotEmpty()) {
+            val (index, at) = seekPoint(lengths, target.coerceAtMost(lengths.sum()))
+            player.seekTo(index, at)
+            preloadAt(index)
+        }
+        seekMusic(target)
+        shown = target
+        onClockNow(target, playing && dragging == null)
+    }
+
+    LaunchedEffect(musicPlayer) {
+        videoSync.reset()
+        setVideoSpeed(1f)
+        shown = shown.coerceAtMost(shownTotal)
+        player.playWhenReady = playing && dragging == null && musicPlayer == null
+        if (musicPlayer == null) heard.discontinuity() else seekMusic(shown)
+    }
+
+    DisposableEffect(player, musicPlayer) {
+        val audio = musicPlayer
+        val listener = object : Player.Listener {
+            override fun onEvents(playerState: Player, events: Player.Events) {
+                audioBuffering = playerState.playbackState == Player.STATE_BUFFERING
+                audioFailed = playerState.playerError != null
+                player.playWhenReady = playing && dragging == null && (playerState.isPlaying || audioFailed)
+                if (audioFailed && clips.isEmpty() && playing) setPlaying(false)
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                vm.log("предпросмотр аудио: ${error.cause?.message ?: error.message}")
+            }
+        }
+        if (audio != null) {
+            audio.addListener(listener)
+            audioBuffering = audio.playbackState == Player.STATE_BUFFERING
+        }
+        onDispose { audio?.removeListener(listener) }
+    }
 
     DisposableEffect(player) {
         var joinAt = 0L
         val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                playing = isPlaying
-            }
-
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 current = player.currentMediaItemIndex
                 preloadAt(current)
@@ -288,6 +371,12 @@ internal fun ProjectPreview(
 
             // A picture the phone cannot read must not stop the film: the piece is passed over and the rest plays on.
             override fun onPlayerError(error: PlaybackException) {
+                if (prewarmVideo && (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED)) {
+                    vm.log("предпросмотр: отключаю прогрев после ошибки декодера ${error.errorCodeName}")
+                    prewarmVideo = false
+                    return
+                }
                 val now = inPlayer.getOrNull(player.currentMediaItemIndex) ?: return
                 if (now.clip.role != ProjectClip.Role.STILL && !now.offline) return
                 photo.shown = null
@@ -347,28 +436,23 @@ internal fun ProjectPreview(
     // A card in the hand: the preview stands still (its own playing got in the way of carrying a piece about).
     val openingEditor = openEditor != null
     LaunchedEffect(carrying, editorOpen, openingEditor) {
-        if (carrying || editorOpen || openingEditor) player.pause()
+        if (carrying || editorOpen || openingEditor) setPlaying(false)
         openEditor?.invoke()
     }
     // The video's own sound: the project's slider always controls it, with or without a track. (Without music the
     // slider used to fall back to 1.0, so moving it changed the saved project and nothing that was heard.)
-    LaunchedEffect(videoVolume) {
+    LaunchedEffect(player, videoVolume) {
         player.volume = videoVolume.toFloat().coerceIn(0f, 1f)
-    }
-    // The music itself: another player, kept at the project's own time — the picture may wait on the camera, the
-    // sound need not. Its own reading of that time is what the click keeps time with: what is heard, not what is drawn.
-    val heard = remember { MusicClock() }
-    if (!editorOpen && !openingEditor) {
-        ProjectMusicSound(music, musicVolume, shown, playing, heard)
-        // And the click on the grid, when it is asked for.
-        ProjectMetronome(music, shown, playing, heard, vm::log)
     }
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
-    LaunchedEffect(signature, factory) {
+    LaunchedEffect(signature, player) {
+        videoSync.reset()
+        setVideoSpeed(1f)
         // A rebuild keeps the piece and the place in it: the piece is looked up in the list the player held (its index
         // meant that list), then found again in the new order — a move or an addition must not jump to another piece.
-        val was = inPlayer.getOrNull(player.currentMediaItemIndex)?.clip?.let { it to player.currentPosition.coerceAtLeast(0L) }
+        val previous = inPlayer.getOrNull(player.currentMediaItemIndex)
+        val was = previous?.clip?.let { it to player.currentPosition.coerceAtLeast(0L) }
             ?: resume
         // A piece out of reach plays as a picture held for its length: the clock and the order stay the project's own.
         val media = items.map { piece ->
@@ -401,36 +485,61 @@ internal fun ProjectPreview(
         inPlayer.clear()
         inPlayer.addAll(items)
         player.prepare()
-        val at = if (was == null) -1 else items.indexOfFirst { it.clip == was.first }
+        player.playWhenReady = playing && dragging == null &&
+            (musicPlayer == null || musicPlayer.isPlaying || musicPlayer.playerError != null)
+        val at = was?.let { (clip, _) ->
+            val sameCard = items.indexOfFirst { it.at.index == previous?.at?.index && it.clip == clip }
+            if (sameCard >= 0) sameCard else items.indexOfFirst { it.clip == clip }
+        } ?: -1
         val startAt = if (at >= 0) at else 0
         preloadAt(startAt)
         if (at >= 0) player.seekTo(at, minOf(was!!.second, items[at].clip.durationMs))
     }
-    // The clock follows the player whether or not it plays, and it counts the whole timeline, not the item played.
-    LaunchedEffect(player) {
+    LaunchedEffect(player, musicPlayer, shownTotal, totalMs) {
         while (true) {
             val now = inPlayer.toList()
             val lengths = lengthsOf(now.map { it.clip })
-            if (dragging == null && now.isNotEmpty()) shown = clockAt(lengths, player.currentMediaItemIndex, player.currentPosition)
-            shownTotal = if (lengths.isEmpty()) itemsNow.sumOf { it.clip.durationMs } else lengths.sum()
+            val pictureAt = clockAt(lengths, player.currentMediaItemIndex, player.currentPosition)
+            val at = SystemClock.elapsedRealtime()
+            val musicAt = musicPlayer?.takeIf { it.playerError == null }?.currentPosition
+            val musicRunning = musicAt != null && musicPlayer?.isPlaying == true
+            heard.told(musicAt, at, musicRunning)
+            if (dragging == null && (playing || musicAt != null || now.isNotEmpty() && shown <= totalMs)) {
+                shown = (musicAt ?: pictureAt).coerceIn(0L, shownTotal)
+                val videoEnded = player.playbackState == Player.STATE_ENDED
+                if (playing && (musicAt != null && (shown >= shownTotal || musicPlayer?.playbackState == Player.STATE_ENDED) ||
+                    musicAt == null && videoEnded)) {
+                    setPlaying(false)
+                }
+            }
+            val syncAt = musicAt?.takeIf {
+                playing && dragging == null && musicRunning && player.isPlaying && lengths.isNotEmpty() && it < totalMs
+            }
+            val correction = videoSync.update(pictureAt, syncAt, at, player.playbackParameters.speed)
+            setVideoSpeed(correction.speed)
+            correction.seekToMs?.let { target ->
+                val (index, pos) = seekPoint(lengths, target)
+                player.seekTo(index, pos)
+                preloadAt(index)
+                vm.log("предпросмотр: видео догоняет музыку вперёд на ${target - pictureAt} мс после задержки")
+            }
             now.getOrNull(player.currentMediaItemIndex)?.let { resume = it.clip to player.currentPosition.coerceAtLeast(0L) }
             // Told to the screen: its card is marked in the strip and the strip follows it.
-            onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.at?.index)
+            onPlayingNow(now.getOrNull(player.currentMediaItemIndex)?.at?.index?.takeIf { shown <= totalMs })
             // And the project's own clock, for the timeline: the line it draws must move with the picture, so the loop
             // is quick while the film plays and slow while it stands.
-            onClockNow(shown, player.isPlaying)
+            onClockNow(dragging?.toLong() ?: shown, playing && dragging == null)
             // The line and the slider need a moving clock, not a 20 Hz recomposition of the whole screen: at
             // 20 Hz the UI missed ~21 % of frame deadlines on the phone while the film was playing (gfxinfo).
-            delay(if (player.isPlaying) 100 else 500)
+            delay(if (playing) 100 else 200)
         }
     }
     // A card tapped: the preview jumps to that piece — video or photo alike — and plays on from it.
     LaunchedEffect(play, signature, editorOpen, openingEditor) {
         val at = inPlayer.indexOfFirst { it.at.index == play }
         if (at >= 0 && !editorOpen && !openingEditor) {
-            player.seekTo(at, 0L)
-            preloadAt(at)
-            player.play()
+            seekProject(clockAt(lengthsOf(inPlayer.map { it.clip }), at, 0L))
+            setPlaying(true)
         }
         if (play != null) onPlayed()
     }
@@ -438,17 +547,16 @@ internal fun ProjectPreview(
     // the strip's own seek would. The film does not start by itself: the tap moves the picture, it does not press play.
     LaunchedEffect(seek, signature) {
         val ms = seek ?: return@LaunchedEffect
-        if (inPlayer.isEmpty()) return@LaunchedEffect
-        val (i, at) = seekPoint(lengthsOf(inPlayer.map { it.clip }), ms)
-        player.seekTo(i, at)
-        preloadAt(i)
+        seekProject(ms)
         onSeekedNow()
     }
 
     Column(Modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black)) {
+        if (clips.isNotEmpty()) Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color.Black)) {
             AndroidView(
-                factory = { ctx -> PlayerView(ctx).apply { useController = false; this.player = player } },
+                factory = { ctx -> PlayerView(ctx).apply { useController = false; setKeepContentOnPlayerReset(true) } },
+                update = { view -> if (view.player !== player) view.player = player },
+                onRelease = { it.player = null },
                 modifier = Modifier.fillMaxSize(),
             )
             // A photo is a picture of its own, not a frame of video: it is drawn over the black the video surface
@@ -484,7 +592,10 @@ internal fun ProjectPreview(
             }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton({ if (playing) player.pause() else player.play() }) {
+            IconButton(onClick = {
+                if (!playing && shownTotal > 0L && shown >= shownTotal) seekProject(0L)
+                setPlaying(!playing)
+            }, enabled = clips.isNotEmpty() || musicPlayer != null) {
                 Icon(
                     if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                     if (playing) tr("Пауза", "Pause") else tr("Играть", "Play"),
@@ -492,25 +603,41 @@ internal fun ProjectPreview(
             }
             Slider(
                 value = dragging ?: shown.toFloat(),
-                onValueChange = { dragging = it },
-                onValueChangeFinished = {
-                    dragging?.let { ms ->
-                        val (i, at) = seekPoint(lengthsOf(inPlayer.map { it.clip }), ms.toLong())
-                        if (inPlayer.isNotEmpty()) {
-                            player.seekTo(i, at)
-                            preloadAt(i)
-                        }
-                        shown = ms.toLong()
+                onValueChange = {
+                    if (dragging == null) {
+                        musicPlayer?.playWhenReady = false
+                        player.playWhenReady = false
+                        heard.discontinuity()
                     }
+                    dragging = it
+                    val at = it.toLong()
+                    onScrub(at)
+                    onClockNow(at, false)
+                },
+                onValueChangeFinished = {
+                    val position = dragging?.toLong()
                     dragging = null
+                    position?.let {
+                        seekProject(it)
+                        setPlaying(playing)
+                    }
                 },
                 valueRange = 0f..maxOf(shownTotal, 1L).toFloat(),
                 modifier = Modifier.weight(1f),
             )
             Text(
-                formatDuration((shown / 1000).toInt()) + " / " + formatDuration((shownTotal / 1000).toInt()),
+                formatDuration(((dragging?.toLong() ?: shown) / 1000).toInt()) + " / " + formatDuration((shownTotal / 1000).toInt()),
                 Modifier.padding(start = 8.dp),
                 fontSize = 12.sp,
+            )
+        }
+        if (audioFailed || playing && audioBuffering) {
+            Text(
+                if (audioFailed) tr("Трек не читается", "The track could not be read")
+                else tr("Загружаем звук…", "Buffering audio…"),
+                Modifier.padding(horizontal = 12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (audioFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

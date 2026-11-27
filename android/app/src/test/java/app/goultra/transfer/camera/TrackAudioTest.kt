@@ -11,6 +11,13 @@ import org.junit.Test
  */
 class TrackAudioTest {
     @Test
+    fun `the waveform does not lose half a sample every bucket at 44 point 1 kHz`() {
+        assertEquals(552L, TrackAudio.waveBucketEnd(1, 44_100, 2))
+        assertEquals(1_103L, TrackAudio.waveBucketEnd(2, 44_100, 2))
+        assertEquals(5_512_500L, TrackAudio.waveBucketEnd(10_000, 44_100, 2))
+        assertEquals(5_000_000L, TrackAudio.waveBucketEnd(10_000, 60_000, 3))
+    }
+    @Test
     fun `a column is the loudest of its share of the decoded peaks`() {
         val columns = TrackAudio.columns(floatArrayOf(0.1f, 0.9f, 0.2f, 0.4f), buckets = 2)
         assertEquals(2, columns.size)
@@ -68,13 +75,7 @@ class TrackAudioTest {
         // A file that does not say how long it is is still read up to the safety limit, and a shorter one to its end.
         assertEquals(TrackAudio.ANALYSIS_LIMIT_MS * rate / 1000, TrackAudio.framesToRead(0L, rate))
         assertEquals(20L * rate, TrackAudio.framesToRead(20_000L, rate))
+        assertEquals(1200L * rate, TrackAudio.framesToRead(1_200_000L, rate))
     }
 
-    @Test
-    fun `the grid runs on to the end of the track at the period it was found with`() {
-        val grid = BeatGrid.Grid(bpm = 120.0, offsetMs = 0L, beats = listOf(0L, 500L, 1000L), confidence = 0.9)
-        assertEquals(listOf(0L, 500L, 1000L, 1500L, 2000L), TrackAudio.beatsOver(grid, 2500L))
-        // One beat says nothing about a period: the grid is left as it is.
-        assertEquals(listOf(0L), TrackAudio.beatsOver(BeatGrid.Grid(120.0, 0L, listOf(0L), 0.9), 10_000L))
-    }
 }

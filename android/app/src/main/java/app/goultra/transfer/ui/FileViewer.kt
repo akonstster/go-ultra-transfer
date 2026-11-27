@@ -280,7 +280,8 @@ private fun FilePage(
         fun edit(new: List<Highlight>?): List<Highlight> {
             val tidy = new?.let { Highlights.normalize(it, limitMs) }
             edited = tidy
-            vm.savePieces(file, tidy)
+            val duration = exactMs ?: file.durationSec?.times(1_000L)
+            vm.savePieces(file, tidy, Highlights.inEffect(tidy, marks, limitMs, duration))
             return tidy ?: cameraPieces
         }
         var choose by remember(file.uri) { mutableStateOf(false) }
@@ -546,6 +547,7 @@ fun share(context: android.content.Context, files: List<CameraFile>) {
     val type = when {
         kinds == setOf(MediaKind.VIDEO) -> "video/*"
         kinds == setOf(MediaKind.PHOTO) -> "image/*"
+        kinds == setOf(MediaKind.AUDIO) -> "audio/*"
         else -> "*/*"
     }
     val intent = if (uris.size == 1) {
@@ -1784,6 +1786,7 @@ private fun TimelineEditor(
     var scrubbing by remember(player) { mutableStateOf(false) }
     var stripGesture by remember { mutableStateOf(false) }
     var drag by remember { mutableStateOf<Highlight?>(null) } // the selected piece while a handle is dragged
+    var deleting by remember(file.uri) { mutableStateOf<Highlight?>(null) }
     LaunchedEffect(player) {
         while (true) {
             if (!scrubbing && !stripGesture && drag == null && android.os.SystemClock.uptimeMillis() - touchedAt > 400) {
@@ -2038,9 +2041,23 @@ private fun TimelineEditor(
                 enabled = targets.end != null,
                 colors = commandColors,
             ) { Text(tr("Закончить тут", "End here")) }
-            if (current in pieces.indices) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
+            if (current in pieces.indices) TextButton({ deleting = pieces[current] }) { Text(tr("Удалить", "Delete"), color = Color.White) }
             if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
         }
+    }
+    deleting?.let { piece ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text(tr("Удалить кусок?", "Delete the clip?")) },
+            confirmButton = {
+                TextButton({
+                    val index = pieces.indexOf(piece)
+                    if (index >= 0) onDelete(index)
+                    deleting = null
+                }) { Text(tr("Удалить", "Delete")) }
+            },
+            dismissButton = { TextButton({ deleting = null }) { Text(tr("Отмена", "Cancel")) } },
+        )
     }
 }
 

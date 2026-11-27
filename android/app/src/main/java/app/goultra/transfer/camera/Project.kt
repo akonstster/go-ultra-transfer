@@ -65,8 +65,6 @@ data class ProjectClip(
 data class ProjectMusic(
     val uri: String,
     val name: String = "",
-    /** Where the montage starts in the track (trim), ms. */
-    val offsetMs: Long = 0L,
     /** The beat grid in ms (P3); empty until the track has been analysed. */
     val beats: List<Long> = emptyList(),
     /**
@@ -89,10 +87,39 @@ data class ProjectMusic(
     /** The grid was changed by hand: a newer detector may not overwrite it. */
     val gridEdited: Boolean = false,
 ) {
+    fun addedDrop(atMs: Long): ProjectMusic {
+        if (atMs !in 0 until lengthMs || atMs in drops) return this
+        return copy(drops = (drops + atMs).sorted(), activeDropMs = activeDropMs ?: atMs, dropsEdited = true)
+    }
+
+    fun movedDrop(fromMs: Long, toMs: Long): ProjectMusic {
+        if (fromMs !in drops || toMs !in 0 until lengthMs || fromMs == toMs || toMs in drops) return this
+        return copy(
+            drops = (drops - fromMs + toMs).sorted(),
+            activeDropMs = if (activeDropMs == fromMs) toMs else activeDropMs,
+            dropsEdited = true,
+        )
+    }
+
+    fun removedDrop(atMs: Long): ProjectMusic {
+        if (atMs !in drops) return this
+        val remaining = drops - atMs
+        return copy(
+            drops = remaining,
+            activeDropMs = if (activeDropMs == atMs) remaining.minByOrNull { kotlin.math.abs(it - atMs) } else activeDropMs,
+            dropsEdited = true,
+        )
+    }
+
+    fun primaryDrop(atMs: Long): ProjectMusic =
+        if (atMs in drops && atMs != activeDropMs) copy(activeDropMs = atMs, dropsEdited = true) else this
+
+    fun clearedDrops(): ProjectMusic =
+        if (drops.isEmpty()) this else copy(drops = emptyList(), activeDropMs = null, dropsEdited = true)
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("uri", uri)
         if (name.isNotEmpty()) put("name", name)
-        if (offsetMs != 0L) put("offset", offsetMs)
         if (beats.isNotEmpty()) put("beats", JSONArray(beats))
         if (drops.isNotEmpty()) put("drops", JSONArray(drops))
         activeDropMs?.let { put("activeDrop", it) }
@@ -111,11 +138,9 @@ data class ProjectMusic(
         fun from(o: JSONObject): ProjectMusic? {
             val uri = o.optString("uri").takeIf { it.isNotEmpty() } ?: return null
             val beats = o.optJSONArray("beats")?.let { a -> (0 until a.length()).map { a.optLong(it) } }.orEmpty()
-            // The old format held one drop in «drop»; it becomes a list of one, so a project written before the multiple
-            // drops were found keeps its mark instead of losing it.
             val drops = o.optJSONArray("drops")?.let { a -> (0 until a.length()).map { a.optLong(it) } }
                 ?.filter { it >= 0L }?.distinct()?.sorted()
-                ?: listOfNotNull(if (o.has("drop")) o.optLong("drop").takeIf { it >= 0L } else null)
+                .orEmpty()
             val active = (if (o.has("activeDrop")) o.optLong("activeDrop") else null)
                 ?.takeIf { it >= 0L }
             // An active mark is always one of the marks: an explicit one with no list is a list of one.
@@ -123,7 +148,6 @@ data class ProjectMusic(
             return ProjectMusic(
                 uri = uri,
                 name = o.optString("name"),
-                offsetMs = o.optLong("offset", 0L),
                 beats = beats,
                 drops = allDrops,
                 activeDropMs = active ?: allDrops.firstOrNull(),
@@ -133,6 +157,45 @@ data class ProjectMusic(
                 dropVersion = o.optInt("dropVersion", 0),
                 gridConfidence = o.optDouble("gridConfidence", 0.0).takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0) ?: 0.0,
                 gridEdited = o.optBoolean("gridEdited", false),
+            )
+        }
+    }
+}
+
+data class ProjectAudioClip(
+    val id: String,
+    val source: ProjectMusic,
+    val startMs: Long = 0L,
+    val fromMs: Long = 0L,
+    val toMs: Long? = null,
+    val volume: Double = 1.0,
+) {
+    val sourceEndMs: Long get() = toMs?.coerceAtMost(source.lengthMs) ?: source.lengthMs
+    val durationMs: Long get() = (sourceEndMs - fromMs).coerceAtLeast(0L)
+    val endMs: Long get() = startMs + durationMs
+
+    fun sourceAt(projectMs: Long): Long = projectMs - startMs + fromMs
+    fun projectAt(sourceMs: Long): Long = sourceMs - fromMs + startMs
+    fun contains(projectMs: Long): Boolean = projectMs >= startMs && projectMs < endMs
+
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id)
+        put("source", source.toJson())
+        put("start", startMs)
+        put("from", fromMs)
+        toMs?.let { put("to", it) }
+        put("volume", volume)
+    }
+
+    companion object {
+        fun from(o: JSONObject): ProjectAudioClip? {
+            val id = o.optString("id").takeIf { it.isNotEmpty() } ?: return null
+            val source = o.optJSONObject("source")?.let(ProjectMusic::from) ?: return null
+            val from = o.optLong("from").coerceAtLeast(0L)
+            return ProjectAudioClip(
+                id, source, o.optLong("start").coerceAtLeast(0L), from,
+                o.optLong("to").takeIf { it > from },
+                o.optDouble("volume", 1.0).takeIf { it.isFinite() }?.coerceIn(0.0, 1.0) ?: 1.0,
             )
         }
     }
@@ -152,7 +215,7 @@ data class Project(
      * null = an ordinary montage, one clip after another.
      */
     val baseFile: String? = null,
-    val music: ProjectMusic? = null,
+    val audioClips: List<ProjectAudioClip> = emptyList(),
     /** The clip list before the last auto montage («отменить авто» in the UI); null when there was none. */
     val previous: List<ProjectClip>? = null,
     /** Clips taken out by hand: an edit of their file must not bring them back (see [resynced]). */
@@ -164,13 +227,9 @@ data class Project(
     val musicVolume: Double = 1.0,
     /** How loud the video's own sound stays under the music, 0…1 (0 — music only, 1 — as recorded). */
     val videoVolume: Double = ProjectMusic.UNDER_MUSIC,
+    val clickVolume: Double = 1.0,
 ) {
-    /** The project with [uri] as its track, at the mix the project already has; the wave and the grid come later. */
-    fun withMusic(uri: String, name: String): Project =
-        copy(music = ProjectMusic(uri = uri, name = name))
-
-    /** The project without its track. The mix belongs to the project, so it stays exactly as it is. */
-    fun withoutMusic(): Project = if (music == null) this else copy(music = null)
+    val audioEndMs: Long get() = audioClips.maxOfOrNull { it.endMs } ?: 0L
     /** The cutaways: clips pinned to a moment of the base's own time ([ProjectClip.atMs]). */
     val covers: List<ProjectClip> get() = clips.filter { it.atMs != null }
 
@@ -277,7 +336,7 @@ data class Project(
 
     companion object {
         /** The JSON format the app writes: a field added later is simply absent in older files. */
-        const val VERSION = 2
+        const val VERSION = 3
 
         fun encode(p: Project): String = JSONObject().apply {
             put("version", VERSION)
@@ -288,10 +347,11 @@ data class Project(
             if (p.dynamics != Dynamics.EVEN) put("dynamics", p.dynamics.name)
             p.baseFile?.let { put("base", it) }
             put("clips", JSONArray().apply { p.clips.forEach { put(it.toJson()) } })
-            p.music?.let { put("music", it.toJson()) }
+            put("audioClips", JSONArray().apply { p.audioClips.forEach { put(it.toJson()) } })
             // The mix is the project's own, so it is written whether a track is picked or not.
             put("musicLevel", p.musicVolume)
             put("videoLevel", p.videoVolume)
+            put("clickLevel", p.clickVolume)
             p.previous?.let { prev -> put("previous", JSONArray().apply { prev.forEach { put(it.toJson()) } }) }
             if (p.hidden.isNotEmpty()) put("hidden", JSONArray().apply { p.hidden.forEach { put(it.toJson()) } })
         }.toString()
@@ -301,13 +361,7 @@ data class Project(
             val o = runCatching { JSONObject(text) }.getOrNull() ?: return null
             val id = o.optString("id").takeIf { it.isNotEmpty() } ?: return null
             val name = o.optString("name").takeIf { it.isNotEmpty() } ?: return null
-            val music = o.optJSONObject("music")?.let(ProjectMusic::from)
-            val musicJson = o.optJSONObject("music")
-            // In format 1 the mix was split: the sliders lived on the track, while «musicLevel»/«videoLevel» were a copy
-            // refreshed only when a track was removed or picked. That copy is stale exactly when the sliders were moved, so
-            // an older file takes the track's own levels first. Format 2 (this build) keeps the mix on the project, and
-            // those keys are the truth.
-            val oldMix = o.optInt("version", 1) < 2
+            val audio = o.optJSONArray("audioClips")
             return Project(
                 id = id,
                 name = name,
@@ -316,20 +370,14 @@ data class Project(
                 dynamics = enumOf(o.optString("dynamics"), Dynamics.EVEN),
                 clips = clipsOf(o.optJSONArray("clips")),
                 baseFile = o.optString("base").takeIf { it.isNotEmpty() },
-                music = music,
+                audioClips = audio?.let { a ->
+                    (0 until a.length()).mapNotNull { a.optJSONObject(it)?.let(ProjectAudioClip::from) }
+                }.orEmpty(),
                 previous = o.optJSONArray("previous")?.let(::clipsOf),
                 hidden = clipsOf(o.optJSONArray("hidden")),
-                // Before the mix lived on the project it lived on the track (volume/video, and even earlier «duck»).
-                musicVolume = if (oldMix && musicJson != null) {
-                    levelOf(musicJson, "volume") ?: levelOf(o, "musicLevel") ?: 1.0
-                } else {
-                    levelOf(o, "musicLevel") ?: levelOf(musicJson, "volume") ?: 1.0
-                },
-                videoVolume = if (oldMix && musicJson != null) {
-                    legacyVideoLevel(musicJson) ?: levelOf(o, "videoLevel") ?: ProjectMusic.UNDER_MUSIC
-                } else {
-                    levelOf(o, "videoLevel") ?: legacyVideoLevel(musicJson) ?: ProjectMusic.UNDER_MUSIC
-                },
+                musicVolume = levelOf(o, "musicLevel") ?: 1.0,
+                videoVolume = levelOf(o, "videoLevel") ?: ProjectMusic.UNDER_MUSIC,
+                clickVolume = levelOf(o, "clickLevel") ?: 1.0,
             )
         }
 
@@ -339,13 +387,6 @@ data class Project(
             return o.optDouble(key).takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0)
         }
 
-        /** The old track's own «video» level, or its even older «duck» flag; null when neither is there. */
-        private fun legacyVideoLevel(music: JSONObject?): Double? = when {
-            music == null -> null
-            music.has("video") -> levelOf(music, "video")
-            music.has("duck") -> if (music.optBoolean("duck", true)) ProjectMusic.UNDER_MUSIC else 1.0
-            else -> null
-        }
 
         private inline fun <reified T : Enum<T>> enumOf(value: String, fallback: T): T =
             enumValues<T>().firstOrNull { it.name == value } ?: fallback

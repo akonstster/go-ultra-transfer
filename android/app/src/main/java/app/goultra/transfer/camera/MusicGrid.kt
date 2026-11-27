@@ -8,7 +8,7 @@ import kotlin.math.roundToLong
  * testable as a found one — and nothing here touches the track's own file.
  */
 object MusicGrid {
-    /** How much the tempo may move before it is called variable: a twentieth of it is a rounding of the beats. */
+    /** Sustained changes under five per cent are treated as one tempo. */
     private const val VARIABLE_SHARE = 0.05
 
     /** Every beat moved by [byMs]: a grid that sits a little early or late against the sound. Never before the start. */
@@ -57,30 +57,76 @@ object MusicGrid {
         return out
     }
 
-    /** The tempo of a grid, beats a minute (0 when it has fewer than two beats). */
+    /** The typical tempo across short sections, in beats a minute. */
     fun bpm(beats: List<Long>): Double {
-        val gap = BeatGrid.medianGap(beats)
+        val periods = sectionPeriods(beats)
+        val gap = periods.getOrNull(periods.size / 2) ?: 0.0
         return if (gap > 0.0) 60_000.0 / gap else 0.0
     }
 
-    /**
-     * The tempo as a range, beats a minute — the slowest and the fastest the grid holds — read from the ends of its gaps
-     * rather than from the widest and the narrowest of them: one lagging beat is not a tempo, one slip is not either.
-     * Null when there are too few beats to say anything.
-     */
-    fun tempoRange(beats: List<Long>): Pair<Double, Double>? {
-        val gaps = beats.zipWithNext { a, b -> b - a }.filter { it > 0L }.sorted()
-        if (gaps.size < 4) return null
-        val quick = gaps[(gaps.size * 0.05).toInt().coerceIn(0, gaps.lastIndex)]
-        val slow = gaps[(gaps.size * 0.95).toInt().coerceIn(0, gaps.lastIndex)]
-        if (quick <= 0L) return null
-        return 60_000.0 / slow to 60_000.0 / quick
+    /** Estimate one BPM when every mark agrees with a rigid grid to within timestamp rounding. */
+    fun rigidBpm(beats: List<Long>): Double? {
+        if (beats.size < 3) return null
+        val first = beats.first()
+        val period = (beats.last() - first).toDouble() / beats.lastIndex
+        if (period <= 0.0 || beats.indices.any { i -> kotlin.math.abs((beats[i] - first) - i * period) > 1.5 }) return null
+        return 60_000.0 / period
+    }
+
+    /** Tempo around the playhead, ignoring a missed or extra mark inside the local window. */
+    fun bpmAt(beats: List<Long>, atMs: Long): Double {
+        if (beats.size < 2) return 0.0
+        val found = beats.binarySearch(atMs)
+        val index = if (found < 0) -found - 1 else found
+        val count = minOf(8, beats.lastIndex)
+        val from = (index - count / 2).coerceIn(0, beats.lastIndex - count)
+        val gaps = (from until from + count).map { beats[it + 1] - beats[it] }.sorted()
+        val median = gaps[gaps.size / 2].toDouble()
+        if (median <= 0.0) return 0.0
+        val period = gaps.filter { it >= median * 0.70 && it <= median * 1.35 }.average()
+        return 60_000.0 / period
+    }
+
+    /** One exact tempo through the nearest existing beat, or through the playhead when there are no beats yet. */
+    fun constantAt(beats: List<Long>, lengthMs: Long, bpm: Double, atMs: Long): List<Long> {
+        if (bpm !in 20.0..400.0 || lengthMs <= 0L) return beats
+        val period = 60_000.0 / bpm
+        val anchor = beats.minByOrNull { kotlin.math.abs(it - atMs) } ?: atMs.coerceIn(0L, lengthMs - 1)
+        val first = anchor % period
+        return buildList {
+            var index = 0
+            while (true) {
+                val beat = (first + index * period).roundToLong()
+                if (beat >= lengthMs) break
+                add(beat)
+                index++
+            }
+        }
     }
 
     /**
-     * Whether the track's tempo changes along it: a twentieth between its slowest and its fastest beat is a rounding, a
-     * fifth is a tempo that moves. A moving tempo cannot be nudged as one number — the whole grid would only be stretched
-     * about its first beat — so the tempo controls are off for it and only the shift is left.
+     * Tempo sustained across sections. Individual beat placements can move without changing the underlying tempo.
+     */
+    fun tempoRange(beats: List<Long>): Pair<Double, Double>? {
+        if (beats.size < 5) return null
+        val periods = sectionPeriods(beats)
+        if (periods.size < 4) return null
+        val quick = periods[(periods.size * 0.05).toInt()]
+        val slow = periods[(periods.size * 0.95).toInt()]
+        return 60_000.0 / slow to 60_000.0 / quick
+    }
+
+    private fun sectionPeriods(beats: List<Long>): List<Double> {
+        val span = ((beats.size - 1) / 5).coerceIn(1, 8)
+        return (0 until beats.size - span).mapNotNull { start ->
+            val length = beats[start + span] - beats[start]
+            (length.toDouble() / span).takeIf { it > 0.0 }
+        }.sorted()
+    }
+
+    /**
+     * A moving tempo cannot be nudged as one number: stretching the whole grid around its first beat would move the
+     * other sections too. The tempo controls are off for it and only the shift is left.
      */
     fun isVariable(beats: List<Long>): Boolean {
         val (slow, fast) = tempoRange(beats) ?: return false

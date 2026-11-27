@@ -44,16 +44,13 @@ internal fun MontageSheet(vm: CameraController, project: Project, onDismiss: () 
     val blocked = project.baseFile != null || project.covers.isNotEmpty()
     val empty = project.clips.isEmpty()
     val running = vm.montageRunning
-    val music = project.music
-    val gridReady = !music?.beats.isNullOrEmpty()
-    val unsure = gridReady && music?.gridConfidence != null &&
-        music.gridConfidence < 0.20 && music.gridVersion >= BeatGrid.ANALYSIS_VERSION
-    val analysing = music != null && music.uri in vm.musicAnalysing
-    val musicFailed = music != null && music.uri in vm.musicFailed
-    // «Peaks are in» is not «the analysis is done»: the length arrives with the grid, after the wave file.
-    val musicPending = music != null && (analysing || music.lengthMs <= 0L)
-    val musicTooShort = music != null && music.lengthMs > 0L && music.lengthMs <= music.offsetMs
-    val targetMs = music?.let { (it.lengthMs - it.offsetMs).coerceAtLeast(0L) } ?: 0L
+    val music = project.audioClips.map { it.source }
+    val gridReady = music.any { it.beats.isNotEmpty() }
+    val unsure = music.any { it.beats.isNotEmpty() && it.gridConfidence < 0.20 && it.gridVersion >= BeatGrid.ANALYSIS_VERSION }
+    val musicFailed = music.any { it.uri in vm.musicFailed }
+    val musicPending = music.any { it.uri in vm.musicAnalysing || it.lengthMs <= 0L } || musicFailed
+    val targetMs = project.audioEndMs
+    val musicTooShort = music.isNotEmpty() && targetMs == 0L
     var confirmBuild by remember { mutableStateOf(false) }
     var confirmUndo by remember { mutableStateOf(false) }
     ModalBottomSheet(
@@ -124,11 +121,11 @@ internal fun MontageSheet(vm: CameraController, project: Project, onDismiss: () 
                         "В выбранной части трека нет длительности",
                         "The chosen part of the track has no length",
                     )
-                    !gridReady && music != null -> tr(
+                    !gridReady && music.isNotEmpty() -> tr(
                         "Сетка не найдена — нарежем ровными слотами",
                         "No grid was found — the pieces will be even",
                     )
-                    music == null -> tr(
+                    music.isEmpty() -> tr(
                         "Без музыки нарезка переставит и укоротит куски, но не изменит их содержимое",
                         "Without music the montage regroups and trims the pieces but does not change what they show",
                     )
@@ -149,7 +146,7 @@ internal fun MontageSheet(vm: CameraController, project: Project, onDismiss: () 
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
-            if (music != null && targetMs > 0L && !musicPending && !musicTooShort) {
+            if (targetMs > 0L && !musicPending && !musicTooShort) {
                 Text(
                     tr(
                         "Длительность ролика: по музыке — %s",

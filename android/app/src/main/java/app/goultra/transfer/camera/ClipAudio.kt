@@ -112,6 +112,15 @@ object ClipAudio {
      */
     internal fun openPcm(open: (MediaExtractor) -> Unit): PcmReader? = PcmReader.open(open)
 
+    internal interface PcmSource {
+        val rate: Int
+        val channels: Int
+        val durationMs: Long
+        val delayFrames: Int
+        fun read(from: Long, count: Int): ShortArray
+        fun release()
+    }
+
     /**
      * The original's sound as 16-bit PCM by frame: [read] (frame, count), seeking when asked for another place than
      * where it is (from a little earlier, so the decoder has settled); silence before the start and after the end.
@@ -121,24 +130,24 @@ object ClipAudio {
     internal class PcmReader(
         private val ex: MediaExtractor,
         private val codec: MediaCodec,
-        val rate: Int,
-        val channels: Int,
-        val durationMs: Long,
+        override val rate: Int,
+        override val channels: Int,
+        override val durationMs: Long,
         /**
          * The codec's own delay in frames — an mp3's or an aac's priming samples, which the decoder gives out as the
          * first frames of the stream and which a player cuts off before a single sample is heard. A reader that finds a
          * track's beat must cut them off too: otherwise the whole grid stands later than the sound by them (25 ms for an
          * mp3, up to 50 for an aac), and a click on that grid lands after the beat.
          */
-        val delayFrames: Int,
-    ) {
+        override val delayFrames: Int,
+    ) : PcmSource {
         private var next = Long.MIN_VALUE // the frame [buffer] continues from
         private var buffer = ShortArray(0)
         private var bufferAt = 0 // frames of [buffer] already given out
         private var inputDone = false
         private var outputDone = false
 
-        fun read(from: Long, count: Int): ShortArray {
+        override fun read(from: Long, count: Int): ShortArray {
             if (from != next) seek(from)
             val out = ShortArray(count * channels)
             var filled = 0
@@ -233,7 +242,7 @@ object ClipAudio {
             return false
         }
 
-        fun release() {
+        override fun release() {
             runCatching { codec.stop() }
             codec.release()
             ex.release()

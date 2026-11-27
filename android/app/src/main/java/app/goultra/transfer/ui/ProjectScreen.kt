@@ -2,11 +2,14 @@ package app.goultra.transfer.ui
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
@@ -23,6 +26,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
@@ -38,12 +48,8 @@ import app.goultra.transfer.camera.ProjectExport
 import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.AudioLane
 
-/** The files' pieces as they stand ([all]), and the same for the files edited on the phone ([edited]). */
-private data class FilePieces(
-    val all: Map<String, List<Highlight>>,
-    val edited: Map<String, List<Highlight>>,
-)
 
 /**
  * A project's own screen: the pieces it is made of, in the order they will play (see `memory-bank/projects-plan.md`).
@@ -55,22 +61,20 @@ private data class FilePieces(
 fun ProjectScreen(vm: CameraController, p: Project) {
     // The files' pieces as they stand, and the files edited on the phone apart: the project's clips follow those edits
     // (resync below). Re-read on opening and after every edit in the film strip ([CameraController.piecesVersion]).
-    val loaded by produceState<FilePieces>(FilePieces(emptyMap(), emptyMap()), p.id, p.clips.size, vm.piecesVersion) {
+    val loaded by produceState<Map<String, List<Highlight>>>(emptyMap(), p.id, p.clips.map { it.file }.distinct(), vm.piecesVersion) {
         val all = mutableMapOf<String, List<Highlight>>()
-        val edited = mutableMapOf<String, List<Highlight>>()
         for (name in p.clips.map { it.file }.distinct()) {
             val f = vm.projectFile(name) ?: continue
             val limit = f.durationSec?.let { (it + 1) * 1000L }
             val own = vm.editedPieces(f)
             all[name] = Highlights.inEffect(own, vm.highlights(f), limit, f.durationSec?.let { it * 1000L })
-            if (own != null) edited[name] = all.getValue(name)
         }
-        value = FilePieces(all, edited)
+        value = all
     }
-    // A piece added, dropped or re-cut in the film strip is what the project takes of that file from then on (§7).
-    LaunchedEffect(loaded.edited) { vm.resyncProjectClips(loaded.edited) }
-    val stale = remember(loaded.all, p.clips) { p.staleClips(loaded.all).toSet() }
+    val stale = remember(loaded, p.clips) { p.staleClips(loaded).toSet() }
     val totalMs = p.clips.sumOf { it.durationMs }
+    val audio = remember(p.audioClips) { AudioLane(p.audioClips) }
+    val audioBeats = remember(audio) { audio.marks { it.beats } }
 
     // Cards are told apart by their place in [Project.clips], not by equality: the same piece may be in twice.
     var play by remember(p.id) { mutableStateOf<Int?>(null) }
@@ -80,10 +84,19 @@ fun ProjectScreen(vm: CameraController, p: Project) {
 
     var carrying by remember(p.id) { mutableStateOf(false) }
     var saving by remember(p.id) { mutableStateOf(false) }
+    var choosingAudio by remember(p.id) { mutableStateOf(false) }
     // The film's own clock, told out by the preview and drawn by the timeline; and a jump the timeline asks for.
     var clockMs by remember(p.id) { mutableLongStateOf(0L) }
+    val musicClock = remember(p.id) { MusicClock() }
     var clockPlaying by remember(p.id) { mutableStateOf(false) }
     var seekTo by remember(p.id) { mutableStateOf<Long?>(null) }
+    val dropSelection = remember(p.id) { mutableStateOf<DropSelection?>(null) }
+    val dropEditorClipId = remember(p.id) { mutableStateOf<String?>(null) }
+    var screenOrigin by remember { mutableStateOf(Offset.Zero) }
+    var timelineBounds by remember { mutableStateOf(Rect.Zero) }
+    fun selectAt(ms: Long, clipId: String? = null) {
+        (clipId ?: audio.clipAt(ms)?.id)?.let(vm::selectAudioClip)
+    }
     // Low-resolution copies are made only while the film stands still: the encoder and the player share the phone's
     // hardware, so encoding during playback is exactly the stutter the copies are meant to remove.
     LaunchedEffect(p.id, clockPlaying, editorOpen) {
@@ -93,7 +106,19 @@ fun ProjectScreen(vm: CameraController, p: Project) {
         onDispose { vm.stopProjectProxies() }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier.fillMaxSize()
+            .onGloballyPositioned { screenOrigin = it.positionInRoot() }
+            .pointerInput(p.id) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (!timelineBounds.contains(screenOrigin + down.position)) {
+                        dropSelection.value = null
+                        dropEditorClipId.value = null
+                    }
+                }
+            },
+    ) {
         Row(
             Modifier.fillMaxWidth().padding(start = 4.dp, top = 4.dp, end = 16.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -153,57 +178,78 @@ fun ProjectScreen(vm: CameraController, p: Project) {
         if (saving) {
             SaveProjectDialog(vm, p, onDismiss = { saving = false })
         }
-        // Every piece, photos included: a still plays as its own picture, held for its length (asked for on the phone,
-        // 07.11); a piece out of reach plays as its card's frame, marked, so the project can be worked on without the
-        // camera and plays for real once it is back.
-        val pieces = p.clips.withIndex().toList()
-        if (pieces.isNotEmpty()) {
-            ProjectPreview(
-                vm, pieces, play,
-                onPlayed = { play = null },
-                onPlaying = { playingNow = it },
-                // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
-                carrying = carrying,
-                music = p.music,
-                videoVolume = p.videoVolume,
-                musicVolume = p.musicVolume,
-                onClock = { ms, plays ->
-                    clockMs = ms
-                    clockPlaying = plays
-                },
-                seek = seekTo,
-                onSeeked = { seekTo = null },
-                editorOpen = editorOpen,
-                openEditor = pieceToEdit?.let { (file, fromMs) ->
-                    {
-                        play = null
-                        pieceToEdit = null
-                        vm.viewProjectPiece(file, fromMs)
-                    }
-                },
-            )
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            // Every piece, photos included: a still plays as its own picture, held for its length (asked for on the phone,
+            // 07.11); a piece out of reach plays as its card's frame, marked, so the project can be worked on without the
+            // camera and plays for real once it is back.
+            val pieces = p.clips.withIndex().toList()
+            if (pieces.isNotEmpty() || p.audioClips.isNotEmpty()) {
+                ProjectPreview(
+                    vm, pieces, play,
+                    onPlayed = { play = null },
+                    onPlaying = { playingNow = it },
+                    // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
+                    carrying = carrying,
+                    audioClips = p.audioClips,
+                    beats = audioBeats,
+                    audioEndMs = p.audioEndMs,
+                    clickVolume = p.clickVolume,
+                    videoVolume = p.videoVolume,
+                    musicVolume = p.musicVolume,
+                    heard = musicClock,
+                    onClock = { ms, plays ->
+                        clockMs = ms
+                        clockPlaying = plays
+                    },
+                    seek = seekTo,
+                    onSeeked = { seekTo = null },
+                    onScrub = { ms -> selectAt(ms) },
+                    editorOpen = editorOpen || choosingAudio,
+                    openEditor = pieceToEdit?.let { (file, fromMs) ->
+                        {
+                            play = null
+                            pieceToEdit = null
+                            vm.viewProjectPiece(file, fromMs)
+                        }
+                    },
+                )
+            }
+            if (p.clips.isEmpty() && p.audioClips.isEmpty()) {
+                Text(
+                    tr(
+                        "Пусто: добавьте файлы из списка кнопкой «В проект»",
+                        "Empty: add files from the list with «Add to project»",
+                    ),
+                    Modifier.padding(32.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (p.clips.isNotEmpty()) {
+                ProjectStrip(
+                    vm, p, stale, playingNow, onPlay = { play = it }, onCarrying = { carrying = it },
+                    onEdit = { file, clip -> pieceToEdit = file to clip.fromMs },
+                )
+                // The same pieces in time: as wide as they last, the track under them, one line for the clock.
+            }
+            if (p.clips.isNotEmpty() || p.audioClips.isNotEmpty()) {
+                Column(Modifier.onGloballyPositioned { timelineBounds = it.boundsInRoot() }) {
+                    ProjectTimeline(
+                        vm, p, clockMs, clockPlaying, musicClock, audioBeats, dropSelection, dropEditorClipId,
+                        onSeek = { ms, clip ->
+                            selectAt(ms, clip)
+                            seekTo = ms
+                        },
+                    )
+                }
+            }
         }
-        if (p.clips.isEmpty()) {
-            Text(
-                tr(
-                    "Пусто: добавьте файлы из списка кнопкой «В проект»",
-                    "Empty: add files from the list with «Add to project»",
-                ),
-                Modifier.padding(32.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        } else {
-            ProjectStrip(
-                vm, p, stale, playingNow, onPlay = { play = it }, onCarrying = { carrying = it },
-                onEdit = { file, clip -> pieceToEdit = file to clip.fromMs },
-            )
-            // The same pieces in time: as wide as they last, the track under them, one line for the clock.
-            ProjectTimeline(vm, p, clockMs, clockPlaying, onSeek = { seekTo = it })
-        }
-        // The music itself: the picked track, the two levels, the tempo (its wave and grid are on the timeline). The
-        // toolbox stands at the very bottom of the screen, where a thumb expects it, not under the timeline.
-        Spacer(Modifier.weight(1f))
-        ProjectMusicLane(vm, p, clockMs)
+        ProjectMusicLane(vm, p, clockMs, choosingAudio, onChooseAudio = { choosingAudio = it },
+            onOpenDrops = {
+                val active = vm.activeAudioClip(p)
+                val clip = active?.takeIf { it.contains(clockMs) } ?: audio.clipAt(clockMs) ?: active
+                dropSelection.value = null
+                dropEditorClipId.value = clip?.id
+            },
+        )
     }
 }
 /**

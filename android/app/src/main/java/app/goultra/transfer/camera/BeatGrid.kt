@@ -6,6 +6,7 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -67,8 +68,9 @@ object BeatGrid {
      *  keeps its phase (1.0); a tempo that really drifts spreads the starts around the circle and falls away from it. */
     private const val STEADY_AGREEMENT = 0.62
 
-    /** The share of the fixed grid that must have a real start on it, so a short loud passage cannot speak for a track. */
-    private const val STEADY_COVERAGE = 0.35
+    private const val STEADY_WINDOW_BEATS = 16
+    private const val STEADY_WINDOW_COVERAGE = 0.60
+    private const val STEADY_WINDOW_PHASE_SUPPORT = 0.65
 
     /** The step of the energy curve, ms (one value a second is plenty to see a drop in). */
     internal const val ENERGY_STEP_MS = 1000L
@@ -138,7 +140,7 @@ object BeatGrid {
     private const val MIN_STARTS = 8
 
     /** The analysis generation saved with a grid: a project from an older detector is analysed again (unless edited). */
-    const val ANALYSIS_VERSION = 9
+    const val ANALYSIS_VERSION = 15
 
     /**
      * The grid of [samples] (mono, −1…1) at [sampleRate]; null when there is nothing to find (silence, or too short for
@@ -183,7 +185,19 @@ object BeatGrid {
         // whole piece, then draw every beat from them. A pause has no starts, so it neither changes the period nor votes
         // for another phase. This is tried first; the drifting path below is only for a piece that proves it moves.
         val steady = steadyGrid(fused, low, opening, fps, sampleRate, lengthMs)
-        if (steady != null && steadySupport(fused, low, steady, fps) >= STEADY_AGREEMENT) return steady
+        if (steady != null && hasSteadySupport(fused, low, steady, fps)) {
+            return phaseFromKickPairs(steady, low, sampleRate, lengthMs)
+        }
+        val fits = rhythmicSections(fused, low, opening, fps, sampleRate)
+        if (steady != null && opening.confidence >= 0.25 && windowsConfirm(steady, fits)) {
+            return phaseFromKickPairs(steady, low, sampleRate, lengthMs)
+        }
+        val sections = fits.mapNotNull { it.local?.takeIf { fit -> fit.support >= 0.48 } }
+        val sectionBeats = bridgeSections(sections, lengthMs)
+        if (sectionBeats.size >= 4 && !MusicGrid.isVariable(sectionBeats) &&
+            sections.sumOf { it.endMs - it.startMs } >= lengthMs / 2) {
+            return Grid(MusicGrid.bpm(sectionBeats), sectionBeats.first(), sectionBeats, opening.confidence)
+        }
 
         val started = starts(fused, opening.period, fps)
         val path = if (started.size >= MIN_STARTS) track(fused, started, opening.period, fps) else emptyList()
@@ -201,8 +215,12 @@ object BeatGrid {
         // The tempo is right, but the phase can sit on the synth or the offbeat. The kick/bass band says where the foot
         // lands; the whole grid moves by its median, never by more than half a beat.
         val phased = phaseToLow(tuned, low, sampleRate)
+        // Weak windows outside the path do not get a synthetic tail. Keep their independently verified beats.
+        val laterSections = sections.filter { it.endMs - phased.last() >= 6_000L }
+        val later = bridgeSections(laterSections, lengthMs).filter { it - phased.last() >= medianGap(phased) * 0.7 }
+        val complete = phased + later
         val confidence = gridConfidence(opening.confidence, whole, phased)
-        return Grid(60_000.0 / medianGap(phased), phased.first(), phased, confidence)
+        return Grid(MusicGrid.bpm(complete), complete.first(), complete, confidence)
     }
 
     /** A pulse read from the whole piece: its period and the first start of its grid, both finer than a frame. */
@@ -330,11 +348,115 @@ object BeatGrid {
      * a real dance track is a perfectly steady pulse too, but it stands half a beat away and must not be able to veto the
      * kick. The full spectrum still contributes, and it is all there is for a track without a drum.
      */
-    private fun steadySupport(fused: FloatArray, low: FloatArray, grid: Grid, fps: Double): Double {
+    private fun hasSteadySupport(fused: FloatArray, low: FloatArray, grid: Grid, fps: Double): Boolean {
         val broad = steadyAgreement(fused, grid, fps)
         val lowTop = low.maxOrNull() ?: 0f
-        if (low.isEmpty() || lowTop <= 0f) return broad
-        return (0.70 * steadyAgreement(low, grid, fps) + 0.30 * broad).coerceIn(0.0, 1.0)
+        if (lowTop <= 0f) return broad.acrossGap || broad.whole >= STEADY_AGREEMENT
+        val bass = steadyAgreement(low, grid, fps)
+        return bass.acrossGap || broad.acrossGap || 0.70 * bass.whole + 0.30 * broad.whole >= STEADY_AGREEMENT
+    }
+
+    private data class SteadyAgreement(val whole: Double, val acrossGap: Boolean)
+
+    internal data class PulseSection(
+        val startMs: Long,
+        val endMs: Long,
+        val firstBeatMs: Long,
+        val periodMs: Double,
+        val support: Double = 1.0,
+    )
+
+    internal data class WindowFit(val local: PulseSection?, val opening: PulseSection?)
+
+    private fun rhythmicSections(
+        onset: FloatArray,
+        low: FloatArray,
+        opening: Tempo,
+        fps: Double,
+        sampleRate: Int,
+    ): List<WindowFit> {
+        val width = (12 * fps).roundToInt().coerceAtLeast(1)
+        val count = (onset.size + width - 1) / width
+        return (0 until count).map { index ->
+            val from = (onset.size.toLong() * index / count).toInt()
+            val to = (onset.size.toLong() * (index + 1) / count).toInt()
+            val segment = onset.copyOfRange(from, to)
+            val bass = if (low.size >= to) low.copyOfRange(from, to) else FloatArray(0)
+            val length = ((to - from) * 1000 / fps).roundToInt().toLong()
+            val local = tempoOf(segment, fps)
+            val start = (from * 1000 / fps).roundToInt().toLong()
+            fun fit(tempo: Tempo?): PulseSection? {
+                if (tempo == null) return null
+                val grid = steadyGrid(segment, bass, tempo, fps, sampleRate, length) ?: return null
+                val broad = steadyAgreement(segment, grid, fps).whole
+                val strength = if (bass.any { it > 0f }) {
+                    0.65 * steadyAgreement(bass, grid, fps).whole + 0.35 * broad
+                } else broad
+                return PulseSection(start, start + length, start + grid.offsetMs, 60_000.0 / grid.bpm, strength)
+            }
+            val openingFit = fit(opening)
+            val localFit = fit(local)
+            WindowFit(listOfNotNull(localFit, openingFit).maxByOrNull { it.support }, openingFit)
+        }
+    }
+
+    /** A fixed pulse needs evidence spread across the track. A weak intro or outro does not vote against it. */
+    internal fun windowsConfirm(grid: Grid, windows: List<WindowFit>): Boolean {
+        if (windows.size < 4) return false
+        val period = 60_000.0 / grid.bpm
+        fun phaseError(section: PulseSection): Double {
+            val steps = (section.firstBeatMs - grid.offsetMs) / period
+            return abs(steps - steps.roundToInt())
+        }
+        val samePeriod = windows.map { window ->
+            window.opening?.takeIf { it.support >= 0.07 && abs(it.periodMs / period - 1.0) <= 0.0075 }
+        }
+        val count = windows.size
+        val onBeat = samePeriod.map { it != null && phaseError(it) <= 0.14 }
+        val third = (count + 2) / 3
+        fun spansTrack(votes: List<Boolean>): Boolean =
+            votes.take(third).any { it } && votes.takeLast(third).any { it } &&
+                votes.count { it } >= count * 2 / 3
+        val anchors = onBeat.indices.filter { onBeat[it] && (samePeriod[it]?.support ?: 0.0) >= 0.25 }
+        val direct = spansTrack(onBeat) && anchors.size >= count / 4
+        // A repeated offbeat supports the period, not the phase. Two separated on-beat anchors and a majority
+        // of on-beat windows must still establish which grid wins.
+        val withOffbeats = !direct && anchors.size >= 2 && anchors.last() - anchors.first() >= count / 3 &&
+            onBeat.count { it } * 2 >= count && spansTrack(samePeriod.map { section ->
+                section != null && (phaseError(section) <= 0.14 || phaseError(section) >= 0.42)
+            })
+        if (!direct && !withOffbeats) return false
+        return windows.none { window ->
+            val local = window.local ?: return@none false
+            val ratio = local.periodMs / period
+            local.support >= 0.55 && (listOf(0.5, 1.0, 2.0).none { abs(ratio - it) <= it * 0.035 } ||
+                abs(ratio - 1.0) < 0.035 && phaseError(local) > 0.22)
+        }
+    }
+
+    /** A gap inherits a rigid pulse only when both sides agree on its period and phase. */
+    internal fun bridgeSections(sections: List<PulseSection>, lengthMs: Long): List<Long> {
+        if (sections.isEmpty()) return emptyList()
+        val runs = mutableListOf(sections.first())
+        for (next in sections.drop(1)) {
+            val last = runs.last()
+            val beats = (next.firstBeatMs - last.firstBeatMs) / last.periodMs
+            val closePhase = abs(beats - beats.roundToInt()) <= 0.18
+            val closePeriod = abs(last.periodMs - next.periodMs) <= last.periodMs * 0.03
+            if (closePeriod && closePhase) runs[runs.lastIndex] = last.copy(endMs = next.endMs)
+            else runs += next
+        }
+        return runs.flatMap { run ->
+            buildList {
+                var i = 0
+                while (true) {
+                    val at = (run.firstBeatMs + i * run.periodMs).roundToInt().toLong()
+                    if (at >= minOf(run.endMs, lengthMs)) break
+                    if (at >= run.startMs) add(at)
+                    i++
+                }
+            }
+        }.distinct().sorted()
     }
 
     /**
@@ -342,19 +464,20 @@ object BeatGrid {
      * belongs to; a constant pulse puts all votes in one place, a tempo that drifts spreads them around the circle.
      * Coverage is folded in so a short loud passage that fits cannot speak for a whole track.
      */
-    private fun steadyAgreement(onset: FloatArray, grid: Grid, fps: Double): Double {
-        if (grid.beats.size < 4) return 0.0
-        val periodMs = medianGap(grid.beats)
-        if (periodMs <= 0.0) return 0.0
-        val period = periodMs * fps / 1000.0
-        if (period <= 1.0) return 0.0
+    private fun steadyAgreement(onset: FloatArray, grid: Grid, fps: Double): SteadyAgreement {
+        // Use the fitted period, rather than the median of the rounded millisecond gaps. A sub-millisecond rounding
+        // error multiplied by hundreds of beats moves the expected phase by a substantial part of a beat.
+        val period = 60.0 * fps / grid.bpm
         val started = starts(onset, period, fps)
-        if (started.isEmpty()) return 0.0
-        val base = grid.beats.first().toDouble() * fps / 1000.0
+        if (started.isEmpty()) return SteadyAgreement(0.0, false)
+        val base = grid.beats.first().toDouble() * fps / 1000.0 - WINDOW / (2.0 * HOP)
         var sumRe = 0.0
         var sumIm = 0.0
         var weight = 0.0
         val covered = BooleanArray(grid.beats.size)
+        val windows = (covered.size + STEADY_WINDOW_BEATS - 1) / STEADY_WINDOW_BEATS
+        val localWeights = DoubleArray(windows)
+        val alignedWeights = DoubleArray(windows)
         for (frame in started) {
             val beatsAway = ((frame - base) / period).roundToInt()
             val residual = frame - (base + beatsAway * period)
@@ -365,14 +488,35 @@ object BeatGrid {
             sumRe += value * cos(angle)
             sumIm += value * sin(angle)
             weight += value
-            if (abs(residual) <= period * STEADY_SHARE && beatsAway in covered.indices) {
-                covered[beatsAway] = true
+            if (beatsAway in covered.indices) {
+                val window = beatsAway / STEADY_WINDOW_BEATS
+                localWeights[window] += value
+                if (abs(residual) <= period * STEADY_SHARE) {
+                    covered[beatsAway] = true
+                    alignedWeights[window] += value
+                }
             }
         }
-        if (weight <= 0.0) return 0.0
+        if (weight <= 0.0) return SteadyAgreement(0.0, false)
         val agreement = sqrt(sumRe * sumRe + sumIm * sumIm) / weight
         val coverage = covered.count { it }.toDouble() / covered.size
-        return (agreement * (0.5 + 0.5 * coverage)).coerceIn(0.0, 1.0)
+        var first = -1
+        var last = -1
+        var confirmed = 0
+        for (window in 0 until windows) {
+            val from = window * STEADY_WINDOW_BEATS
+            val to = minOf(from + STEADY_WINDOW_BEATS, covered.size)
+            if (to - from < STEADY_WINDOW_BEATS / 2 || localWeights[window] <= 0.0) continue
+            val hits = (from until to).count { covered[it] }
+            if (hits < (to - from) * STEADY_WINDOW_COVERAGE ||
+                alignedWeights[window] < localWeights[window] * STEADY_WINDOW_PHASE_SUPPORT) continue
+            if (first < 0) first = window
+            last = window
+            confirmed += hits
+        }
+        // Distinct rhythmic sections that agree in period and phase can bridge an interval with no clear pulse.
+        val acrossGap = first >= 0 && last - first >= 2 && confirmed >= covered.size * 0.25
+        return SteadyAgreement((agreement * (0.5 + 0.5 * coverage)).coerceIn(0.0, 1.0), acrossGap)
     }
 
     /**
@@ -835,9 +979,10 @@ object BeatGrid {
         beats: List<Long>,
     ): Long {
         if (beats.isEmpty()) return edgeMs
-        val next = beats.firstOrNull { it >= edgeMs } ?: return beats.lastOrNull() ?: edgeMs
-        val prev = beats.lastOrNull { it < edgeMs } ?: return next
         val period = medianGap(beats)
+        val next = beats.firstOrNull { it >= edgeMs && it - edgeMs <= maxOf(period * 1.5, stepMs.toDouble()) }
+            ?: edgeMs
+        val prev = beats.lastOrNull { it < edgeMs } ?: return next
         if (period > 0.0 && edgeMs - prev > period * 1.5) return next
         // The pause must have ended right at that beat: a beat deep inside a riser is not the first beat of the return, and a
         // beat before a still-silent passage is not either.
@@ -860,7 +1005,8 @@ object BeatGrid {
      */
     private fun onBeat(ms: Long, beats: List<Long>): Long {
         if (beats.isEmpty()) return ms
-        return beats.firstOrNull { it >= ms } ?: beats.lastOrNull() ?: ms
+        val period = medianGap(beats)
+        return beats.firstOrNull { it >= ms && it - ms <= period * 1.5 } ?: ms
     }
 
     /** The mean of [from] until [to] of [values] (0 when the range is empty). */
@@ -1064,6 +1210,43 @@ object BeatGrid {
         if (bestScore <= 0.0 || bestShift == 0) return beats
         val shiftMs = (bestShift * HOP * 1000.0 / sampleRate).roundToInt()
         return beats.map { it + shiftMs }.filter { it >= 0L }
+    }
+
+    /** A recurring pair of low attacks can put the strongest hit a sixteenth note after the start of the beat. */
+    internal fun phaseFromKickPairs(grid: Grid, low: FloatArray, sampleRate: Int, lengthMs: Long): Grid {
+        val period = 60_000.0 / grid.bpm
+        if (low.isEmpty() || !period.isFinite() || period <= 0.0) return grid
+        val quarter = (period / 4).roundToLong()
+        fun peak(at: Long): Double {
+            val frame = frameOf(at, sampleRate)
+            return (-1..1).maxOf { delta -> low.getOrElse(frame + delta) { 0f }.toDouble() }
+        }
+        val windows = grid.beats.chunked(16).filter { it.size >= 12 }
+        if (windows.size < 6) return grid
+        val supported = windows.mapIndexedNotNull { index, beats ->
+            val main = beats.map(::peak)
+            val before = beats.map { peak(it - quarter) }
+            val after = beats.map { peak(it + quarter) }
+            val intensity = main.sum()
+            val level = (main + before + after).sorted().let { it[it.size * 9 / 10] } * 0.30
+            val pairs = beats.indices.count { main[it] >= level && before[it] >= level }
+            index.takeIf {
+                level > 0.0 && pairs * 8 >= beats.size * 3 &&
+                    before.sum() >= intensity * 0.52 && after.sum() <= intensity * 0.30
+            }
+        }
+        if (supported.size * 3 < windows.size || supported.last() - supported.first() < windows.size / 3) return grid
+        val anchor = ((grid.offsetMs - quarter) % period + period) % period
+        val moved = buildList {
+            var index = 0
+            while (true) {
+                val at = (anchor + index * period).roundToLong()
+                if (at >= lengthMs) break
+                add(at)
+                index++
+            }
+        }
+        return if (moved.isEmpty()) grid else grid.copy(offsetMs = moved.first(), beats = moved)
     }
 
     private fun autocorrelation(x: FloatArray, lag: Int): Double {
