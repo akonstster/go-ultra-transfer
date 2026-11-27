@@ -76,6 +76,12 @@ object Montage {
         val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
     }
 
+    private fun Track.projectDrops(targetMs: Long): List<Long> =
+        (drops + listOfNotNull(activeDropMs)).asSequence()
+            .map { it - offsetMs.coerceAtLeast(0L) }
+            .filter { it in 1 until targetMs }
+            .distinct().sorted().toList()
+
     /**
      * The cuts of the track: from 0 (the project's start) to [targetMs], with every beat (shifted by the track's
      * offset), the active drop and the end of the track. A slot lasts a number of *actual* beats, so a tempo that
@@ -85,13 +91,7 @@ object Montage {
     fun slots(scenario: Scenario, dynamics: Dynamics, track: Track, targetMs: Long, seed: Long = 0L): List<Slot> {
         if (targetMs < MIN_PIECE_MS) return emptyList()
         val offset = track.offsetMs.coerceAtLeast(0L)
-        val drops = (track.drops + listOfNotNull(track.activeDropMs))
-            .asSequence()
-            .map { it - offset }
-            .filter { it > 0L && it < targetMs }
-            .distinct()
-            .sorted()
-            .toList()
+        val drops = track.projectDrops(targetMs)
         val activeDrop = track.activeDropMs
             ?.let { it - offset }
             ?.takeIf { it > 0L && it < targetMs }
@@ -104,8 +104,17 @@ object Montage {
             .toList()
         // A track the analysis could not beat out is still cut evenly: the fallback grid plays the part of the beats,
         // and every slot lasts a whole number of its steps.
-        val beatCuts = found.ifEmpty {
-            (fallback until targetMs step fallback).map { it }.toList()
+        val beatCuts = buildList {
+            var before = 0L
+            for (after in found + targetMs) {
+                // The analysis can end before the audio, or there can be a long gap between audio clips.
+                // Fill only the montage plan. The actual beat grid and metronome remain tied to the audio.
+                if (found.isEmpty() || after - before > MAX_PIECE_MS) {
+                    for (at in (before + fallback) until after step fallback) add(at)
+                }
+                if (after < targetMs) add(after)
+                before = after
+            }
         }
         val cuts = (listOf(0L) + beatCuts + drops + listOf(targetMs))
             .distinct()
@@ -124,12 +133,12 @@ object Montage {
             // step is made long before a fourth short piece can follow.
             val shortRun = slots.takeLastWhile { it.durationMs < MIN_REGULAR_MS }.size
             val beats = step(
-                scenario, dynamics, cuts[i], targetMs, activeDrop, drops, fallback, seed, i,
+                scenario, dynamics, cuts[i], targetMs, activeDrop, drops, fallback, seed, slots.size,
                 intensity(track, cuts[i]), shortRun,
             )
             // Forced cuts (a drop, a stray beat found apart from the fixed grid) count as one boundary each.
             var taken = if (cuts[j] in beatSet || cuts[j] in forcedSet) 1 else 0
-            while (j < cuts.lastIndex && taken < beats) {
+            while (j < cuts.lastIndex && taken < beats && cuts[j + 1] - cuts[i] <= MAX_PIECE_MS) {
                 j++
                 if (cuts[j] in beatSet || cuts[j] in forcedSet) taken++
             }
@@ -138,7 +147,7 @@ object Montage {
             slots += Slot(cuts[i], cuts[j], intensity(track, cuts[i]))
             i = j
         }
-        return mergedTiny(slots)
+        return mergedTiny(slots, forcedSet, activeDrop)
     }
 
     /**
@@ -202,18 +211,20 @@ object Montage {
             return Result(emptyList(), targetMs, 0L, sources.isNotEmpty(), 0)
         }
 
-        val slots = slots(scenario, dynamics, track, targetMs, seed)
+        val plannedMs = if (sources.any { it.isStill }) targetMs else minOf(targetMs, materialMs)
+        val slots = slots(scenario, dynamics, track, plannedMs, seed)
         if (slots.isEmpty()) return Result(emptyList(), targetMs, 0L, true, 0)
+        val dropCuts = track.projectDrops(plannedMs).toHashSet()
 
         val cursors = sources.mapIndexed { index, source ->
             Cursor(
                 source = source,
                 atMs = source.clip.fromMs.coerceIn(source.fromMs, source.toMs),
                 order = randomOrder(seed, index, sources.size),
+                phase = 0.1 + ((tie(seed, 0, index.toLong()) ushr 1) % 801) / 1_000.0,
             )
         }
         val out = ArrayList<ProjectClip>()
-        var exhausted = false
         var filledSlots = 0
         for ((slotIndex, slot) in slots.withIndex()) {
             if (slot.durationMs < MIN_PIECE_MS) continue
@@ -222,16 +233,20 @@ object Montage {
                 val candidates = cursors.filter {
                     (it.source.isStill && it.used == 0) || (!it.source.isStill && it.remainingMs >= MIN_PIECE_MS)
                 }
-                if (candidates.isEmpty()) {
-                    exhausted = true
-                    break
-                }
-                val cursor = choose(candidates, scenario, slot, left, slotIndex, seed)
-                val take = if (cursor.source.isStill) left else minOf(left, cursor.remainingMs)
-                if (take < MIN_PIECE_MS) {
-                    exhausted = true
-                    break
-                }
+                if (candidates.isEmpty()) break
+                val previous = out.lastOrNull()
+                val atDrop = left == slot.durationMs && slot.startMs in dropCuts
+                val usable = candidates.filter {
+                    val take = minOf(left, it.remainingMs)
+                    val rest = left - take
+                    rest == 0L || candidates.size > 1 && (rest >= MIN_PIECE_MS || left >= 2 * MIN_PIECE_MS)
+                }.ifEmpty { candidates }
+                val alternate = if (atDrop) usable.filterNot { it.continues(previous) } else emptyList()
+                val cursor = choose(alternate.ifEmpty { usable }, scenario, slot, left, slotIndex, seed, previous)
+                val available = minOf(left, cursor.remainingMs)
+                val take = if (available != left && left - available < MIN_PIECE_MS &&
+                    left >= 2 * MIN_PIECE_MS && candidates.size > 1
+                ) left - MIN_PIECE_MS else available
                 val from = cursor.atMs
                 out += ProjectClip(
                     file = cursor.source.clip.file,
@@ -244,12 +259,9 @@ object Montage {
                 )
                 cursor.advance(take, slotIndex)
                 left -= take
-                if (left in 1 until MIN_PIECE_MS) {
-                    // A tail too short for its own card: leave it unused rather than put a flash on the screen.
-                    left = 0L
-                }
             }
-            if (exhausted) break
+            // With no room for a legal piece, end the film here. Starting another slot would shift every later cut.
+            if (left > 0L) break
             filledSlots++
         }
         // Slots are editorial, joins are technical: two neighbouring pieces of one uninterrupted range are one piece.
@@ -257,7 +269,7 @@ object Montage {
         val clips = coalesced(out)
         val used = clips.sumOf { it.durationMs }
         val unchanged = editSignature(clips) == editSignature(sources.map { it.clip })
-        return Result(clips, targetMs, used, exhausted || used < targetMs, filledSlots, unchanged)
+        return Result(clips, targetMs, used, used < targetMs, filledSlots, unchanged)
     }
 
     /** Merge adjacent pieces of one source when their ranges touch: the cut adds nothing the eye can see. */
@@ -375,10 +387,18 @@ object Montage {
     }
 
     /** One source as it is consumed: where its cursor stands, how many pieces it gave, and its shuffle order. */
-    private class Cursor(val source: Source, var atMs: Long, val order: Long) {
+    private class Cursor(val source: Source, var atMs: Long, val order: Long, val phase: Double) {
+        private val startMs = atMs
         var used: Int = 0
         var lastSlot: Int = -1
         val remainingMs: Long get() = if (source.isStill) Long.MAX_VALUE else (source.toMs - atMs).coerceAtLeast(0L)
+
+        fun continues(previous: ProjectClip?): Boolean = previous != null &&
+            previous.role != ProjectClip.Role.STILL && !source.isStill &&
+            previous.role == source.clip.role && previous.file == source.clip.file && previous.toMs == atMs
+
+        fun consumption(nextMs: Long): Double = if (source.isStill) phase
+            else (atMs - startMs + phase * minOf(nextMs, remainingMs)) / (source.toMs - startMs)
 
         fun advance(ms: Long, slot: Int) {
             if (!source.isStill) atMs += ms
@@ -388,9 +408,8 @@ object Montage {
     }
 
     /**
-     * Which source fills the next piece: the one closest to the loudness the slot wants, with a growing penalty for a
-     * source used again and again (so four long takes really take turns); outside the energy-led scenarios, the least
-     * used source comes first. The seed only breaks ties (and orders a shuffle), so a rerun is reproducible.
+     * Spread each source across the film according to its available duration. Counting uses alone exhausts all the
+     * short takes first and leaves a long uninterrupted run of the largest source at the end.
      */
     private fun choose(
         candidates: List<Cursor>,
@@ -399,21 +418,18 @@ object Montage {
         leftMs: Long,
         slotIndex: Int,
         seed: Long,
+        previous: ProjectClip?,
     ): Cursor {
         val energyLed = scenario == Scenario.MUSIC || scenario == Scenario.ACTION
         val want = if (!energyLed) 0.5f else 0.25f + 0.75f * slot.intensity
         return candidates.minWithOrNull(
             compareBy<Cursor> { it.lastSlot == slotIndex }
                 .thenBy {
-                    if (it.remainingMs < leftMs && !it.source.isStill && it.remainingMs > MIN_PIECE_MS) 0.5 else 0.0
-                }
-                .thenBy {
-                    if (energyLed) {
-                        val e = it.source.clip.energy?.takeIf { v -> !v.isNaN() }?.coerceIn(0.0, 1.0) ?: 0.5
-                        abs(e - want) + it.used * 1.0
-                    } else {
-                        it.used * 1.0
-                    }
+                    val energy = it.source.clip.energy?.takeIf { v -> !v.isNaN() }?.coerceIn(0.0, 1.0) ?: 0.5
+                    it.consumption(leftMs) +
+                        (if (energyLed) 0.12 * abs(energy - want) else 0.0) +
+                        (if (it.continues(previous)) 0.14 else 0.0) +
+                        (if (it.remainingMs < leftMs) 0.05 else 0.0)
                 }
                 .thenBy { tie(seed, slotIndex, it.order) }
                 .thenBy { it.order },
@@ -436,29 +452,29 @@ object Montage {
     }
 
     /** Slots shorter than [MIN_PIECE_MS] join their neighbour: a stray beat must not make a flash of a piece. */
-    private fun mergedTiny(slots: List<Slot>): List<Slot> {
-        if (slots.size < 2) return slots
-        val out = ArrayList<Slot>(slots.size)
-        // A tiny piece at the very start has no previous to join, so it waits for the first real slot and becomes its
-        // beginning. Any other tiny piece simply extends the previous slot.
-        var pending: Slot? = null
-        for (slot in slots) {
-            if (slot.durationMs < MIN_PIECE_MS) {
-                if (out.isNotEmpty()) {
-                    val prev = out.removeAt(out.lastIndex)
-                    out += prev.copy(endMs = slot.endMs, intensity = maxOf(prev.intensity, slot.intensity))
-                } else {
-                    pending = pending?.let { it.copy(endMs = slot.endMs) } ?: slot
-                }
-            } else {
-                val start = pending
-                out += if (start == null) slot else slot.copy(
-                    startMs = start.startMs,
-                    intensity = maxOf(start.intensity, slot.intensity),
-                )
-                pending = null
-            }
+    private fun mergedTiny(slots: List<Slot>, drops: Set<Long>, main: Long?): List<Slot> {
+        fun priority(at: Long): Int = when (at) {
+            main -> 2
+            in drops -> 1
+            else -> 0
         }
-        return if (out.isEmpty()) listOfNotNull(pending) else out
+        val out = slots.toMutableList()
+        var i = 0
+        while (i < out.size && out.size > 1) {
+            val slot = out[i]
+            if (slot.durationMs >= MIN_PIECE_MS) {
+                i++
+                continue
+            }
+            val startPriority = priority(slot.startMs)
+            val endPriority = priority(slot.endMs)
+            val keepStart = startPriority > endPriority || startPriority == endPriority && startPriority > 0
+            val left = if (i == 0 || i < out.lastIndex && keepStart) i else i - 1
+            val a = out[left]
+            val b = out.removeAt(left + 1)
+            out[left] = a.copy(endMs = b.endMs, intensity = maxOf(a.intensity, b.intensity))
+            i = left
+        }
+        return out
     }
 }

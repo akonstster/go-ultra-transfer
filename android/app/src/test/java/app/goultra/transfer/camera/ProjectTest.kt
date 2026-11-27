@@ -29,7 +29,10 @@ class ProjectTest {
         assertEquals(4_000L, edited.removedDrop(6_010).activeDropMs)
         assertEquals(4_000L, edited.primaryDrop(4_000).activeDropMs)
         assertNull(edited.removedDrop(6_010).removedDrop(4_000).activeDropMs)
-        val cleared = source.clearedDrops()
+        val cleared = source.clearedDrops().copy(
+            analysisMode = AudioAnalysisMode.SPEECH,
+            detectedMode = AudioAnalysisMode.SPEECH,
+        )
         assertTrue(cleared.drops.isEmpty())
         assertNull(cleared.activeDropMs)
         assertTrue(cleared.dropsEdited)

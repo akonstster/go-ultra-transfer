@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -49,6 +50,7 @@ import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.AudioLane
+import app.goultra.transfer.camera.TrackAudio
 
 
 /**
@@ -139,6 +141,22 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 IconButton({ saving = true }, enabled = vm.download == null && vm.export == null) {
                     Icon(Icons.Filled.Save, tr("Сохранить видео", "Save the video"))
                 }
+            }
+        }
+        for (analysis in vm.musicReanalyses(p.id)) {
+            val stage by analysis.stage.collectAsState()
+            val status = when (stage) {
+                TrackAudio.Stage.READING -> tr("Читаем аудио", "Reading audio")
+                TrackAudio.Stage.FINDING_BEATS -> tr("Проверяем ритм", "Checking rhythm")
+                TrackAudio.Stage.FINDING_ACCENTS -> tr("Ищем дропы", "Finding drops")
+                TrackAudio.Stage.APPLYING -> tr("Обновляем метки", "Updating markers")
+            }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                Text(
+                    "$status · ${analysis.name}", style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 3.dp))
             }
         }
         // The low-resolution copy is being encoded: show it, otherwise a paused project looks idle while the phone

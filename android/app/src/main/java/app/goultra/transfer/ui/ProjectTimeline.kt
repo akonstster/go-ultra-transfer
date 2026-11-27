@@ -508,6 +508,11 @@ internal fun ProjectTimeline(
                     dropSelection = null
                 }
             },
+            analysing = clip.source.uri in vm.musicAnalysing,
+            onAnalyse = { mode ->
+                dropSelection = null
+                vm.reanalyseProjectMusic(clip.id, mode)
+            },
         )
     }
 }

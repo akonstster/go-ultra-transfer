@@ -19,6 +19,8 @@ import app.goultra.transfer.CameraService
 import app.goultra.transfer.camera.ClipAudio
 import app.goultra.transfer.camera.ProjectPcmCache
 import app.goultra.transfer.camera.BeatGrid
+import app.goultra.transfer.camera.AudioAccents
+import app.goultra.transfer.camera.AudioAnalysisMode
 import androidx.compose.ui.graphics.asAndroidBitmap
 import app.goultra.transfer.camera.Look
 import app.goultra.transfer.camera.FilmMath
@@ -3813,6 +3815,15 @@ class CameraController(private val app: Application) {
      */
     var musicAnalysing by mutableStateOf<Set<String>>(emptySet())
         private set
+    internal data class MusicReanalysis(
+        val projectId: String,
+        val name: String,
+        val stage: kotlinx.coroutines.flow.StateFlow<TrackAudio.Stage>,
+    )
+    private val reanalysisByUri = mutableStateMapOf<String, MusicReanalysis>()
+
+    internal fun musicReanalyses(projectId: String): List<MusicReanalysis> =
+        reanalysisByUri.values.filter { it.projectId == projectId }
 
     fun updateAudioClip(id: String, action: Phrase, change: (ProjectAudioClip) -> ProjectAudioClip) {
         val p = seenProject ?: return
@@ -3911,28 +3922,45 @@ class CameraController(private val app: Application) {
      * The wave and the grid of [music] in the background: the wave to a small file on the phone, the grid into the
      * project's JSON (a cut snaps to it, P3). A track already analysed is not decoded again.
      */
-    fun analyseMusic(music: ProjectMusic) {
-        if (music.uri in musicFailed || music.uri in musicAnalysing) return
+    fun analyseMusic(music: ProjectMusic) = analyseMusic(music, mode = music.analysisMode, projectId = null)
+
+    fun reanalyseProjectMusic(clipId: String, mode: AudioAnalysisMode) {
+        val project = seenProject ?: return
+        val source = project.audioClips.firstOrNull { it.id == clipId }?.source ?: return
+        analyseMusic(source, mode, project.id)
+    }
+
+    private fun analyseMusic(music: ProjectMusic, mode: AudioAnalysisMode, projectId: String?) {
+        if (music.uri in musicAnalysing) return
+        val replacing = projectId != null
+        if (!replacing && music.uri in musicFailed) return
         // A current grid and its drops are kept. An automatic grid from an older detector is read again: real tracks got
         // grids that began 51 and 84 seconds in, and asking every project to re-pick its track would hide the fix. The
         // drops have their own version, so a grid edited by hand is never overwritten while its drops can still be updated.
         val gridCached = music.gridEdited ||
             (music.lengthMs > 0L && music.gridVersion >= BeatGrid.ANALYSIS_VERSION)
-        val dropsCached = music.dropsEdited || music.dropVersion >= BeatGrid.ANALYSIS_VERSION
-        if (gridCached && dropsCached && musicPeaks(music.uri) != null) return
+        val dropsCached = music.dropsEdited || music.dropVersion >= AudioAccents.VERSION
+        if (!replacing && gridCached && dropsCached && musicPeaks(music.uri) != null) return
         val uri = android.net.Uri.parse(music.uri)
+        val stage = projectId?.let {
+            kotlinx.coroutines.flow.MutableStateFlow(TrackAudio.Stage.READING).also { progress ->
+                reanalysisByUri[music.uri] = MusicReanalysis(it, music.name, progress)
+            }
+        }
         musicAnalysing += music.uri
         scope.launch {
             try {
                 val found = withContext(Dispatchers.IO) {
-                    runCatching { TrackAudio.analyse(app, uri) }
+                    runCatching { TrackAudio.analyse(app, uri, mode) { if (stage != null) stage.value = it } }
                         .onFailure { log("музыка ${music.name}: ${it.message}") }
                         .getOrNull()
                 }
                 if (found == null) {
-                    musicFailed = musicFailed + music.uri
+                    if (replacing) message = tr("Не удалось повторить анализ", "Could not reanalyse audio")
+                    else musicFailed = musicFailed + music.uri
                     return@launch
                 }
+                if (stage != null) stage.value = TrackAudio.Stage.APPLYING
                 withContext(Dispatchers.IO) {
                     runCatching { writePeaks(music.uri, found.peaks) }.onFailure { log("музыка: ${it.message}") }
                 }
@@ -3947,14 +3975,46 @@ class CameraController(private val app: Application) {
                 )
                 musicFailed = musicFailed - music.uri
                 musicVersion++
+                if (replacing) {
+                    val target = projects.firstOrNull { it.id == projectId } ?: return@launch
+                    val current = target.audioClips.firstOrNull { it.source.uri == music.uri }?.source ?: return@launch
+                    if (current.drops != music.drops || current.activeDropMs != music.activeDropMs ||
+                        current.dropsEdited != music.dropsEdited || current.analysisMode != music.analysisMode
+                    ) {
+                        message = tr("Дропы изменились во время анализа", "Drops changed during analysis")
+                        return@launch
+                    }
+                    val drops = found.profile?.drops.orEmpty()
+                    val updated = current.copy(
+                        lengthMs = current.lengthMs.takeIf { it > 0L } ?: found.lengthMs,
+                        beats = if (current.gridEdited) current.beats else found.beats,
+                        gridVersion = if (current.gridEdited) current.gridVersion else BeatGrid.ANALYSIS_VERSION,
+                        gridConfidence = if (current.gridEdited) current.gridConfidence else found.confidence,
+                        drops = drops,
+                        activeDropMs = drops.firstOrNull(),
+                        dropsEdited = false,
+                        dropVersion = AudioAccents.VERSION,
+                        analysisMode = mode,
+                        detectedMode = found.detectedMode,
+                    )
+                    saveProject(
+                        target.copy(audioClips = target.audioClips.map { clip ->
+                            if (clip.source.uri == music.uri) clip.copy(source = updated) else clip
+                        }),
+                        Phrase("Повторно проанализирован трек", "Reanalysed audio"),
+                    )
+                    message = tr("Анализ завершён. Меток: %s", "Analysis complete. Markers: %s").format(drops.size)
+                    return@launch
+                }
                 // The grid and the profile go into whichever project still holds this track: it may have been replaced
                 // meanwhile. A hand-made grid is never written over; an older automatic one is brought up to date. The
                 // drops are versioned on their own, so even a hand-edited grid gets the new drops.
                 fun updated(project: Project): Project = project.copy(audioClips = project.audioClips.map { clip ->
                     val m = clip.source
-                    if (m.uri != music.uri) return@map clip
-                    val newGrid = !m.gridEdited && m.gridVersion < BeatGrid.ANALYSIS_VERSION
-                    val newDrops = !m.dropsEdited && m.dropVersion < BeatGrid.ANALYSIS_VERSION
+                    if (m.uri != music.uri || m.analysisMode != mode) return@map clip
+                    val newDrops = !m.dropsEdited && m.dropVersion < AudioAccents.VERSION
+                    val newGrid = !m.gridEdited && (m.gridVersion < BeatGrid.ANALYSIS_VERSION ||
+                        newDrops && found.detectedMode == AudioAnalysisMode.SPEECH)
                     val drops = if (newDrops) found.profile?.drops.orEmpty() else m.drops
                     clip.copy(source = m.copy(
                         beats = if (newGrid) found.beats else m.beats,
@@ -3962,8 +4022,9 @@ class CameraController(private val app: Application) {
                         drops = drops,
                         activeDropMs = m.activeDropMs?.takeIf { it in drops } ?: drops.firstOrNull(),
                         gridVersion = if (newGrid) BeatGrid.ANALYSIS_VERSION else m.gridVersion,
-                        dropVersion = if (newDrops) BeatGrid.ANALYSIS_VERSION else m.dropVersion,
+                        dropVersion = if (newDrops) AudioAccents.VERSION else m.dropVersion,
                         gridConfidence = if (newGrid) found.confidence else m.gridConfidence,
+                        detectedMode = if (newDrops) found.detectedMode else m.detectedMode,
                     ))
                 })
                 for (history in projectHistory.values) {
@@ -3981,6 +4042,7 @@ class CameraController(private val app: Application) {
                     if (next != held) writeProject(next)
                 }
             } finally {
+                if (replacing) reanalysisByUri.remove(music.uri)
                 musicAnalysing -= music.uri
             }
         }

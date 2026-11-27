@@ -14,6 +14,8 @@ import kotlin.math.roundToInt
  * decoder — the same way `BeatGrid` is.
  */
 object TrackAudio {
+    enum class Stage { READING, FINDING_BEATS, FINDING_ACCENTS, APPLYING }
+
     /** The rate the analysis runs at: fine enough for onsets, a quarter of a 44.1 kHz stereo track's memory. */
     const val RATE = 22_050
 
@@ -43,20 +45,25 @@ object TrackAudio {
         val profile: BeatGrid.Profile?,
         /** The codec's own delay, ms, taken off the analysis (0 when the file has none): mp3 and aac carry some. */
         val delayMs: Long = 0L,
+        val detectedMode: AudioAnalysisMode = AudioAnalysisMode.DYNAMICS,
     )
 
     /**
      * The track at [uri] decoded and measured; null when it is not a sound the phone can read. Blocking — seconds of
      * decoding and arithmetic — so it is called from a worker, never from a composable.
      */
-    fun analyse(context: Context, uri: Uri): Found? =
-        analyse(runCatching { ProjectPcmCache.of(context).open(uri.toString()) }.getOrNull())
+    fun analyse(
+        context: Context,
+        uri: Uri,
+        mode: AudioAnalysisMode = AudioAnalysisMode.AUTO,
+        onStage: (Stage) -> Unit = {},
+    ): Found? = analyse(runCatching { ProjectPcmCache.of(context).open(uri.toString()) }.getOrNull(), mode, onStage)
 
     /** A file already on the phone (a debug probe, a downloaded copy): no SAF permission, the player's own path. */
     internal fun analyse(file: File): Found? =
-        analyse(runCatching { ClipAudio.openPcm { it.setDataSource(file.absolutePath) } }.getOrNull())
+        analyse(runCatching { ClipAudio.openPcm { it.setDataSource(file.absolutePath) } }.getOrNull(), AudioAnalysisMode.AUTO) {}
 
-    private fun analyse(reader: ClipAudio.PcmSource?): Found? {
+    private fun analyse(reader: ClipAudio.PcmSource?, mode: AudioAnalysisMode, onStage: (Stage) -> Unit): Found? {
         if (reader == null) return null
         try {
             val step = (reader.rate.toDouble() / RATE).roundToInt().coerceAtLeast(1)
@@ -74,15 +81,23 @@ object TrackAudio {
             val beats = mutableListOf<Long>()
             val drops = mutableListOf<Long>()
             val energy = mutableListOf<Float>()
+            val modes = mutableMapOf<AudioAnalysisMode, Long>()
             fun analyseBlock() {
                 if (heardAt == 0) return
                 val offset = analysedFrames * 1000 / rate
                 val samples = if (heardAt == heard.size) heard else heard.copyOf(heardAt)
-                val grid = BeatGrid.detectDrifting(samples, rate)
-                val profile = BeatGrid.profile(samples, rate, grid)
-                beats += grid?.beats.orEmpty().map { offset + it }
+                val grid = if (mode == AudioAnalysisMode.SPEECH) null else {
+                    onStage(Stage.FINDING_BEATS)
+                    BeatGrid.detectDrifting(samples, rate)
+                }
+                onStage(Stage.FINDING_ACCENTS)
+                val accents = AudioAccents.analyse(samples, rate, grid, mode)
+                val usedGrid = grid.takeUnless { accents.mode == AudioAnalysisMode.SPEECH }
+                val profile = BeatGrid.profile(samples, rate, usedGrid, detectDrops = false)
+                beats += usedGrid?.beats.orEmpty().map { offset + it }
+                drops += accents.drops.map { offset + it }
+                modes[accents.mode] = modes.getOrDefault(accents.mode, 0L) + heardAt
                 profile?.let {
-                    drops += it.drops.map { drop -> offset + drop }
                     energy += it.energy.toList()
                     confidence += it.confidence * heardAt
                     stability += it.stability * heardAt
@@ -147,6 +162,7 @@ object TrackAudio {
                     energy.toFloatArray(), drops, certainty,
                 ),
                 delayMs = reader.delayFrames * 1000L / reader.rate.coerceAtLeast(1),
+                detectedMode = modes.maxByOrNull { it.value }?.key ?: AudioAnalysisMode.DYNAMICS,
             )
         } finally {
             reader.release()

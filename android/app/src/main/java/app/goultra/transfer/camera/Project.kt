@@ -86,6 +86,8 @@ data class ProjectMusic(
     val gridConfidence: Double = 0.0,
     /** The grid was changed by hand: a newer detector may not overwrite it. */
     val gridEdited: Boolean = false,
+    val analysisMode: AudioAnalysisMode = AudioAnalysisMode.AUTO,
+    val detectedMode: AudioAnalysisMode? = null,
 ) {
     fun addedDrop(atMs: Long): ProjectMusic {
         if (atMs !in 0 until lengthMs || atMs in drops) return this
@@ -129,6 +131,8 @@ data class ProjectMusic(
         if (dropVersion != 0) put("dropVersion", dropVersion)
         if (gridConfidence > 0.0) put("gridConfidence", gridConfidence)
         if (gridEdited) put("gridEdited", true)
+        if (analysisMode != AudioAnalysisMode.AUTO) put("analysisMode", analysisMode.name)
+        detectedMode?.let { put("detectedMode", it.name) }
     }
 
     companion object {
@@ -157,6 +161,9 @@ data class ProjectMusic(
                 dropVersion = o.optInt("dropVersion", 0),
                 gridConfidence = o.optDouble("gridConfidence", 0.0).takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0) ?: 0.0,
                 gridEdited = o.optBoolean("gridEdited", false),
+                analysisMode = AudioAnalysisMode.entries.firstOrNull { it.name == o.optString("analysisMode") }
+                    ?: AudioAnalysisMode.AUTO,
+                detectedMode = AudioAnalysisMode.entries.firstOrNull { it.name == o.optString("detectedMode") },
             )
         }
     }

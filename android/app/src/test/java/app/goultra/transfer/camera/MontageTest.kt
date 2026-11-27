@@ -148,6 +148,32 @@ class MontageTest {
     }
 
     @Test
+    fun `short cutaways survive into the second half when one take is much longer`() {
+        val pool = listOf(src("main.mp4", 0, 80_000), src("a.mp4", 0, 16_000), src("b.mp4", 0, 16_000))
+        for (mode in Dynamics.entries) {
+            val result = Montage.montage(
+                Scenario.TRAVEL, mode, pool, Montage.Track(beats = grid(length = 311_000), lengthMs = 311_000), 42,
+            )
+            val lastCutaway = result.clips.indexOfLast { it.file != "main.mp4" }
+            assertTrue(mode.name, lastCutaway >= 0)
+            val start = result.clips.take(lastCutaway).sumOf { it.durationMs }
+            assertTrue("$mode: last cutaway at $start", start > result.usedMs / 2)
+            assertTrue(mode.name, result.clips.last().durationMs < 30_000)
+            assertEquals(311_000L, result.targetMs)
+            assertTrue(result.exhausted)
+        }
+    }
+
+    @Test
+    fun `a grid ending early leaves measured montage slots through the outro`() {
+        val track = Montage.Track(beats = grid(length = 12_000), lengthMs = 60_000)
+        val slots = Montage.slots(Scenario.MUSIC, Dynamics.EVEN, track, track.lengthMs)
+        assertEquals(60_000L, slots.last().endMs)
+        assertTrue(slots.all { it.durationMs <= Montage.MAX_PIECE_MS })
+        assertTrue(slots.count { it.startMs >= 12_000 } >= 4)
+    }
+
+    @Test
     fun `a tail too small for a card is not a flash`() {
         val result = Montage.montage(
             Scenario.TRAVEL, Dynamics.EVEN, listOf(src("a.mp4", 0, 500)),
@@ -270,6 +296,42 @@ class MontageTest {
             val after = result.clips.getOrNull(at + 1) ?: result.clips.getOrNull(at)
             assertTrue("after drop $drop: ${after?.durationMs}", (after?.durationMs ?: 0L) >= 3_000L)
         }
+    }
+
+    @Test
+    fun `the main drop wins either side of a pair closer than the minimum shot`() {
+        val drops = listOf(3850L, 4080L)
+        for (main in drops) {
+            val track = Montage.Track(beats = grid(length = 12_000), lengthMs = 12_000, activeDropMs = main, drops = drops)
+            val ends = Montage.slots(Scenario.MUSIC, Dynamics.EVEN, track, track.lengthMs).map { it.endMs }
+            assertTrue(ends.toString(), main in ends)
+            assertTrue(ends.toString(), drops.single { it != main } !in ends)
+        }
+    }
+
+    @Test
+    fun `a short source tail is redistributed without moving the drop or the next cut`() {
+        val track = Montage.Track(
+            beats = grid(length = 10_000), lengthMs = 10_000, activeDropMs = 4000, drops = listOf(8000),
+        )
+        val pool = listOf("a.mp4", "b.mp4", "c.mp4", "d.mp4").map { src(it, 0, 3800) }
+        val result = Montage.montage(Scenario.TRAVEL, Dynamics.EVEN, pool, track)
+        assertEquals(10_000L, result.usedMs)
+        assertTrue(boundaries(result.clips).toString(), boundaries(result.clips).containsAll(listOf(4000L, 8000L)))
+        assertTrue(result.clips.all { it.durationMs >= Montage.MIN_PIECE_MS })
+    }
+
+    @Test
+    fun `an available cutaway makes the drop visible while a lone take stays continuous`() {
+        val track = Montage.Track(beats = grid(length = 9000), lengthMs = 9000, activeDropMs = 3000)
+        val main = src("main.mp4", 0, 90_000, energy = 0.95)
+        val cutaway = src("cutaway.mp4", 0, 6000, energy = 0.05)
+        val sources = Montage.montage(Scenario.MUSIC, Dynamics.EVEN, listOf(main, cutaway), track)
+        assertEquals("main.mp4", sources.clips.first().file)
+        assertEquals(3000L, sources.clips.first().durationMs)
+        assertEquals("cutaway.mp4", sources.clips[1].file)
+        val lone = Montage.montage(Scenario.MUSIC, Dynamics.EVEN, listOf(main), track)
+        assertEquals(listOf(9000L), lone.clips.map { it.durationMs })
     }
 
     @Test

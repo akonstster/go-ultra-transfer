@@ -837,6 +837,7 @@ object BeatGrid {
         sampleRate: Int,
         grid: Grid?,
         beats: List<Long> = grid?.beats.orEmpty(),
+        detectDrops: Boolean = true,
     ): Profile? {
         val onset = smoothed(onsets(samples, sampleRate))
         if (onset.isEmpty()) return null
@@ -857,7 +858,7 @@ object BeatGrid {
             stability = steady,
             drive = energy.average().coerceIn(0.0, 1.0),
             energy = energy,
-            drops = dropsOf(loudness(samples, sampleRate), LOUD_STEP_MS, beats),
+            drops = if (detectDrops) dropsOf(loudness(samples, sampleRate), LOUD_STEP_MS, beats) else emptyList(),
             confidence = grid?.confidence ?: 0.0,
         )
     }
@@ -1256,7 +1257,7 @@ object BeatGrid {
     }
 
     /** In-place radix-2 FFT ([re].size a power of two). */
-    private fun fft(re: DoubleArray, im: DoubleArray) {
+    internal fun fft(re: DoubleArray, im: DoubleArray) {
         val n = re.size
         var j = 0
         for (i in 1 until n) {
