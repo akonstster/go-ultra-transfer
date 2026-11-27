@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
@@ -59,6 +60,7 @@ import app.goultra.transfer.camera.MusicGrid
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectMusic
 import app.goultra.transfer.camera.ProjectAudioClip
+import app.goultra.transfer.camera.Multicam
 import kotlin.math.roundToInt
 
 /** Which sheet stands open under the project (none, the sound's, the tempo's, the montage's). */
@@ -70,7 +72,7 @@ private enum class Sheet { NONE, SOUND, TEMPO, MONTAGE, HISTORY }
 @Composable
 internal fun ProjectMusicLane(
     vm: CameraController, p: Project, clockMs: Long, choosingAudio: Boolean,
-    onChooseAudio: (Boolean) -> Unit, onOpenDrops: () -> Unit,
+    onChooseAudio: (Boolean) -> Unit, onOpenDrops: () -> Unit, onOpenMulticam: () -> Unit,
 ) {
     val audio = vm.activeAudioClip(p)
     val music = audio?.source
@@ -109,6 +111,7 @@ internal fun ProjectMusicLane(
                     if (audio != null) Tool(tr("Дропы", "Drops"), Icons.Filled.Diamond, onOpenDrops)
                     Tool(tr("Монтаж", "Montage"), Icons.Filled.ContentCut) { sheet = Sheet.MONTAGE }
                     Tool(tr("История", "History"), Icons.Filled.History) { sheet = Sheet.HISTORY }
+                    Tool(tr("Мультикам", "Multicam"), Icons.Filled.Videocam, onOpenMulticam)
                 }
             }
         }
@@ -229,7 +232,7 @@ private fun SoundSheet(vm: CameraController, project: Project, audio: ProjectAud
                 TextButton(onPick) {
                     Icon(Icons.Filled.Add, tr("Добавить файлы", "Add files"))
                 }
-                if (audio != null) {
+                if (audio != null && (project.multicam == null || audio.id != Multicam.MASTER_ID)) {
                     IconButton({ deleting = audio }) { Icon(Icons.Filled.Close, tr("Убрать трек", "Remove the track")) }
                 }
             }

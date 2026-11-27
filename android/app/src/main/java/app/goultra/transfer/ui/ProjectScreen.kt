@@ -50,6 +50,7 @@ import app.goultra.transfer.camera.Highlight
 import app.goultra.transfer.camera.Highlights
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.AudioLane
+import app.goultra.transfer.camera.Multicam
 import app.goultra.transfer.camera.TrackAudio
 
 
@@ -66,6 +67,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     val loaded by produceState<Map<String, List<Highlight>>>(emptyMap(), p.id, p.clips.map { it.file }.distinct(), vm.piecesVersion) {
         val all = mutableMapOf<String, List<Highlight>>()
         for (name in p.clips.map { it.file }.distinct()) {
+            if (name == Multicam.GROUP_FILE) continue
             val f = vm.projectFile(name) ?: continue
             val limit = f.durationSec?.let { (it + 1) * 1000L }
             val own = vm.editedPieces(f)
@@ -87,6 +89,14 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     var carrying by remember(p.id) { mutableStateOf(false) }
     var saving by remember(p.id) { mutableStateOf(false) }
     var choosingAudio by remember(p.id) { mutableStateOf(false) }
+    var configuringMulticam by remember(p.id) { mutableStateOf(false) }
+    var showingAngles by remember(p.id) { mutableStateOf(false) }
+    val editingAngles = showingAngles && p.multicam != null
+    var auditionAngle by remember(p.id) { mutableStateOf<String?>(null) }
+    var selectedShotAt by remember(p.id) { mutableStateOf<Long?>(null) }
+    var shotHighlight by remember(p.id) { mutableStateOf<MulticamHighlight?>(null) }
+    val takeNames = remember(p.multicam?.takes) { p.multicam?.takes.orEmpty().map { it.file }.distinct() }
+    LaunchedEffect(takeNames, vm.conn) { vm.loadMulticamWaves(takeNames) }
     // The film's own clock, told out by the preview and drawn by the timeline; and a jump the timeline asks for.
     var clockMs by remember(p.id) { mutableLongStateOf(0L) }
     val musicClock = remember(p.id) { MusicClock() }
@@ -101,8 +111,9 @@ fun ProjectScreen(vm: CameraController, p: Project) {
     }
     // Low-resolution copies are made only while the film stands still: the encoder and the player share the phone's
     // hardware, so encoding during playback is exactly the stutter the copies are meant to remove.
-    LaunchedEffect(p.id, clockPlaying, editorOpen) {
-        vm.prepareProjectProxies(p, clockMs, paused = !clockPlaying && !editorOpen)
+    val rendered = remember(p.clips, p.multicam, p.multicamMaster) { p.renderedClips() }
+    LaunchedEffect(p.id, clockPlaying, editorOpen, rendered) {
+        vm.prepareProjectProxies(p.copy(clips = rendered), clockMs, paused = !clockPlaying && !editorOpen)
     }
     DisposableEffect(p.id) {
         onDispose { vm.stopProjectProxies() }
@@ -143,6 +154,8 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 }
             }
         }
+        val syncingMulticam = vm.multicamProgress?.takeIf { it.projectId == p.id }
+        syncingMulticam?.let { MulticamProgress(it) }
         for (analysis in vm.musicReanalyses(p.id)) {
             val stage by analysis.stage.collectAsState()
             val status = when (stage) {
@@ -200,19 +213,31 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             // Every piece, photos included: a still plays as its own picture, held for its length (asked for on the phone,
             // 07.11); a piece out of reach plays as its card's frame, marked, so the project can be worked on without the
             // camera and plays for real once it is back.
-            val pieces = p.clips.withIndex().toList()
+            val master = p.multicamMaster
+            val audition = auditionAngle?.takeIf { id ->
+                p.multicam?.takes?.any { it.id == id } == true && master?.contains(seekTo ?: clockMs) == true
+            }
+            val pieces = remember(rendered, p.multicam, master, audition) {
+                (if (audition == null) rendered else p.renderedClips(audition)).withIndex().toList()
+            }
+            val cardStarts = remember(p.clips) { startsOf(p.clips) }
+            val renderedStarts = remember(rendered) { startsOf(rendered) }
             if (pieces.isNotEmpty() || p.audioClips.isNotEmpty()) {
                 ProjectPreview(
                     vm, pieces, play,
                     onPlayed = { play = null },
-                    onPlaying = { playingNow = it },
+                    onPlaying = { index ->
+                        playingNow = index?.let { renderedStarts.getOrNull(it) }?.let { at ->
+                            cardStarts.indexOfLast { it <= at }.takeIf { it >= 0 }
+                        }
+                    },
                     // A card in the hand means the preview stands still: its own moving about got in the way of the drag.
                     carrying = carrying,
-                    audioClips = p.audioClips,
-                    beats = audioBeats,
-                    audioEndMs = p.audioEndMs,
+                    audioClips = if (audition == null) p.audioClips else emptyList(),
+                    beats = if (audition == null) audioBeats else emptyList(),
+                    audioEndMs = if (audition == null) p.audioEndMs else 0L,
                     clickVolume = p.clickVolume,
-                    videoVolume = p.videoVolume,
+                    videoVolume = if (audition == null) p.videoVolume else 1.0,
                     musicVolume = p.musicVolume,
                     heard = musicClock,
                     onClock = { ms, plays ->
@@ -222,7 +247,8 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                     seek = seekTo,
                     onSeeked = { seekTo = null },
                     onScrub = { ms -> selectAt(ms) },
-                    editorOpen = editorOpen || choosingAudio,
+                    editorOpen = editorOpen || choosingAudio || configuringMulticam || syncingMulticam != null,
+                    keepProjectTime = p.multicam != null,
                     openEditor = pieceToEdit?.let { (file, fromMs) ->
                         {
                             play = null
@@ -241,17 +267,44 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                     Modifier.padding(32.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            } else if (p.clips.isNotEmpty()) {
+            } else if (p.clips.isNotEmpty() && !editingAngles) {
                 ProjectStrip(
-                    vm, p, stale, playingNow, onPlay = { play = it }, onCarrying = { carrying = it },
+                    vm, p, stale, playingNow, onPlay = {
+                        auditionAngle = null
+                        play = renderedStarts.indexOf(cardStarts[it]).takeIf { index -> index >= 0 }
+                    }, onCarrying = { carrying = it }, onEditMulticam = {
+                        showingAngles = true
+                        if (master?.contains(clockMs) == false) seekTo = master.startMs
+                    },
                     onEdit = { file, clip -> pieceToEdit = file to clip.fromMs },
                 )
                 // The same pieces in time: as wide as they last, the track under them, one line for the clock.
             }
             if (p.clips.isNotEmpty() || p.audioClips.isNotEmpty()) {
                 Column(Modifier.onGloballyPositioned { timelineBounds = it.boundsInRoot() }) {
+                    p.multicam?.let { group ->
+                        if (master != null) MulticamControls(vm, group, master, clockMs, clockPlaying, showingAngles, audition,
+                            selectedShotAt = selectedShotAt, onShotSelected = { selectedShotAt = it },
+                            onHighlight = { shotHighlight = it },
+                            onResult = { auditionAngle = null }, onSeek = { seekTo = it }, onExpand = {
+                                showingAngles = !showingAngles
+                                if (!showingAngles) {
+                                    auditionAngle = null
+                                    selectedShotAt = null
+                                }
+                            })
+                    }
                     ProjectTimeline(
-                        vm, p, clockMs, clockPlaying, musicClock, audioBeats, dropSelection, dropEditorClipId,
+                        vm, if (editingAngles) p.copy(clips = rendered) else p,
+                        clockMs, clockPlaying, musicClock, audioBeats, dropSelection, dropEditorClipId, editingAngles,
+                        audition = audition,
+                        shotHighlight = shotHighlight.takeIf { editingAngles },
+                        onShotSelected = { if (editingAngles) selectedShotAt = it },
+                        onResult = { auditionAngle = null },
+                        onInspect = { take, at ->
+                            auditionAngle = take.id
+                            if (at != null && (!clockPlaying || !take.available(master?.sourceAt(clockMs) ?: -1L))) seekTo = at
+                        },
                         onSeek = { ms, clip ->
                             selectAt(ms, clip)
                             seekTo = ms
@@ -261,6 +314,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
             }
         }
         ProjectMusicLane(vm, p, clockMs, choosingAudio, onChooseAudio = { choosingAudio = it },
+            onOpenMulticam = { configuringMulticam = true },
             onOpenDrops = {
                 val active = vm.activeAudioClip(p)
                 val clip = active?.takeIf { it.contains(clockMs) } ?: audio.clipAt(clockMs) ?: active
@@ -268,6 +322,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
                 dropEditorClipId.value = clip?.id
             },
         )
+        if (configuringMulticam) MulticamSetup(vm, p, onDismiss = { configuringMulticam = false })
     }
 }
 /**
@@ -277,7 +332,7 @@ fun ProjectScreen(vm: CameraController, p: Project) {
  */
 @Composable
 private fun SaveProjectDialog(vm: CameraController, p: Project, onDismiss: () -> Unit) {
-    val canCopy = ProjectExport.canCopy(p.clips)
+    val canCopy = p.multicam == null && ProjectExport.canCopy(p.clips)
     val coloured = remember(p.clips) { vm.projectHasColour(p) }
     var precise by remember { mutableStateOf(!canCopy || coloured) }
     var sound by remember { mutableStateOf(true) }

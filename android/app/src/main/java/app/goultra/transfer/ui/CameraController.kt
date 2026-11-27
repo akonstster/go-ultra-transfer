@@ -21,6 +21,9 @@ import app.goultra.transfer.camera.ProjectPcmCache
 import app.goultra.transfer.camera.BeatGrid
 import app.goultra.transfer.camera.AudioAccents
 import app.goultra.transfer.camera.AudioAnalysisMode
+import app.goultra.transfer.camera.Multicam
+import app.goultra.transfer.camera.MulticamTake
+import app.goultra.transfer.camera.MulticamSync
 import androidx.compose.ui.graphics.asAndroidBitmap
 import app.goultra.transfer.camera.Look
 import app.goultra.transfer.camera.FilmMath
@@ -3414,9 +3417,9 @@ class CameraController(private val app: Application) {
             val history = projectHistory[p.id]
             val snapshots = listOf(p) + history?.undo.orEmpty().map { it.project } + history?.redo.orEmpty().map { it.project }
             snapshots.flatMap { snapshot ->
-                (snapshot.clips + snapshot.previous.orEmpty()).map { "${it.file}@${it.fromMs}.jpg" }
+                (snapshot.renderedClips() + snapshot.previous.orEmpty()).map { "${it.file}@${it.fromMs}.jpg" }
             }
-        }.toSet() + "_black.jpg"
+        }.toSet() + "_black.jpg" + Multicam.GAP_FILE
         scope.launch(Dispatchers.IO) {
             frameDir.listFiles()?.forEach { if (it.name !in kept && !it.name.endsWith(".tmp")) it.delete() }
         }
@@ -3427,10 +3430,228 @@ class CameraController(private val app: Application) {
      * and the same clip is not added twice (asked for on the phone, 07.11).
      */
     val projectFiles: Set<String> by derivedStateOf {
-        projects.flatMap { p -> p.clips.map { it.file } + p.audioClips.map { it.source.name } }.toSet()
+        projects.flatMap { p ->
+            p.clips.map { it.file } + p.audioClips.map { it.source.name } +
+                p.multicam?.takes.orEmpty().map { it.file }
+        }.toSet()
     }
 
     val projectAudioFiles: List<CameraFile> get() = addedFiles.filter { it.kind == MediaKind.AUDIO }
+
+    internal data class MulticamProgress(val projectId: String, val done: Int, val total: Int)
+    internal var multicamProgress by mutableStateOf<MulticamProgress?>(null)
+        private set
+
+    internal fun buildMulticam(p: Project, cameras: Map<String, Int>, referenceName: String) {
+        if (multicamProgress != null || montageRunning || cameras.size < 2 || cameras.values.toSet().size < 2) return
+        val reference = previewFile(referenceName) ?: return
+        val files = cameras.mapNotNull { (name, id) -> previewFile(name)?.let { it to id } }
+        if (files.size != cameras.size) {
+            message = tr("Часть записей недоступна", "Some recordings are unavailable")
+            return
+        }
+        multicamProgress = MulticamProgress(p.id, 0, files.size + 1)
+        scope.launch {
+            var keptAudio: File? = null
+            var saved = false
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val syncJob = coroutineContext[kotlinx.coroutines.Job]
+                    fun checkSync() { if (syncJob?.isActive == false) throw CancellationException() }
+                    val cachedMaster = p.audioClips.firstOrNull { it.id == Multicam.MASTER_ID }?.source
+                        ?.takeIf { p.multicam?.referenceFile == referenceName }
+                    val cachedUri = cachedMaster?.uri?.takeIf { uri ->
+                        val local = android.net.Uri.parse(uri)
+                        local.scheme == "file" && local.path?.let { File(it).isFile } == true
+                    }
+                    val masterUri = reference.localUri ?: cachedUri ?: run {
+                        val directory = File(app.filesDir, "multicam-audio").apply { mkdirs() }
+                        val wav = File.createTempFile("reference-", ".wav", directory)
+                        keptAudio = wav
+                        val duration = withMulticamExtractor(reference) { open ->
+                            ClipAudio.openPcm(open)?.let { reader ->
+                                try { reader.durationMs } finally { reader.release() }
+                            }
+                        } ?: return@withContext null
+                        if (duration <= 0) return@withContext null
+                        withMulticamExtractor(reference) { open ->
+                            val source = ProjectMusic("multicam-reference", reference.name, lengthMs = duration)
+                            val clip = ProjectAudioClip(Multicam.MASTER_ID, source)
+                            ProjectSound.renderLane(listOf(clip), duration, { ClipAudio.openPcm(open) }, wav) {
+                                syncJob?.isActive == false
+                            }
+                            android.net.Uri.fromFile(wav).toString()
+                        }
+                    }
+                    val master = ClipAudio.openPcm { it.setDataSource(app, android.net.Uri.parse(masterUri), null) }
+                        ?: return@withContext null
+                    val referenceMs = master.durationMs
+                    val masterPrint = try { MulticamSync.analyse(master, ::checkSync) } finally { master.release() }
+                    if (referenceMs <= 0L) return@withContext null
+                    withContext(Dispatchers.Main) { multicamProgress = MulticamProgress(p.id, 1, files.size + 1) }
+                    val fingerprints = mutableMapOf<String, MulticamSync.Recording>()
+                    val takes = files.mapIndexed { i, (file, camera) ->
+                        checkSync()
+                        val take = try {
+                            val precise = withMulticamExtractor(file) { open ->
+                                android.media.MediaExtractor().let { extractor ->
+                                    try {
+                                        open(extractor)
+                                        (0 until extractor.trackCount).asSequence().map(extractor::getTrackFormat)
+                                            .firstOrNull { it.getString(android.media.MediaFormat.KEY_MIME)?.startsWith("video/") == true }
+                                            ?.takeIf { it.containsKey(android.media.MediaFormat.KEY_DURATION) }
+                                            ?.getLong(android.media.MediaFormat.KEY_DURATION)?.div(1000)
+                                    } finally { extractor.release() }
+                                }
+                            }
+                            val audioDuration = if (file.name == referenceName) {
+                                writePeaks(multicamWaveKey(file.name), masterPrint.peaks)
+                                referenceMs
+                            } else withMulticamExtractor(file) { open ->
+                                ClipAudio.openPcm(open)?.let { reader ->
+                                    try {
+                                        val recording = MulticamSync.analyse(reader, ::checkSync)
+                                        fingerprints[file.name] = recording
+                                        writePeaks(multicamWaveKey(file.name), recording.peaks)
+                                        reader.durationMs
+                                    } finally { reader.release() }
+                                }
+                            }
+                            val duration = precise ?: audioDuration ?: (file.durationSec ?: 0) * 1000L
+                            MulticamTake(file.name, camera, duration,
+                                if (file.name == referenceName) 0L else null)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            log("multicam ${file.name}: ${error.message}")
+                            MulticamTake(file.name, camera, (file.durationSec ?: 0) * 1000L)
+                        }
+                        withContext(Dispatchers.Main) { multicamProgress = MulticamProgress(p.id, i + 2, files.size + 1) }
+                        take
+                    }
+                    val aligned = MulticamSync.alignRecordings(masterPrint, takes, fingerprints, ::checkSync)
+                    val existing = p.multicam?.takeIf { it.referenceFile == referenceName }
+                    val retainedAngles = existing?.takes.orEmpty().groupBy { it.camera }.filterValues { angle ->
+                        angle.any { cameras[it.file] == it.camera }
+                    }.keys
+                    val switches = existing?.switches.orEmpty().filterValues { it in retainedAngles }
+                    val group = Multicam(referenceName, referenceMs, aligned, switches,
+                        existing?.manualCuts.orEmpty().intersect(switches.keys))
+                    val audio = cachedMaster?.takeIf { it.uri == masterUri }?.copy(lengthMs = referenceMs)
+                        ?: ProjectMusic(masterUri, reference.name, lengthMs = referenceMs)
+                    group to audio
+                }
+                if (result == null) {
+                    message = tr("Не удалось прочитать основной звук", "Could not read the reference sound")
+                    return@launch
+                }
+                val current = projects.firstOrNull { it.id == p.id } ?: return@launch
+                if (current != p) {
+                    message = tr("Проект изменился во время синхронизации", "The project changed during synchronisation")
+                    return@launch
+                }
+                val (group, audio) = result
+                val master = current.multicamMaster?.takeIf { it.source.uri == audio.uri }?.copy(source = audio)
+                    ?: ProjectAudioClip(Multicam.MASTER_ID, audio)
+                saveProject(current.copy(multicam = group, baseFile = null, previous = null,
+                    audioClips = current.audioClips.filterNot { it.id == master.id || it.source.uri == audio.uri } + master),
+                    Phrase("Создан мультикам", "Created multicam"))
+                saved = true
+                musicVersion++
+                analyseMusic(audio)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                log("multicam: ${error.message}")
+                message = tr("Не удалось синхронизировать ракурсы", "Could not synchronise camera angles")
+            } finally {
+                if (!saved) keptAudio?.delete()
+                multicamProgress = null
+            }
+        }
+    }
+
+    private suspend fun <T> withMulticamExtractor(file: CameraFile, block: ((android.media.MediaExtractor) -> Unit) -> T): T {
+        val local = file.localUri
+        if (local != null) return block { it.setDataSource(app, android.net.Uri.parse(local), null) }
+        // Each extractor owns its range reader.
+        val camera = session.clipSource(file)
+        return block { it.setDataSource(camera) }
+    }
+
+    private fun multicamWaveKey(file: String) = "multicam-wave:$file"
+
+    internal fun multicamPeaks(file: String): FloatArray? = musicPeaks(multicamWaveKey(file))
+
+    internal suspend fun loadMulticamWaves(names: List<String>) {
+        val files = names.mapNotNull(::previewFile)
+        for (file in files) {
+            val written = withContext(Dispatchers.IO) {
+                if (trackFile(multicamWaveKey(file.name)).exists()) return@withContext false
+                val job = coroutineContext[kotlinx.coroutines.Job]
+                try {
+                    withMulticamExtractor(file) { open ->
+                        val reader = ClipAudio.openPcm(open)
+                        val wave = try {
+                            reader?.let {
+                                MulticamSync.analyse(it, {
+                                    if (job?.isActive == false) throw CancellationException()
+                                }, features = false).peaks
+                            }
+                        } finally { reader?.release() }
+                        writePeaks(multicamWaveKey(file.name), wave ?: FloatArray(0))
+                        true
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    log("multicam wave ${file.name}: ${error.message}")
+                    false
+                }
+            }
+            if (written) musicVersion++
+        }
+    }
+
+    internal fun placeMulticamTake(id: String, start: Long) {
+        val p = seenProject ?: return
+        val group = p.multicam ?: return
+        val updated = group.copy(takes = group.takes.map { take ->
+            if (take.id == id) take.copy(startMs = start, needsReview = false, proposedSpans = emptyList()) else take
+        })
+        saveProject(p.copy(multicam = updated, previous = null),
+            Phrase("Выровнен ракурс", "Aligned camera angle"))
+    }
+
+    internal fun editMulticam(change: (Multicam) -> Multicam?) {
+        val p = seenProject ?: return
+        val group = p.multicam ?: return
+        val updated = change(group) ?: return
+        saveProject(p.copy(multicam = updated, previous = null),
+            Phrase("Сменён ракурс", "Switched camera angle"))
+    }
+
+    internal fun resolveMulticamAlignment(id: String, keepWhole: Boolean) {
+        val p = seenProject ?: return
+        val current = p.multicam ?: return
+        val group = (if (keepWhole) current.keepWholeTake(id) else current.acceptPartialAlignment(id)) ?: return
+        saveProject(p.copy(multicam = group, previous = null),
+            if (keepWhole) Phrase("Сохранён целый ракурс", "Kept the full take")
+            else Phrase("Добавлены совпавшие части", "Added matching sections"))
+    }
+
+    internal fun moveMulticamTo(at: Long) {
+        val project = seenProject ?: return
+        val group = project.clips.indexOfFirst { it.file == Multicam.GROUP_FILE }
+        if (group < 0) return
+        var time = 0L
+        var slot = 0
+        for ((index, clip) in project.clips.withIndex()) {
+            if (index != group && at >= time + clip.durationMs / 2) slot++
+            time += clip.durationMs
+        }
+        moveProjectClip(group, slot)
+    }
 
     /** A new, empty project (see `memory-bank/projects-plan.md`); the tab calls [reloadProjects] before showing it. */
     fun createProject(name: String): Project = projectStore.create(name.trim()).also { reloadProjects() }
@@ -3465,9 +3686,10 @@ class CameraController(private val app: Application) {
     }
 
     private fun writeProject(p: Project): Project {
-        projectStore.save(p)
+        val ready = p.withMulticamAudio()
+        projectStore.save(ready)
         reloadProjects()
-        return p
+        return ready
     }
 
     fun restoreProjectEdit(redo: Boolean) {
@@ -3556,6 +3778,33 @@ class CameraController(private val app: Application) {
     fun autoMontage() {
         val open = seenProject ?: return
         if (montageRunning) return
+        val multicam = open.multicam
+        if (multicam != null) {
+            if (open.audioClips.any { it.source.uri in musicAnalysing }) {
+                montageNote = Phrase("Дождитесь анализа трека", "Wait for the track analysis")
+                return
+            }
+            val master = open.multicamMaster ?: return
+            val source = master.source
+            val beats = source.beats
+            val track = Montage.Track(
+                beats = beats,
+                offsetMs = master.fromMs,
+                lengthMs = source.lengthMs,
+                activeDropMs = source.activeDropMs,
+                drops = source.drops,
+                energy = musicPeaks(source.uri)?.let { Montage.intensities(it) }.orEmpty(),
+                fallbackBeatMs = fallbackBeat(beats),
+            )
+            val updated = multicam.autoSwitch(Montage.slots(open.scenario, open.dynamics, track,
+                master.durationMs, System.currentTimeMillis()).map {
+                it.copy(startMs = it.startMs + master.fromMs, endMs = it.endMs + master.fromMs)
+            })
+            saveProject(open.copy(multicam = updated, previous = null),
+                Phrase("Выполнен автомонтаж", "Ran auto montage"))
+            montageNote = Phrase("Кусков: %s", "Clips: %s", arrayOf(updated.clips().size))
+            return
+        }
         if (open.clips.isEmpty()) {
             montageNote = Phrase("Сначала добавьте файлы в проект", "Add files to the project first")
             return
@@ -3723,8 +3972,18 @@ class CameraController(private val app: Application) {
 
     /** The file a clip refers to: the camera's list, the phone's copies, or a file added to the gallery. */
     fun projectFile(name: String): CameraFile? =
-        (files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name })
+        (if (name == Multicam.GAP_FILE || name == Multicam.GROUP_FILE) multicamGap() else files.firstOrNull { it.name == name } ?: localFiles.firstOrNull { it.name == name })
             ?.also { if (!it.isOnPhone) seenFiles[name] = it }
+
+    private fun multicamGap(): CameraFile {
+        val black = File(frameDir, Multicam.GAP_FILE)
+        if (!black.exists()) {
+            val bitmap = Bitmap.createBitmap(16, 9, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLACK) }
+            try { saveAtomically(black, bitmap) } finally { bitmap.recycle() }
+        }
+        return CameraFile("/internal/${Multicam.GAP_FILE}", null, null, 16, 9, null, null,
+            localUri = android.net.Uri.fromFile(black).toString())
+    }
 
     /** The shooting time of a project's source: the list's date first, then the name (it survives the file being away). */
     private fun projectClipCreated(name: String): LocalDateTime? =
@@ -3827,7 +4086,14 @@ class CameraController(private val app: Application) {
 
     fun updateAudioClip(id: String, action: Phrase, change: (ProjectAudioClip) -> ProjectAudioClip) {
         val p = seenProject ?: return
-        saveProject(p.copy(audioClips = p.audioClips.map { if (it.id == id) change(it) else it }), action)
+        saveProject(p.copy(audioClips = p.audioClips.map {
+            if (it.id != id) it
+            else if (p.multicam != null && id == Multicam.MASTER_ID) {
+                val edited = change(it).copy(startMs = it.startMs)
+                edited.takeIf { clip -> clip.durationMs > 0L } ?: it
+            }
+            else change(it)
+        }), action)
     }
 
     fun editProjectAudioSource(clipId: String, action: Phrase, change: (ProjectMusic) -> ProjectMusic): Boolean {
@@ -3863,6 +4129,7 @@ class CameraController(private val app: Application) {
     /** The ✕ on the lane: the project has no music (the track itself stays on the phone). */
     fun removeProjectMusic(id: String) {
         val p = seenProject ?: return
+        if (p.multicam != null && id == Multicam.MASTER_ID) return
         saveProject(p.copy(audioClips = p.audioClips.filterNot { it.id == id }), Phrase("Удалён аудиоклип", "Deleted audio clip"))
     }
 
@@ -4097,9 +4364,13 @@ class CameraController(private val app: Application) {
     /** Written beside and moved over: a lane never reads half a wave. */
     private fun writePeaks(uri: String, peaks: FloatArray) {
         val target = trackFile(uri)
-        val tmp = File(target.path + ".tmp")
-        java.io.DataOutputStream(tmp.outputStream().buffered()).use { s -> peaks.forEach { s.writeFloat(it) } }
-        java.nio.file.Files.move(tmp.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        val tmp = File.createTempFile("wave-", ".tmp", target.parentFile)
+        try {
+            java.io.DataOutputStream(tmp.outputStream().buffered()).use { s -> peaks.forEach { s.writeFloat(it) } }
+            java.nio.file.Files.move(tmp.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            tmp.delete()
+        }
     }
 
     /**
@@ -4563,13 +4834,13 @@ class CameraController(private val app: Application) {
     // ---------- a project into one video ----------
 
     /** The pieces of [p] whose file can't be read now: not on the list, or on the camera while it is away. */
-    fun projectUnreachable(p: Project): Int = p.clips.count { c ->
+    fun projectUnreachable(p: Project): Int = p.renderedClips().count { c ->
         val f = projectFile(c.file)
         f == null || (!f.isOnPhone && conn != ConnState.Connected)
     }
 
     /** Whether any file of [p] has its colour set: that colour is kept only by a precise (re-encoded) save. */
-    fun projectHasColour(p: Project): Boolean = p.clips.map { it.file }.distinct().any { name ->
+    fun projectHasColour(p: Project): Boolean = p.renderedClips().map { it.file }.distinct().any { name ->
         val f = projectFile(name) ?: return@any false
         look(f)?.let { !it.isPlain(f.iLog ?: true) } ?: false
     }
@@ -4629,10 +4900,12 @@ class CameraController(private val app: Application) {
             message = tr("Не сохранить: %s кусков без файла — подключите камеру", "Can't save: %s clips without their file — connect the camera").format(away)
             return
         }
-        val files = p.clips.map { it.file }.distinct().associateWith { projectFile(it)!! }
+        val rendered = p.copy(clips = p.renderedClips())
+        val files = rendered.clips.map { it.file }.distinct().associateWith { projectFile(it)!! }
         // The battery read fresh: if the camera goes during the save, its level tells whether it ran flat.
         if (files.values.any { !it.isOnPhone }) refreshSettings()
-        if (!precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound, retried) else encodeProject(p, files, sound, retried)
+        if (p.multicam == null && !precise && ProjectExport.canCopy(p.clips)) copyProject(p, files, sound, retried)
+        else encodeProject(rendered, files, sound, retried)
     }
 
     /**
@@ -4828,6 +5101,7 @@ class CameraController(private val app: Application) {
                 // The music plays under the picture, and the video's own sound stays at its own slider's level:
                 // media3 mixes the sequences' sound, each item with a gain of its own.
                 val music = sound && p.audioClips.isNotEmpty()
+                val keepOriginalSound = sound && p.clips.any { !it.muteSource }
                 val under = if (music && p.videoVolume < 1.0) {
                     listOf<androidx.media3.common.audio.AudioProcessor>(gain(p.videoVolume.toFloat()))
                 } else {
@@ -4851,7 +5125,7 @@ class CameraController(private val app: Application) {
                                     .setEndPositionMs(c.toMs)
                                     .build(),
                             ).build()
-                        androidx.media3.transformer.EditedMediaItem.Builder(media).setRemoveAudio(!sound).setEffects(colour).build()
+                        androidx.media3.transformer.EditedMediaItem.Builder(media).setRemoveAudio(!sound || c.muteSource).setEffects(colour).build()
                     }
                 }
                 val fit = androidx.media3.effect.Presentation.createForWidthAndHeight(w, h, androidx.media3.effect.Presentation.LAYOUT_SCALE_TO_FIT)
@@ -4861,7 +5135,7 @@ class CameraController(private val app: Application) {
                 // Media3 1.11 rejects the deprecated Composition.forceAudioTrack path: it merges the old
                 // TRACK_TYPE_NONE default with TRACK_TYPE_AUDIO and fails on «trackTypes must only contain…».
                 // Name the tracks on each sequence instead; that is the supported way and says exactly what is heard.
-                val mainTypes = if (sound) {
+                val mainTypes = if (keepOriginalSound) {
                     setOf(
                         androidx.media3.common.C.TRACK_TYPE_AUDIO,
                         androidx.media3.common.C.TRACK_TYPE_VIDEO,

@@ -199,7 +199,9 @@ internal fun MontageSheet(vm: CameraController, project: Project, onDismiss: () 
             onDismissRequest = { confirmBuild = false },
             title = {
                 Text(
-                    if (project.previous != null) {
+                    if (project.multicam != null) {
+                        tr("Пересобрать мультикам?", "Rebuild the multicam montage?")
+                    } else if (project.previous != null) {
                         tr("Пересобрать монтаж?", "Rebuild the montage?")
                     } else {
                         tr("Собрать монтаж?", "Build the montage?")
@@ -208,7 +210,12 @@ internal fun MontageSheet(vm: CameraController, project: Project, onDismiss: () 
             },
             text = {
                 Text(
-                    if (project.previous != null) {
+                    if (project.multicam != null) {
+                        tr(
+                            "Автомонтаж обновит выбор ракурсов внутри мультикама. Ручные склейки и клипы вокруг него сохранятся.",
+                            "Auto montage updates angles inside the multicam group and keeps manual cuts and surrounding clips.",
+                        )
+                    } else if (project.previous != null) {
                         tr(
                             "Текущий автомонтаж будет заменён, а исходные куски останутся в «Отменить авто».",
                             "The current auto montage will be replaced; the original pieces stay under \"Undo auto\".",

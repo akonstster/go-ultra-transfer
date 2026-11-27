@@ -25,6 +25,7 @@ data class ProjectClip(
     val role: Role = Role.TAKE,
     /** 0…1, how much motion the clip has (measured in the background from the LRV frames; null until then). */
     val energy: Double? = null,
+    val muteSource: Boolean = false,
 ) {
     /** A marked short piece (the camera's marks or the user's edit), a piece of a long take, or a still. */
     enum class Role { TAKE, INSERT, STILL }
@@ -235,8 +236,30 @@ data class Project(
     /** How loud the video's own sound stays under the music, 0…1 (0 — music only, 1 — as recorded). */
     val videoVolume: Double = ProjectMusic.UNDER_MUSIC,
     val clickVolume: Double = 1.0,
+    val multicam: Multicam? = null,
 ) {
     val audioEndMs: Long get() = audioClips.maxOfOrNull { it.endMs } ?: 0L
+    val multicamMaster: ProjectAudioClip? get() = audioClips.firstOrNull { it.id == Multicam.MASTER_ID }
+    val multicamStartMs: Long get() = clips.takeWhile { it.file != Multicam.GROUP_FILE }.sumOf { it.durationMs }
+
+    fun renderedClips(audition: String? = null): List<ProjectClip> {
+        val group = multicam ?: return clips
+        val master = multicamMaster ?: return clips
+        val angles = if (audition == null) group.clips(fromMs = master.fromMs, untilMs = master.sourceEndMs)
+            .map { it.copy(muteSource = true) }
+        else group.audition(audition, master.fromMs, master.sourceEndMs)
+        return clips.flatMap { if (it.file == Multicam.GROUP_FILE) angles else listOf(it) }
+    }
+
+    fun withMulticamAudio(): Project {
+        if (multicam == null) return this
+        val master = multicamMaster ?: return this
+        val group = ProjectClip(Multicam.GROUP_FILE, 0L, master.durationMs)
+        val arranged = if (clips.any { it.file == Multicam.GROUP_FILE })
+            clips.map { if (it.file == Multicam.GROUP_FILE) group else it } else clips + group
+        val start = arranged.takeWhile { it.file != Multicam.GROUP_FILE }.sumOf { it.durationMs }
+        return copy(clips = arranged, audioClips = audioClips.map { if (it.id == master.id) it.copy(startMs = start) else it })
+    }
     /** The cutaways: clips pinned to a moment of the base's own time ([ProjectClip.atMs]). */
     val covers: List<ProjectClip> get() = clips.filter { it.atMs != null }
 
@@ -248,6 +271,11 @@ data class Project(
      * hold the timeline then, and a base without clips is only a name.
      */
     fun without(clip: ProjectClip): Project {
+        if (clip.file == Multicam.GROUP_FILE) return copy(
+            clips = clips.filterNot { it.file == Multicam.GROUP_FILE },
+            audioClips = audioClips.filterNot { it.id == Multicam.MASTER_ID },
+            multicam = null,
+        )
         val left = clips.toMutableList().also { it.remove(clip) }
         // The removal is remembered: an edit of that file's pieces must not bring the clip back (see [resynced]).
         return copy(
@@ -335,7 +363,7 @@ data class Project(
      */
     fun staleClips(pieces: Map<String, List<Highlight>>): List<ProjectClip> = clips.filter { clip ->
         // A photo is a still, not a range of a file's pieces: it can never be «gone from the file».
-        if (clip.role == ProjectClip.Role.STILL) return@filter false
+        if (clip.role == ProjectClip.Role.STILL || clip.file == Multicam.GROUP_FILE) return@filter false
         pieces[clip.file]?.let { parts ->
             parts.none { part -> part.startMs <= clip.fromMs && clip.toMs <= (part.endMs ?: part.startMs) }
         } ?: false
@@ -353,6 +381,7 @@ data class Project(
             if (p.scenario != Scenario.CUSTOM) put("scenario", p.scenario.name)
             if (p.dynamics != Dynamics.EVEN) put("dynamics", p.dynamics.name)
             p.baseFile?.let { put("base", it) }
+            p.multicam?.let { put("multicam", it.toJson()) }
             put("clips", JSONArray().apply { p.clips.forEach { put(it.toJson()) } })
             put("audioClips", JSONArray().apply { p.audioClips.forEach { put(it.toJson()) } })
             // The mix is the project's own, so it is written whether a track is picked or not.
@@ -369,7 +398,7 @@ data class Project(
             val id = o.optString("id").takeIf { it.isNotEmpty() } ?: return null
             val name = o.optString("name").takeIf { it.isNotEmpty() } ?: return null
             val audio = o.optJSONArray("audioClips")
-            return Project(
+            val decoded = Project(
                 id = id,
                 name = name,
                 createdMs = o.optLong("created", 0L),
@@ -385,7 +414,14 @@ data class Project(
                 musicVolume = levelOf(o, "musicLevel") ?: 1.0,
                 videoVolume = levelOf(o, "videoLevel") ?: ProjectMusic.UNDER_MUSIC,
                 clickVolume = levelOf(o, "clickLevel") ?: 1.0,
+                multicam = o.optJSONObject("multicam")?.let(Multicam::from),
             )
+            // Alpha19/20 stored the generated angles as the entire video timeline.
+            if (decoded.multicam != null && decoded.multicamMaster != null &&
+                decoded.clips.none { it.file == Multicam.GROUP_FILE }
+            ) return decoded.copy(clips = emptyList(), videoVolume = if (decoded.videoVolume == 0.0)
+                ProjectMusic.UNDER_MUSIC else decoded.videoVolume).withMulticamAudio()
+            return decoded.withMulticamAudio()
         }
 
         /** A 0…1 level under [key], or null when it is absent or broken (0 is a real level, so it must survive). */

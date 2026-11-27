@@ -187,6 +187,7 @@ internal fun ProjectPreview(
     seek: Long? = null,
     onSeeked: () -> Unit = {},
     onScrub: (Long) -> Unit,
+    keepProjectTime: Boolean = false,
     editorOpen: Boolean,
     openEditor: (() -> Unit)?,
 ) {
@@ -204,12 +205,13 @@ internal fun ProjectPreview(
     SideEffect {
         if (!playing && dragging == null) playlistProxyVersion = availableProxyVersion
     }
-    val signature = items.joinToString("|") { "${it.clip.file}:${it.clip.fromMs}-${it.clip.toMs}:${it.offline}" } +
+    val signature = items.joinToString("|") { "${it.clip.file}:${it.clip.fromMs}-${it.clip.toMs}:${it.offline}:${it.clip.muteSource}" } +
         ":proxy$playlistProxyVersion"
     // Read by the clock's loop, which outlives a composition: a list captured once named the wrong card after a change.
     val onPlayingNow by rememberUpdatedState(onPlaying)
     val onClockNow by rememberUpdatedState(onClock)
     val onSeekedNow by rememberUpdatedState(onSeeked)
+    val videoVolumeNow by rememberUpdatedState(videoVolume)
     // The camera's own data source (its Wi-Fi is bound to this app) under the stock one: content and file URIs keep
     // going to the phone's own readers. A photo is a plain JPEG by content, and the stock JPEG reader takes a JPEG for
     // a motion photo — the flag is what makes it a picture the playlist can show.
@@ -363,6 +365,8 @@ internal fun ProjectPreview(
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 current = player.currentMediaItemIndex
+                player.volume = if (inPlayer.getOrNull(current)?.clip?.muteSource == true) 0f
+                    else videoVolumeNow.toFloat().coerceIn(0f, 1f)
                 preloadAt(current)
                 photo.shown = null
                 joinAt = SystemClock.elapsedRealtime()
@@ -441,8 +445,9 @@ internal fun ProjectPreview(
     }
     // The video's own sound: the project's slider always controls it, with or without a track. (Without music the
     // slider used to fall back to 1.0, so moving it changed the saved project and nothing that was heard.)
-    LaunchedEffect(player, videoVolume) {
-        player.volume = videoVolume.toFloat().coerceIn(0f, 1f)
+    LaunchedEffect(player, videoVolume, current, signature) {
+        player.volume = if (inPlayer.getOrNull(player.currentMediaItemIndex)?.clip?.muteSource == true) 0f
+            else videoVolume.toFloat().coerceIn(0f, 1f)
     }
     // The playlist follows the pieces: one item per piece, cut at its range. DefaultMediaSourceFactory honours the
     // clipping — a progressive source would play the whole file.
@@ -480,20 +485,24 @@ internal fun ProjectPreview(
         // The player takes the preloaded sources themselves: setMediaItems(MediaItem) would build fresh sources
         // and throw away everything the preloader has read into the cache.
         val sources = media.map { item -> preload.getMediaSource(item) ?: factory.createMediaSource(item) }
-        player.setMediaSources(sources)
-        if (oldMedia.isNotEmpty()) preload.removeMediaItems(oldMedia)
-        inPlayer.clear()
-        inPlayer.addAll(items)
-        player.prepare()
-        player.playWhenReady = playing && dragging == null &&
-            (musicPlayer == null || musicPlayer.isPlaying || musicPlayer.playerError != null)
         val at = was?.let { (clip, _) ->
             val sameCard = items.indexOfFirst { it.at.index == previous?.at?.index && it.clip == clip }
             if (sameCard >= 0) sameCard else items.indexOfFirst { it.clip == clip }
         } ?: -1
-        val startAt = if (at >= 0) at else 0
+        val absolute = if (keepProjectTime && items.isNotEmpty()) seekPoint(lengthsOf(items.map { it.clip }), seek ?: shown) else null
+        val startAt = absolute?.first ?: at.coerceAtLeast(0)
+        val position = absolute?.second ?: if (at >= 0) minOf(was!!.second, items[at].clip.durationMs) else 0L
+        player.playWhenReady = false
+        inPlayer.clear()
+        inPlayer.addAll(items)
+        player.volume = if (items.getOrNull(startAt)?.clip?.muteSource == true) 0f
+            else videoVolume.toFloat().coerceIn(0f, 1f)
+        if (sources.isEmpty()) player.clearMediaItems() else player.setMediaSources(sources, startAt, position)
+        if (oldMedia.isNotEmpty()) preload.removeMediaItems(oldMedia)
         preloadAt(startAt)
-        if (at >= 0) player.seekTo(at, minOf(was!!.second, items[at].clip.durationMs))
+        player.prepare()
+        player.playWhenReady = playing && dragging == null &&
+            (musicPlayer == null || musicPlayer.isPlaying || musicPlayer.playerError != null)
     }
     LaunchedEffect(player, musicPlayer, shownTotal, totalMs) {
         while (true) {

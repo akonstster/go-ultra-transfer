@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.layout.Box
@@ -56,6 +57,8 @@ import androidx.compose.ui.unit.sp
 import app.goultra.transfer.camera.Project
 import app.goultra.transfer.camera.ProjectClip
 import app.goultra.transfer.camera.ProjectAudioClip
+import app.goultra.transfer.camera.Multicam
+import app.goultra.transfer.camera.MulticamTake
 import app.goultra.transfer.camera.TrackAudio
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -97,6 +100,12 @@ internal fun ProjectTimeline(
     audioBeats: List<Long>,
     selectedDrop: MutableState<DropSelection?>,
     editorClipId: MutableState<String?>,
+    showAngles: Boolean,
+    audition: String?,
+    shotHighlight: MulticamHighlight?,
+    onShotSelected: (Long) -> Unit,
+    onResult: () -> Unit,
+    onInspect: (MulticamTake, Long?) -> Unit,
     onSeek: (Long, String?) -> Unit,
 ) {
     val density = LocalDensity.current
@@ -136,6 +145,8 @@ internal fun ProjectTimeline(
     var dropEditorClipId by editorClipId
     var draggedFrom by remember(p.id) { mutableStateOf<DropSelection?>(null) }
     var draggedDrop by remember(p.id) { mutableStateOf<DropSelection?>(null) }
+    var draggingAngle by remember(p.id) { mutableStateOf(false) }
+    var groupDrag by remember(p.id) { mutableStateOf<Float?>(null) }
 
     // The gesture and draw lambdas outlive a composition: they read what stands now, never a list captured once.
     val startsNow by rememberUpdatedState(starts)
@@ -144,6 +155,10 @@ internal fun ProjectTimeline(
     val periodsNow by rememberUpdatedState(periods)
     val selectedNow by rememberUpdatedState(activeAudioId)
     val seekNow by rememberUpdatedState(onSeek)
+    val resultNow by rememberUpdatedState(onResult)
+    val selectShotNow by rememberUpdatedState(onShotSelected)
+    val auditionNow by rememberUpdatedState(audition)
+    val playingNow by rememberUpdatedState(playing)
     val clockNow by rememberUpdatedState(clockMs)
     var drawMusicMs by remember(p.id) { mutableStateOf<Long?>(null) }
 
@@ -162,7 +177,7 @@ internal fun ProjectTimeline(
         return true
     }
     val scrollState = rememberScrollableState { delta ->
-        if (zoomClock != null || pendingAudio != null || draggedDrop != null) return@rememberScrollableState 0f
+        if (zoomClock != null || pendingAudio != null || draggedDrop != null || groupDrag != null) return@rememberScrollableState 0f
         // As the card strip has it: the page moves against the finger, and what is reported back is what was used.
         val old = scroll
         scroll = (scroll - delta).coerceIn(0f, geomNow().maxScroll)
@@ -234,7 +249,7 @@ internal fun ProjectTimeline(
                 val sample = musicClock.cursorAt(android.os.SystemClock.elapsedRealtime())
                 cursor = sample?.after(cursor)
                 drawMusicMs = cursor?.positionMs
-                if (width > 0f && zoomClock == null && pendingAudio == null && draggedDrop == null &&
+                if (width > 0f && zoomClock == null && pendingAudio == null && draggedDrop == null && !draggingAngle &&
                     System.currentTimeMillis() - touchedAt >= TIMELINE_FOLLOW_PAUSE_MS) {
                     val target = geomNow().scrollToKeep(drawMusicMs ?: clockNow, width * TIMELINE_FOLLOW_SHARE)
                     val distance = target - scroll
@@ -295,6 +310,7 @@ internal fun ProjectTimeline(
             peaks = peaks,
             clockMs = zoomClock ?: clockMs,
             playhead = { zoomClock ?: drawMusicMs ?: clockMs },
+            shotHighlight = shotHighlight,
             videoH = videoH,
             musicH = musicH,
             joint = joint,
@@ -308,10 +324,39 @@ internal fun ProjectTimeline(
                     detectTapGestures { at ->
                         dropSelection = null
                         dropEditorClipId = null
-                        seekNow(geomNow().msAt(at.x, scroll), null)
+                        resultNow()
+                        val time = geomNow().msAt(at.x, scroll)
+                        selectShotNow(time)
+                        if (auditionNow == null || !playingNow) seekNow(time, null)
                     }
-                },
+                }
+                .then(if (p.clips.none { it.file == Multicam.GROUP_FILE }) Modifier else Modifier.pointerInput(p.clips) {
+                    val master = p.multicamMaster ?: return@pointerInput
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { at ->
+                            if (master.contains(geomNow().msAt(at.x, scroll))) groupDrag = at.x
+                        },
+                        onDragEnd = {
+                            groupDrag?.takeIf { zoomClock == null }?.let { vm.moveMulticamTo(geomNow().msAt(it, scroll)) }
+                            groupDrag = null
+                        },
+                        onDragCancel = { groupDrag = null },
+                        onDrag = { change, delta ->
+                            if (zoomClock == null && groupDrag != null) {
+                                change.consume()
+                                groupDrag = groupDrag?.plus(delta.x)
+                            }
+                        },
+                    )
+                }),
         )
+        if (groupDrag != null) {
+            val ink = MaterialTheme.colorScheme.primary
+            Canvas(Modifier.fillMaxWidth().height(videoHeight)) {
+                val x = checkNotNull(groupDrag).coerceIn(0f, size.width)
+                drawLine(ink, Offset(x, 0f), Offset(x, size.height), 3.dp.toPx())
+            }
+        }
         if (audio.isNotEmpty()) {
             val haptic = LocalHapticFeedback.current
             Box(
@@ -378,7 +423,10 @@ internal fun ProjectTimeline(
                             val left = clip?.let { geometry.x(it.startMs, scroll) } ?: 0f
                             val right = clip?.let { geometry.x(it.endMs, scroll) } ?: 0f
                             val handle = minOf(trimWidth, (right - left) / 3f)
+                            val linkedAudio = p.multicam != null && clip?.id == Multicam.MASTER_ID
+                            val lockedAudio = linkedAudio && !showAngles
                             val edit = when {
+                                lockedAudio -> AudioEdit.MOVE
                                 clip == null || clip.id != selectedNow -> AudioEdit.MOVE
                                 down.position.x - left <= handle -> AudioEdit.START
                                 right - down.position.x <= handle -> AudioEdit.END
@@ -400,7 +448,7 @@ internal fun ProjectTimeline(
                                     @Suppress("UNREACHABLE_CODE")
                                     false
                                 }
-                                if (released != null || clip == null || zoomClock != null) {
+                                if (released != null || clip == null || zoomClock != null || linkedAudio) {
                                     if (released == true) {
                                         seekNow(geometry.msAt(down.position.x, scroll), clip?.id)
                                     }
@@ -473,6 +521,11 @@ internal fun ProjectTimeline(
             )
         }
     }
+    val master = p.multicamMaster
+    if (showAngles && p.multicam != null && master != null) {
+        MulticamRows(vm, p.multicam, master, audition, ::geomNow, { scroll }, { zoomClock ?: drawMusicMs ?: clockMs },
+            onInspect = onInspect, onDraggingChange = { draggingAngle = it }, modifier = Modifier.then(pinch))
+    }
     val selection = dropSelection
     val clip = audio.firstOrNull { it.clip.id == dropEditorClipId }?.clip
     if (clip != null) {
@@ -538,6 +591,7 @@ private fun Lane(
     peaks: Map<String, FloatArray?>,
     clockMs: Long,
     playhead: () -> Long,
+    shotHighlight: MulticamHighlight?,
     videoH: Float,
     musicH: Float,
     joint: Float,
@@ -554,6 +608,7 @@ private fun Lane(
         color = MaterialTheme.colorScheme.onSurface, fontSize = 10.sp, lineHeight = 13.sp,
     )
     val text = rememberTextMeasurer()
+    val multicamLabel = tr("Мультикам", "Multicam")
     // The grid is red on purpose: over the frames and the wave it must be the one thing seen at a glance.
     val tick = Color(0xFFFF5252).copy(alpha = 0.90f)
     val dropMark = Color(0xFF00E5FF)
@@ -576,12 +631,34 @@ private fun Lane(
             val w = c.durationMs * g.pxPerMs
             if (w <= 0f || left + w < 0f || left > size.width) return@forEachIndexed
             val image = frames[frameKey(c)]
-            if (image != null) frame(image, left, 0f, w, videoH) else drawRect(placeholder, Offset(left, 0f), Size(w, videoH))
+            if (c.file == Multicam.GROUP_FILE) {
+                drawRect(wave.copy(alpha = 0.20f), Offset(left, 0f), Size(w, videoH))
+                val x = left.coerceAtLeast(0f) + 5.dp.toPx()
+                val space = (minOf(size.width, left + w) - x).toInt()
+                if (space > 16.dp.toPx()) {
+                    val label = text.measure(multicamLabel, labelStyle, overflow = TextOverflow.Ellipsis,
+                        maxLines = 1, constraints = Constraints(maxWidth = space))
+                    drawText(label, topLeft = Offset(x, (videoH - label.size.height) / 2))
+                }
+            } else if (image != null) frame(image, left, 0f, w, videoH)
+            else drawRect(placeholder, Offset(left, 0f), Size(w, videoH))
             // A piece whose file is out of reach is dimmed, as on its card: the frame is a stand-in, not the film.
             if (offline[c.file] == true) drawRect(offlineDim, Offset(left, 0f), Size(w, videoH))
             if (i > 0) drawRect(gap, Offset(left - joint / 2f, 0f), Size(joint, videoH))
             if (i == playing) {
                 drawRect(playingEdge, Offset(left, 0f), Size(w, videoH), style = Stroke(width = thin))
+            }
+        }
+        shotHighlight?.let { selected ->
+            val left = g.rawX(selected.start, at)
+            val right = g.rawX(selected.end, at)
+            drawRect(dropMark.copy(alpha = 0.22f), Offset(left, 0f), Size(right - left, videoH))
+            drawRect(dropMark, Offset(left, 0f), Size(right - left, videoH), style = Stroke(3.dp.toPx()))
+            selected.cut?.let { cut ->
+                val x = g.rawX(cut, at)
+                drawLine(Color.Black, Offset(x, 0f), Offset(x, videoH), 8.dp.toPx())
+                drawLine(dropMark, Offset(x, 0f), Offset(x, videoH), 4.dp.toPx())
+                drawCircle(dropMark, 6.dp.toPx(), Offset(x, videoH / 2))
             }
         }
         val pending = pendingAudio()
