@@ -2,6 +2,7 @@ package app.goultra.transfer.camera
 
 import android.content.Context
 import android.net.Uri
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -13,6 +14,8 @@ import kotlin.math.roundToInt
  * decoder — the same way `BeatGrid` is.
  */
 object TrackAudio {
+    enum class Stage { READING, FINDING_BEATS, FINDING_ACCENTS, APPLYING }
+
     /** The rate the analysis runs at: fine enough for onsets, a quarter of a 44.1 kHz stereo track's memory. */
     const val RATE = 22_050
 
@@ -22,78 +25,159 @@ object TrackAudio {
     /** The width of one decoded peak, ms: the lane's columns are made of a few of them. */
     internal const val BUCKET_MS = 25
 
-    /** How much of a long track is listened to for the grid: a minute and a half settles tempo and phase alike. */
-    internal const val ANALYSED_MS = 90_000
+    /** Maximum PCM held for one analysis block, also the read limit without a reported duration. */
+    internal const val ANALYSIS_LIMIT_MS = 15L * 60_000L
 
     /** Read from the decoder at a time, in decoded frames. */
     private const val CHUNK = 8_192
 
-    /** A file that does not say how long it is is read no further than this. */
-    private const val UNKNOWN_LIMIT_MS = 15L * 60_000L
-
     /**
      * What a track gives: the wave 0…1 ([peaks], one per [BUCKET_MS] along the whole track — the lane shows the share the
-     * project plays, so it needs the fine one), the grid, and how long the track is.
+     * project plays, so it needs the fine one), the grid with its tempo followed where it drifts, the profile of the
+     * piece (stability, drive, energy, drop), and how long the track is.
      */
-    class Found(val peaks: FloatArray, val beats: List<Long>, val bpm: Double, val confidence: Double, val lengthMs: Long)
+    class Found(
+        val peaks: FloatArray,
+        val beats: List<Long>,
+        val bpm: Double,
+        val confidence: Double,
+        val lengthMs: Long,
+        val profile: BeatGrid.Profile?,
+        /** The codec's own delay, ms, taken off the analysis (0 when the file has none): mp3 and aac carry some. */
+        val delayMs: Long = 0L,
+        val detectedMode: AudioAnalysisMode = AudioAnalysisMode.DYNAMICS,
+    )
 
     /**
      * The track at [uri] decoded and measured; null when it is not a sound the phone can read. Blocking — seconds of
      * decoding and arithmetic — so it is called from a worker, never from a composable.
      */
-    fun analyse(context: Context, uri: Uri): Found? {
-        val reader = runCatching { ClipAudio.openPcm { ex -> ex.setDataSource(context, uri, null) } }.getOrNull()
-            ?: return null
+    fun analyse(
+        context: Context,
+        uri: Uri,
+        mode: AudioAnalysisMode = AudioAnalysisMode.AUTO,
+        onStage: (Stage) -> Unit = {},
+    ): Found? = analyse(runCatching { ProjectPcmCache.of(context).open(uri.toString()) }.getOrNull(), mode, onStage)
+
+    /** A file already on the phone (a debug probe, a downloaded copy): no SAF permission, the player's own path. */
+    internal fun analyse(file: File): Found? =
+        analyse(runCatching { ClipAudio.openPcm { it.setDataSource(file.absolutePath) } }.getOrNull(), AudioAnalysisMode.AUTO) {}
+
+    private fun analyse(reader: ClipAudio.PcmSource?, mode: AudioAnalysisMode, onStage: (Stage) -> Unit): Found? {
+        if (reader == null) return null
         try {
             val step = (reader.rate.toDouble() / RATE).roundToInt().coerceAtLeast(1)
             val rate = (reader.rate / step).coerceAtLeast(1) // the mono rate, ~[RATE]
-            val perBucket = (rate.toLong() * BUCKET_MS / 1000).toInt().coerceAtLeast(1)
+            val chunk = CHUNK / step * step
             val said = reader.durationMs
-            val leftToRead = (if (said > 0L) said else UNKNOWN_LIMIT_MS) * reader.rate / 1000
-            // The share the grid is taken from, one channel at [rate]: a minute and a half is a few megabytes.
-            val heard = FloatArray((rate.toLong() * ANALYSED_MS / 1000).toInt().coerceAtLeast(0))
+            val leftToRead = framesToRead(said, reader.rate)
+            // The share the grid is taken from, one channel at [rate].
+            val blockFrames = minOf(leftToRead / step, ANALYSIS_LIMIT_MS * rate / 1000).toInt().coerceAtLeast(1)
+            val heard = FloatArray(blockFrames)
             var heardAt = 0
+            var analysedFrames = 0L
+            var confidence = 0.0
+            var stability = 0.0
+            val beats = mutableListOf<Long>()
+            val drops = mutableListOf<Long>()
+            val energy = mutableListOf<Float>()
+            val modes = mutableMapOf<AudioAnalysisMode, Long>()
+            fun analyseBlock() {
+                if (heardAt == 0) return
+                val offset = analysedFrames * 1000 / rate
+                val samples = if (heardAt == heard.size) heard else heard.copyOf(heardAt)
+                val grid = if (mode == AudioAnalysisMode.SPEECH) null else {
+                    onStage(Stage.FINDING_BEATS)
+                    BeatGrid.detectDrifting(samples, rate)
+                }
+                onStage(Stage.FINDING_ACCENTS)
+                val accents = AudioAccents.analyse(samples, rate, grid, mode)
+                val usedGrid = grid.takeUnless { accents.mode == AudioAnalysisMode.SPEECH }
+                val profile = BeatGrid.profile(samples, rate, usedGrid, detectDrops = false)
+                beats += usedGrid?.beats.orEmpty().map { offset + it }
+                drops += accents.drops.map { offset + it }
+                modes[accents.mode] = modes.getOrDefault(accents.mode, 0L) + heardAt
+                profile?.let {
+                    energy += it.energy.toList()
+                    confidence += it.confidence * heardAt
+                    stability += it.stability * heardAt
+                }
+                analysedFrames += heardAt
+                heardAt = 0
+            }
             val peaks = ArrayList<Float>(1024) // one per [BUCKET_MS]: a few thousand for a whole track
             var bucket = 0f
-            var inBucket = 0
+            var samples = 0L
+            var bucketEnd = waveBucketEnd(1, reader.rate, step)
             var quiet = 0 // chunks read with nothing in them: the end of a file that does not say how long it is
             var at = 0L
+            // The priming samples a player cuts off before anything is heard: dropped here too, or every beat of the
+            // grid stands later than the sound by them and a click on it lands after the beat (see PcmReader.delayFrames).
+            var priming = reader.delayFrames.toLong()
             while (at < leftToRead) {
-                val count = minOf(CHUNK.toLong(), leftToRead - at).toInt()
-                val pcm = reader.read(at, count)
+                val count = minOf(chunk.toLong(), leftToRead - at).toInt()
+                var pcm = reader.read(at, count)
                 if (pcm.isEmpty()) break
                 at += count
+                if (priming > 0L) {
+                    val frames = pcm.size / reader.channels
+                    val drop = minOf(priming, frames.toLong()).toInt()
+                    if (drop > 0) pcm = pcm.copyOfRange(drop * reader.channels, pcm.size)
+                    priming -= drop
+                }
                 var loud = false
                 for (v in mono(pcm, reader.channels, step)) {
                     val a = abs(v)
                     if (a > 0.0001f) loud = true
                     if (a > bucket) bucket = a
-                    if (++inBucket >= perBucket) {
+                    if (++samples >= bucketEnd) {
                         peaks += bucket
                         bucket = 0f
-                        inBucket = 0
+                        bucketEnd = waveBucketEnd(peaks.size + 1, reader.rate, step)
                     }
-                    if (heardAt < heard.size) heard[heardAt++] = v
+                    heard[heardAt++] = v
+                    if (heardAt == heard.size) analyseBlock()
                 }
                 // A file that says nothing of its length: the reader pads the end with silence, so four quiet chunks in
                 // a row are the end (a quiet passage of music is never 0.7 s dead silent).
                 quiet = if (loud) 0 else quiet + 1
                 if (said <= 0L && quiet >= 4 && peaks.isNotEmpty()) break
             }
-            if (bucket > 0f) peaks += bucket
+            if (samples > waveBucketEnd(peaks.size, reader.rate, step)) peaks += bucket
             if (peaks.isEmpty()) return null
-            val lengthMs = if (said > 0L) said else heardAt.toLong() * 1000 / rate
-            val grid = BeatGrid.detect(heard.copyOf(heardAt), rate)
+            analyseBlock()
+            val lengthMs = if (said > 0L) said else analysedFrames * 1000 / rate
+            val grid = beats.filter { it < lengthMs }.distinct()
+            val bpm = MusicGrid.bpm(grid)
+            val frames = analysedFrames.coerceAtLeast(1)
+            val certainty = confidence / frames
             return Found(
                 peaks = FloatArray(peaks.size) { peaks[it].coerceIn(0f, 1f) },
-                beats = if (grid == null) emptyList() else beatsOver(grid, lengthMs),
-                bpm = grid?.bpm ?: 0.0,
-                confidence = grid?.confidence ?: 0.0,
+                beats = grid,
+                bpm = bpm,
+                confidence = certainty,
                 lengthMs = lengthMs,
+                profile = BeatGrid.Profile(
+                    bpm, stability / frames, energy.average().takeIf { it.isFinite() } ?: 0.0,
+                    energy.toFloatArray(), drops, certainty,
+                ),
+                delayMs = reader.delayFrames * 1000L / reader.rate.coerceAtLeast(1),
+                detectedMode = modes.maxByOrNull { it.value }?.key ?: AudioAnalysisMode.DYNAMICS,
             )
         } finally {
             reader.release()
         }
+    }
+
+    /**
+     * The decoded frames [analyse] reads from a file that says it is [saidMs] long (0 — it says nothing): the whole
+     * track, cut only at the safety limit. Kept apart from the decoder so the end of the four-minute cut can be pinned
+     * in a JVM test — it was invisible until a 5:45 project had no grid past 4:00.
+     */
+    internal fun framesToRead(saidMs: Long, rate: Int): Long {
+        if (rate <= 0) return 0L
+        val ms = if (saidMs > 0L) saidMs else ANALYSIS_LIMIT_MS
+        return ms.coerceAtLeast(0L) * rate / 1000
     }
 
     /**
@@ -118,12 +202,23 @@ object TrackAudio {
      * The wave of the track's share from [fromMs] to [toMs] as [buckets] columns ([peaks]: one per [BUCKET_MS]); past
      * the track's end the columns stay empty (silence). Empty when there is nothing to show.
      */
+    internal fun waveBucketEnd(index: Int, sourceRate: Int, step: Int): Long {
+        val denominator = step * 1000L
+        return (index * BUCKET_MS.toLong() * sourceRate + denominator - 1) / denominator
+    }
+
     internal fun window(peaks: FloatArray, fromMs: Long, toMs: Long, buckets: Int): FloatArray {
         if (peaks.isEmpty() || buckets <= 0 || toMs <= fromMs) return FloatArray(0)
-        val from = (fromMs / BUCKET_MS).toInt().coerceAtLeast(0)
-        val to = (toMs / BUCKET_MS).toInt().coerceAtLeast(from + 1)
-        val share = FloatArray(to - from) { i -> peaks.getOrElse(from + i) { 0f } }
-        return columns(share, buckets)
+        val width = (toMs - fromMs).toDouble() / buckets
+        return FloatArray(buckets) { index ->
+            val from = kotlin.math.floor((fromMs + index * width) / BUCKET_MS).toInt()
+            val to = kotlin.math.floor((fromMs + (index + 1) * width) / BUCKET_MS).toInt()
+            var peak = 0f
+            for (i in maxOf(0, from) until minOf(peaks.size, maxOf(from + 1, to))) {
+                peak = maxOf(peak, peaks[i])
+            }
+            peak.coerceIn(0f, 1f)
+        }
     }
 
     /**
@@ -148,22 +243,4 @@ object TrackAudio {
         return out
     }
 
-    /**
-     * The grid over the whole track: the beats found in the share that was listened to, then the same period on to the
-     * end — the lane draws them all, and a cut may snap to any of them (P3).
-     */
-    internal fun beatsOver(grid: BeatGrid.Grid, lengthMs: Long): List<Long> {
-        val beats = grid.beats
-        if (beats.size < 2) return beats
-        val period = (beats.last() - beats.first()).toDouble() / (beats.size - 1)
-        if (period <= 1.0) return beats
-        val out = ArrayList<Long>(beats.size * 2)
-        for (b in beats) if (lengthMs <= 0L || b < lengthMs) out += b
-        var next = beats.last() + period
-        while (lengthMs > 0L && next < lengthMs) {
-            out += next.roundToInt().toLong()
-            next += period
-        }
-        return out
-    }
 }

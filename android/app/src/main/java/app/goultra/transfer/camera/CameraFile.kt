@@ -3,7 +3,7 @@ package app.goultra.transfer.camera
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
-enum class MediaKind { PHOTO, VIDEO }
+enum class MediaKind { PHOTO, VIDEO, AUDIO }
 
 /**
  * A file on the camera card — or, with [localUri], its copy already in the phone's gallery (the Files tab without the
@@ -26,13 +26,18 @@ data class CameraFile(
     val colorMode: Int? = null,
     /** content:// item of the downloaded copy, for a file listed from the phone. */
     val localUri: String? = null,
+    val isAudio: Boolean = false,
 ) {
     val isOnPhone: Boolean get() = localUri != null
 
     /** Shot in I-Log, as the camera's list says; null = it doesn't say. */
     val iLog: Boolean? get() = colorMode?.let { it == COLOR_MODE_ILOG }
     val name: String get() = uri.substringAfterLast('/')
-    val kind: MediaKind get() = if (name.substringAfterLast('.').lowercase() in VIDEO_EXTENSIONS) MediaKind.VIDEO else MediaKind.PHOTO
+    val kind: MediaKind get() = when {
+        isAudio -> MediaKind.AUDIO
+        name.substringAfterLast('.').lowercase() in VIDEO_EXTENSIONS -> MediaKind.VIDEO
+        else -> MediaKind.PHOTO
+    }
 
     /** A file added from elsewhere on the phone (not the camera's, not saved by the app). */
     val isAdded: Boolean get() = uri.startsWith(ADDED_PREFIX)

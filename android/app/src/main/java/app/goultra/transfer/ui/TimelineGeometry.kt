@@ -1,6 +1,8 @@
 package app.goultra.transfer.ui
 
 import app.goultra.transfer.camera.ProjectClip
+import app.goultra.transfer.camera.ProjectAudioClip
+import kotlin.math.abs
 import kotlin.math.roundToLong
 
 /**
@@ -29,14 +31,17 @@ internal class TimelineGeometry(
     val maxScroll: Float get() = (contentPx - widthPx).coerceAtLeast(0f)
 
     /** Where [ms] of the project stands on screen at [scroll], px from the left edge. */
-    fun x(ms: Long, scroll: Float): Float = edgePx + ms.coerceIn(0L, totalMs.coerceAtLeast(0L)) * pxPerMs - scroll
+    fun x(ms: Long, scroll: Float): Float = rawX(ms.coerceIn(0L, totalMs.coerceAtLeast(0L)), scroll)
+
+    fun rawX(ms: Long, scroll: Float): Float = edgePx + ms * pxPerMs - scroll
 
     /** The project's moment under [x] at [scroll], kept inside the project. */
     fun msAt(x: Float, scroll: Float): Long {
-        if (pxPerMs <= 0f) return 0L
-        val ms = ((x + scroll - edgePx) / pxPerMs).roundToLong()
-        return ms.coerceIn(0L, totalMs.coerceAtLeast(0L))
+        return rawMsAt(x, scroll).coerceIn(0L, totalMs.coerceAtLeast(0L))
     }
+
+    fun rawMsAt(x: Float, scroll: Float): Long =
+        if (pxPerMs <= 0f) 0L else ((x + scroll - edgePx) / pxPerMs).roundToLong()
 
     /** The piece [ms] falls in (its place in the project's clips): the last one at the very end, -1 when there are none. */
     fun pieceAt(ms: Long): Int {
@@ -73,14 +78,71 @@ internal fun startsOf(clips: List<ProjectClip>): List<Long> {
     return clips.map { c -> at.also { at += c.durationMs } }
 }
 
-/**
- * The music's offset after a drag of [dxPx] at [pxPerMs]: the finger to the right brings the track later than the
- * picture (its start moves right, silence before it — that is a negative offset), to the left — earlier in the track
- * (the head is cut off); kept inside [minOffsetMs]…[maxOffsetMs].
- */
-internal fun draggedOffset(offsetMs: Long, dxPx: Float, pxPerMs: Float, maxOffsetMs: Long, minOffsetMs: Long = 0L): Long {
-    val high = maxOffsetMs.coerceAtLeast(0L)
-    val low = minOffsetMs.coerceAtMost(0L).coerceAtMost(high)
-    if (pxPerMs <= 0f) return offsetMs.coerceIn(low, high)
-    return (offsetMs - (dxPx / pxPerMs).roundToLong()).coerceIn(low, high)
+internal enum class AudioEdit { MOVE, START, END }
+
+internal fun endTrimScrollLimit(geometry: TimelineGeometry, clip: ProjectAudioClip): Float =
+    (2 * geometry.edgePx + maxOf(geometry.totalMs, clip.projectAt(clip.source.lengthMs)) * geometry.pxPerMs -
+        geometry.widthPx).coerceAtLeast(0f)
+
+internal fun editAudio(clip: ProjectAudioClip, edit: AudioEdit, deltaMs: Long): ProjectAudioClip {
+    if (deltaMs == 0L || clip.durationMs <= 0L) return clip
+    val minimum = minOf(25L, clip.durationMs)
+    return when (edit) {
+        AudioEdit.MOVE -> clip.copy(startMs = (clip.startMs + deltaMs).coerceAtLeast(0L))
+        AudioEdit.START -> {
+            val from = (clip.fromMs + deltaMs).coerceIn(maxOf(0L, clip.fromMs - clip.startMs), clip.sourceEndMs - minimum)
+            clip.copy(startMs = clip.startMs + from - clip.fromMs, fromMs = from)
+        }
+        AudioEdit.END -> {
+            val end = (clip.sourceEndMs + deltaMs).coerceIn(clip.fromMs + minimum, clip.source.lengthMs)
+            if (end == clip.sourceEndMs) clip else clip.copy(toMs = end.takeUnless { it == clip.source.lengthMs })
+        }
+    }
+}
+
+internal fun typicalBeatSpacing(beats: List<Long>): Long {
+    val gaps = beats.zipWithNext { a, b -> b - a }.filter { it in 100L..2_000L }.sorted()
+    return gaps.getOrNull(gaps.size / 2) ?: 500L
+}
+
+internal data class AudioBeatSnap(val clip: ProjectAudioClip, val timeMs: Long)
+
+/** Compare the moving beat nearest the grip in each overlap. The raw finger position is used on every move. */
+internal fun snapAudioMove(
+    moving: ProjectAudioClip,
+    others: List<ProjectAudioClip>,
+    gripSourceMs: Long,
+    toleranceMs: Long,
+): AudioBeatSnap? {
+    if (toleranceMs <= 0L || moving.source.beats.isEmpty()) return null
+    var closest: AudioBeatSnap? = null
+    var best = toleranceMs + 1L
+    for (other in others) {
+        if (other.id == moving.id) continue
+        val from = maxOf(moving.startMs, other.startMs)
+        val end = minOf(moving.endMs, other.endMs)
+        if (from >= end) continue
+        val nearGrip = nearestBeat(moving, from, end, moving.projectAt(gripSourceMs)) ?: continue
+        val target = nearestBeat(other, from, end, nearGrip) ?: continue
+        val delta = target - nearGrip
+        if (abs(delta) >= best || moving.startMs + delta < 0L) continue
+        best = abs(delta)
+        closest = AudioBeatSnap(moving.copy(startMs = moving.startMs + delta), target)
+    }
+    return closest
+}
+
+private fun nearestBeat(clip: ProjectAudioClip, from: Long, end: Long, target: Long): Long? {
+    val marks = clip.source.beats
+    fun indexOf(at: Long): Int {
+        val i = marks.binarySearch(clip.sourceAt(at))
+        return if (i >= 0) i else -i - 1
+    }
+    val first = indexOf(from)
+    val last = indexOf(end) - 1
+    if (first > last) return null
+    val right = indexOf(target).coerceIn(first, last)
+    val a = clip.projectAt(marks[right])
+    val b = clip.projectAt(marks[(right - 1).coerceAtLeast(first)])
+    return if (abs(a - target) < abs(b - target)) a else b
 }

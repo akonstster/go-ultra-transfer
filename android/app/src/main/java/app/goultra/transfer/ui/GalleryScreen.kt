@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -98,6 +99,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.MediaKind
+import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.ProjectPlacement
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -195,7 +198,7 @@ fun GalleryScreen(
                     // Videos and photos from elsewhere on the phone, to view, cut and colour (with or without the camera).
                     if (vm.tab == Tab.FILES && selectionCount == 0) {
                         val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addFiles(uris) }
-                        IconButton({ pick.launch(arrayOf("video/*", "image/*")) }) {
+                        IconButton({ pick.launch(arrayOf("video/*", "image/*", "audio/*")) }) {
                             Icon(Icons.Filled.LibraryAdd, tr("Добавить с телефона", "Add from the phone"))
                         }
                     }
@@ -206,7 +209,7 @@ fun GalleryScreen(
                     var showSettings by remember { mutableStateOf(false) }
                     var showCamera by remember { mutableStateOf(false) }
                     var showAbout by remember { mutableStateOf(false) }
-                    if (showSettings) AppSettingsDialog { showSettings = false }
+                    if (showSettings) AppSettingsDialog(vm) { showSettings = false }
                     if (showCamera) CameraInfoDialog(vm) { showCamera = false }
                     if (showAbout) AboutDialog { showAbout = false }
                     // A newer build of our own channel: offered by the daily check or ⋮ → «Проверить обновление».
@@ -259,7 +262,7 @@ fun GalleryScreen(
                         val open = vm.seenProject
                         if (open == null) ProjectsTab(vm) else ProjectScreen(vm, open)
                         // The file editor opens over the project screen as well: a card taps through to its piece.
-                        vm.viewing?.let { FileViewer(vm, it, snackbar) { vm.viewing = null } }
+                        vm.viewing?.let { FileViewer(vm, it, snackbar, vm.projectEditorStartMs) { vm.viewing = null } }
                     }
                     vm.conn == ConnState.Connected -> FileGrid(vm, snackbar)
                     // No camera: what is already on the phone, with the way to connect above it.
@@ -471,7 +474,7 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                         // Already in a project (by name — the camera's file and its phone copy are the same shot).
                         inProject = file.name in vm.projectFiles,
                         // With the video's own colour on it; drawn again when a colour changes.
-                        loadThumbnail = vm::tileImage,
+                        loadThumbnail = { if (it.kind == MediaKind.AUDIO) null else vm.tileImage(it) },
                         colourKey = if (file.kind == MediaKind.VIDEO || vm.canColourPhoto(file)) vm.lookKeys[file.name] else null,
                         // Tap opens; long press starts selecting, then taps add / remove (like a gallery). On the
                         // phone list a selection is for sharing; with the camera it is for its card (download,
@@ -479,6 +482,7 @@ private fun FileGrid(vm: CameraController, snackbar: SnackbarHostState) {
                         onClick = {
                             when {
                                 missing -> vm.missingFileMessage()
+                                vm.selected.isEmpty() && file.kind == MediaKind.AUDIO -> vm.toggle(file)
                                 vm.selected.isEmpty() -> open(file)
                                 selectable(file) -> vm.toggle(file)
                                 else -> notSelectable()
@@ -547,13 +551,16 @@ private fun FileTile(
     ) {
         thumb?.let { Image(it, file.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
             ?: Text(
-                file.name.substringBefore('_'),
+                if (file.kind == MediaKind.AUDIO) file.name else file.name.substringBefore('_'),
                 Modifier.align(Alignment.Center),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
             )
         val label = when {
             missing -> null // the badge below says «нет на карте»
+            file.kind == MediaKind.AUDIO -> "♫ " + (file.durationSec?.let(::formatDuration) ?: "")
             file.kind == MediaKind.VIDEO -> "▶ " + (file.durationSec?.let(::formatDuration) ?: "")
             file.name.endsWith(".dng", ignoreCase = true) -> "RAW"
             file.isLive -> "LIVE"
@@ -717,6 +724,14 @@ private fun PasteColour(vm: CameraController, selection: List<CameraFile>) {
 private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
     var picking by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var placing by remember { mutableStateOf<Project?>(null) }
+    fun take(p: Project, at: ProjectPlacement) {
+        vm.addToProject(p, selection, at)
+        vm.clearSelection()
+        picking = false
+        creating = false
+        placing = null
+    }
     IconButton({ vm.reloadProjects(); picking = true }) {
         Icon(Icons.AutoMirrored.Filled.PlaylistAdd, tr("В проект", "Add to project"), tint = MaterialTheme.colorScheme.primary)
     }
@@ -727,7 +742,12 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
             text = {
                 Column {
                     vm.projects.forEach { p ->
-                        TextButton({ vm.addToProject(p, selection); vm.clearSelection(); picking = false }) { Text(p.name) }
+                        TextButton({
+                            if (p.clips.isEmpty() || selection.all { it.kind == MediaKind.AUDIO }) take(p, ProjectPlacement.END) else {
+                                picking = false
+                                placing = p
+                            }
+                        }) { Text(p.name) }
                     }
                     TextButton({ picking = false; creating = true }) { Text(tr("Новый проект", "New project")) }
                 }
@@ -743,10 +763,24 @@ private fun AddToProject(vm: CameraController, selection: List<CameraFile>) {
             initial = "",
             onDismiss = { creating = false },
             onDone = { name ->
-                vm.addToProject(vm.createProject(name), selection)
-                vm.clearSelection()
-                creating = false
+                take(vm.createProject(name), ProjectPlacement.END)
             },
+        )
+    }
+    placing?.let { p ->
+        AlertDialog(
+            onDismissRequest = { placing = null },
+            title = { Text(tr("Куда добавить файлы?", "Where to add the files?")) },
+            text = {
+                Column {
+                    Text(p.name)
+                    TextButton({ take(p, ProjectPlacement.START) }) { Text(tr("В начало", "To the start")) }
+                    TextButton({ take(p, ProjectPlacement.END) }) { Text(tr("В конец", "To the end")) }
+                    TextButton({ take(p, ProjectPlacement.BY_DATE) }) { Text(tr("По дате", "By date")) }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton({ placing = null }) { Text(tr("Отмена", "Cancel")) } },
         )
     }
 }

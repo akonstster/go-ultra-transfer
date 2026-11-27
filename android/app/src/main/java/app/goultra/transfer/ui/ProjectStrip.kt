@@ -80,6 +80,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import app.goultra.transfer.camera.CameraFile
 import app.goultra.transfer.camera.Project
+import app.goultra.transfer.camera.Multicam
 import app.goultra.transfer.camera.ProjectClip
 
 /**
@@ -148,6 +149,8 @@ internal fun ProjectStrip(
     playingNow: Int?,
     onPlay: (Int) -> Unit,
     onCarrying: (Boolean) -> Unit,
+    onEditMulticam: () -> Unit,
+    onEdit: (CameraFile, ProjectClip) -> Unit,
 ) {
     val density = LocalDensity.current
     val cardWpx = with(density) { CARD_W.toPx() }
@@ -422,7 +425,10 @@ internal fun ProjectStrip(
                         missing = vm.projectFile(clip.file) == null && vm.conn == ConnState.Connected,
                         width = CARD_W,
                         playing = i == playingNow,
-                        onEdit = { vm.viewing = vm.projectFile(clip.file) },
+                        onEdit = {
+                            if (clip.file == Multicam.GROUP_FILE) onEditMulticam()
+                            else vm.projectFile(clip.file)?.let { onEdit(it, clip) }
+                        },
                     )
                 }
             }
@@ -487,6 +493,10 @@ private fun ClipCard(
                         fontSize = 10.sp,
                     )
                 }
+            }
+            if (clip.file == Multicam.GROUP_FILE) {
+                Text(tr("Мультикам", "Multicam"), Modifier.align(Alignment.Center),
+                    color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.labelMedium)
             }
             if (p.baseFile == clip.file) {
                 Text("★", Modifier.align(Alignment.BottomEnd).padding(2.dp), color = Color.White, fontSize = 13.sp)

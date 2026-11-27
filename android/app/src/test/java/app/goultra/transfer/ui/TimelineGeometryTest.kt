@@ -91,23 +91,56 @@ class TimelineGeometryTest {
     }
 
     @Test
-    fun `a drag to the right brings the track earlier, and neither way goes past its limits`() {
-        // 0.1 px per ms on this timeline: a hundred pixels are a second.
-        assertMs(3000L, draggedOffset(4000L, dxPx = 100f, pxPerMs = 0.1f, maxOffsetMs = 20_000L), delta = 0L)
-        assertMs(5000L, draggedOffset(4000L, dxPx = -100f, pxPerMs = 0.1f, maxOffsetMs = 20_000L), delta = 0L)
-        assertMs(0L, draggedOffset(1350L, dxPx = 10_000f, pxPerMs = 0.1f, maxOffsetMs = 20_000L), delta = 0L)
-        assertMs(20_000L, draggedOffset(19_000L, dxPx = -10_000f, pxPerMs = 0.1f, maxOffsetMs = 20_000L), delta = 0L)
-        // No zoom yet (a lane not measured): the offset stays where it was, still inside its limits.
-        assertMs(700L, draggedOffset(700L, dxPx = 400f, pxPerMs = 0f, maxOffsetMs = 20_000L), delta = 0L)
-        assertMs(0L, draggedOffset(-50L, dxPx = 0f, pxPerMs = 0f, maxOffsetMs = 20_000L), delta = 0L)
+    fun `moving the audio clip preserves its source range`() {
+        val clip = app.goultra.transfer.camera.ProjectAudioClip(
+            "audio", app.goultra.transfer.camera.ProjectMusic("track", lengthMs = 20_000L),
+            startMs = 4_000L, fromMs = 3_000L, toMs = 10_000L,
+        )
+        assertEquals(clip.copy(startMs = 5_000L), editAudio(clip, AudioEdit.MOVE, 1_000L))
+        assertEquals(clip.copy(startMs = 0L), editAudio(clip, AudioEdit.MOVE, -9_000L))
     }
 
     @Test
-    fun `the music may also start later than the picture, and that is bounded too`() {
-        // A hundred pixels to the right are a second off the picture's start — the track then begins later.
-        assertMs(-1000L, draggedOffset(0L, dxPx = 100f, pxPerMs = 0.1f, maxOffsetMs = 20_000L, minOffsetMs = -3_000L), delta = 0L)
-        assertMs(-3_000L, draggedOffset(-2_500L, dxPx = 10_000f, pxPerMs = 0.1f, maxOffsetMs = 20_000L, minOffsetMs = -3_000L), delta = 0L)
-        // Without a lower limit it stops at the picture's own start, as before.
-        assertMs(0L, draggedOffset(0L, dxPx = 500f, pxPerMs = 0.1f, maxOffsetMs = 20_000L), delta = 0L)
+    fun `trimming the head keeps the tail and trimming the tail keeps the head`() {
+        val clip = app.goultra.transfer.camera.ProjectAudioClip(
+            "audio", app.goultra.transfer.camera.ProjectMusic("track", lengthMs = 20_000L),
+            startMs = 2_000L, fromMs = 3_000L, toMs = 10_000L,
+        )
+        val extendedHead = editAudio(clip, AudioEdit.START, -9_000L)
+        assertEquals(clip.copy(startMs = 0L, fromMs = 1_000L), extendedHead)
+        assertEquals(clip.endMs, extendedHead.endMs)
+        assertEquals(clip.projectAt(5_000L), extendedHead.projectAt(5_000L))
+        assertEquals(clip.copy(toMs = 8_000L), editAudio(clip, AudioEdit.END, -2_000L))
+        assertEquals(clip.copy(toMs = null), editAudio(clip, AudioEdit.END, 12_000L))
+    }
+
+    @Test
+    fun `the tail can pan through the full source even when the trimmed project fits on screen`() {
+        val original = app.goultra.transfer.camera.ProjectAudioClip(
+            "trimmed", app.goultra.transfer.camera.ProjectMusic("source", lengthMs = 30_000L),
+            startMs = 1_000L, fromMs = 2_000L, toMs = 6_000L,
+        )
+        val g = TimelineGeometry(emptyList(), original.endMs, 0.08f, 10f, 420f)
+        assertEquals(0.0, g.maxScroll.toDouble(), 0.01)
+        val scroll = endTrimScrollLimit(g, original)
+        assertEquals(1_920.0, scroll.toDouble(), 0.01)
+        val x = g.rawX(original.projectAt(original.source.lengthMs), scroll)
+        assertEquals(original.projectAt(original.source.lengthMs), g.rawMsAt(x, scroll))
+    }
+
+    @Test
+    fun `the moving beat snaps only inside an overlap and releases beyond the short radius`() {
+        fun clip(id: String, start: Long, trim: Long = 0L) = app.goultra.transfer.camera.ProjectAudioClip(
+            id, app.goultra.transfer.camera.ProjectMusic("source", lengthMs = 4_000L, beats = (1..7).map { it * 500L }),
+            startMs = start, fromMs = trim,
+        )
+        val still = clip("still", 0L)
+        val moving = clip("moving", 1_022L, trim = 500L)
+        val snap = snapAudioMove(moving, listOf(still), gripSourceMs = 991L, toleranceMs = 35L)!!
+        assertEquals(1_000L, snap.clip.startMs)
+        assertEquals(1_500L, snap.timeMs)
+        assertEquals(moving.fromMs, snap.clip.fromMs)
+        assertEquals(null, snapAudioMove(moving.copy(startMs = 1_037L), listOf(still), 991L, 35L))
+        assertEquals(null, snapAudioMove(moving.copy(startMs = 4_002L), listOf(still), 991L, 35L))
     }
 }

@@ -95,6 +95,39 @@ object Highlights {
         return if (end - start >= MIN_PIECE_MS) Highlight(start, end) else null
     }
 
+    data class CursorTargets(val split: Int?, val start: Int?, val end: Int?, val canAdd: Boolean)
+
+    /** Commands apply to the selected piece or to the two neighbours of a free gap. */
+    fun cursorTargets(pieces: List<Highlight>, selected: Int, atMs: Long, durationMs: Long?): CursorTargets {
+        if (atMs < 0 || (durationMs != null && atMs > durationMs)) return CursorTargets(null, null, null, false)
+        val inside = pieces.indexOfFirst { atMs >= it.startMs && atMs < it.endMs!! }
+        if (inside >= 0) {
+            val piece = pieces[inside]
+            val split = inside.takeIf {
+                it == selected && atMs - piece.startMs >= MIN_PIECE_MS && piece.endMs!! - atMs >= MIN_PIECE_MS
+            }
+            return CursorTargets(split, null, null, false)
+        }
+        val next = pieces.indexOfFirst { it.startMs > atMs }.takeIf { it >= 0 }
+        val previous = pieces.indexOfLast { it.endMs!! <= atMs }.takeIf { it >= 0 && pieces[it].endMs!! < atMs }
+        return CursorTargets(null, next, previous, pieceAt(pieces, atMs, durationMs) != null)
+    }
+
+    fun splitAt(pieces: List<Highlight>, selected: Int, atMs: Long): List<Highlight>? {
+        val index = cursorTargets(pieces, selected, atMs, null).split ?: return null
+        val piece = pieces[index]
+        // The two ranges meet, so the split can stay exactly at the cursor.
+        return pieces.toMutableList().apply {
+            this[index] = piece.copy(endMs = atMs)
+            add(index + 1, piece.copy(startMs = atMs))
+        }
+    }
+
+    /** File ends and piece boundaries, with touching pieces sharing one stop. */
+    fun navigationPoints(pieces: List<Highlight>, durationMs: Long): List<Long> =
+        (pieces.flatMap { listOfNotNull(it.startMs, it.endMs) }.filter { it in 0L..durationMs } +
+            listOf(0L, durationMs)).distinct().sorted()
+
     /** [pieces] cut at the video's end [durationMs] (a piece left shorter than [MIN_PIECE_MS] goes). */
     fun clip(pieces: List<Highlight>, durationMs: Long?): List<Highlight> =
         if (durationMs == null) pieces

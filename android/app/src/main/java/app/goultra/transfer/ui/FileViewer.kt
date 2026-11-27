@@ -1,6 +1,7 @@
 package app.goultra.transfer.ui
 
 import androidx.annotation.OptIn
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -20,6 +21,10 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
@@ -42,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -107,7 +113,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.rememberUpdatedState
@@ -119,6 +124,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -160,7 +166,13 @@ import androidx.media3.datasource.DataSource
  * ♥ favorite, «i» info, share (files on the phone).
  */
 @Composable
-fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostState, onClose: () -> Unit) {
+fun FileViewer(
+    vm: CameraController,
+    file: CameraFile,
+    snackbar: SnackbarHostState,
+    initialEditAt: Long? = null,
+    onClose: () -> Unit,
+) {
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
@@ -169,7 +181,7 @@ fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostSta
         // taken when the viewer opens; each page shows the phone's copy of a file when there is one.
         val list = remember { vm.visibleFiles.takeIf { l -> l.any { it.name == file.name } } ?: listOf(file) }
         val pager = rememberPagerState(initialPage = list.indexOfFirst { it.name == file.name }.coerceAtLeast(0)) { list.size }
-        var locked by remember { mutableStateOf(false) } // editing pieces: the timeline owns the gestures
+        var locked by remember { mutableStateOf(initialEditAt != null) }
         Box(Modifier.fillMaxSize()) {
             VerticalPager(
                 pager,
@@ -181,7 +193,13 @@ fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostSta
                 val shown by produceState(if (listed.name == file.name) file else null, listed.name) {
                     if (value == null) value = vm.withPhoneCopy(listed)
                 }
-                shown?.let { FilePage(vm, it, active = pager.settledPage == page, onClose = onClose, onLock = { l -> locked = l }) }
+                shown?.let {
+                    FilePage(
+                        vm, it, active = pager.settledPage == page, onClose = onClose,
+                        onLock = { if (pager.settledPage == page) locked = it },
+                        initialEditAt = initialEditAt.takeIf { listed.name == file.name },
+                    )
+                }
             }
             SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(top = 64.dp))
         }
@@ -191,7 +209,14 @@ fun FileViewer(vm: CameraController, file: CameraFile, snackbar: SnackbarHostSta
 /** One file in the viewer: video, photo or live photo, with its top bar. [active]: the page on screen (plays). */
 @kotlin.OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class) // FlowRow
 @Composable
-private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, onClose: () -> Unit, onLock: (Boolean) -> Unit) {
+private fun FilePage(
+    vm: CameraController,
+    file: CameraFile,
+    active: Boolean,
+    onClose: () -> Unit,
+    onLock: (Boolean) -> Unit,
+    initialEditAt: Long?,
+) {
     val context = LocalContext.current
     val addedFileAvailable by produceState<Boolean?>(if (!file.isAdded) true else null, file.uri, file.localUri) {
         if (file.isAdded) {
@@ -255,7 +280,8 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
         fun edit(new: List<Highlight>?): List<Highlight> {
             val tidy = new?.let { Highlights.normalize(it, limitMs) }
             edited = tidy
-            vm.savePieces(file, tidy)
+            val duration = exactMs ?: file.durationSec?.times(1_000L)
+            vm.savePieces(file, tidy, Highlights.inEffect(tidy, marks, limitMs, duration))
             return tidy ?: cameraPieces
         }
         var choose by remember(file.uri) { mutableStateOf(false) }
@@ -304,7 +330,7 @@ private fun FilePage(vm: CameraController, file: CameraFile, active: Boolean, on
             )
             isVideo -> VideoPreview(
                 vm, file, pieces, edited != null, ::edit, active, onLock, { colouring = it }, topBar, saveButton,
-                full = full, landscapeFile = landscapeFile, onOverlay = { videoOverlay = it },
+                full = full, landscapeFile = landscapeFile, onOverlay = { videoOverlay = it }, initialEditAt = initialEditAt,
             ) { ms ->
                 // A camera file plays its light copy (.lrv), which may end a little before the file clips are cut
                 // from: never cut the pieces shorter than the listed whole seconds.
@@ -521,6 +547,7 @@ fun share(context: android.content.Context, files: List<CameraFile>) {
     val type = when {
         kinds == setOf(MediaKind.VIDEO) -> "video/*"
         kinds == setOf(MediaKind.PHOTO) -> "image/*"
+        kinds == setOf(MediaKind.AUDIO) -> "audio/*"
         else -> "*/*"
     }
     val intent = if (uris.size == 1) {
@@ -729,6 +756,7 @@ private fun VideoPreview(
     full: Boolean,
     landscapeFile: Boolean?,
     onOverlay: (Boolean) -> Unit,
+    initialEditAt: Long?,
     onDuration: (Long) -> Unit,
 ) {
     val context = LocalContext.current
@@ -747,6 +775,8 @@ private fun VideoPreview(
     var saved by remember(file.name) { mutableStateOf(vm.look(file)) }
     val look = saved ?: ColorLook()
     var colorPanel by remember(file.uri) { mutableStateOf(false) }
+    var film by remember(file.uri) { mutableStateOf(initialEditAt != null) }
+    var editing by remember(file.uri) { mutableStateOf(initialEditAt != null) }
     // A phone copy's size before the player starts, so its effects are made at the preview size from the first frame
     // (changing them as playback starts could leave it without a picture). The camera's light copy is small anyway.
     val knownLines by produceState<Int?>(if (file.isOnPhone) null else 0, file.localUri) {
@@ -767,7 +797,7 @@ private fun VideoPreview(
     // Insta360's LUT for an I-Log file, its strength live (0 = off); the clipping stripes, shown or not.
     val liveLut = remember(file.uri, table) { if (ilog && table != null) LiveLut(table, if (look.lut) look.strength else 0f) else null }
     val stripes = remember(file.uri) { ClippingStripes().also { it.on = vm.clipping } }
-    val resumeAt = remember(file.uri) { longArrayOf(0) } // where a restarted player picks up
+    val resumeAt = remember(file.uri) { longArrayOf(initialEditAt ?: 0L) }
     val firstFrame = remember(file.uri, effects) { BooleanArray(1) } // set by the player's listener
     // Preview weight. The effects work on a picture no bigger than the screen needs (PLAY_SIZES[level] lines, never
     // upscaled); a phone that can't keep up goes a step lower, the last step with lighter halation and sharpening
@@ -776,7 +806,7 @@ private fun VideoPreview(
     // «До / после» in the colour panel: the video as shot (the clipping stripes stay, they measure, not grade).
     var bypass by remember(file.uri) { mutableStateOf(false) }
     val bypassNow by rememberUpdatedState(bypass)
-    var paused by remember(file.uri) { mutableStateOf(!active) }
+    var paused by remember(file.uri) { mutableStateOf(!active || editing) }
     var sourceLines by remember(file.uri) { mutableIntStateOf(knownLines ?: 0) } // the video's short side
     // Whether the frame is wider than tall; only needed when the file's own size is missing (the player reports it).
     var videoLandscape by remember(file.uri) { mutableStateOf<Boolean?>(null) }
@@ -826,13 +856,13 @@ private fun VideoPreview(
                     if (effects && !(playWhenReady && stepDown("ошибка плеера"))) dropEffects("ошибка плеера")
                 }
             })
-            if (resumeAt[0] > 0) seekTo(resumeAt[0])
             if (source == null) {
                 setMediaItem(MediaItem.fromUri(file.localUri!!)) // the phone's copy: the default (content://) source
             } else {
                 setMediaSource(ProgressiveMediaSource.Factory(source).createMediaSource(MediaItem.fromUri(vm.previewUrl(file))))
             }
-            playWhenReady = active
+            if (resumeAt[0] > 0) seekTo(resumeAt[0])
+            playWhenReady = active && !editing
             // A page not on screen yet (swiping) doesn't take a decoder and a GL pipeline: it prepares when it settles.
             if (active) prepare()
         }
@@ -933,15 +963,15 @@ private fun VideoPreview(
     LaunchedEffect(active) {
         if (active) {
             if (player.playbackState == Player.STATE_IDLE && player.playerError == null) player.prepare()
-            player.play()
+            if (!editing) player.play()
         } else {
             player.pause()
         }
     }
-    // Zoom with two fingers; one finger moves the zoomed picture. Taken before the player view sees the touches,
-    // so the player's own taps (controls, seek bar) still work when not zooming.
+    // The native time bar owns the entire gesture if the touch starts on it.
     var zoom by remember(file.uri) { mutableFloatStateOf(1f) }
     var shift by remember(file.uri) { mutableStateOf(Offset.Zero) }
+    val playerView = remember(file.uri) { arrayOfNulls<PlayerView>(1) }
     var durationMs by remember(file.uri) { mutableLongStateOf(file.durationSec?.let { it * 1000L } ?: 0L) }
     LaunchedEffect(player) {
         var reported = false
@@ -955,11 +985,9 @@ private fun VideoPreview(
             delay(500)
         }
     }
-    // Ticks on the seek bar at the pieces; the flag switches to the film strip — only the pieces play, the rest is
-    // skipped. In the strip the pieces can be edited (kept on the phone): then playback is free, for finding spots.
-    var film by remember(file.uri) { mutableStateOf(false) }
-    var editing by remember(file.uri) { mutableStateOf(false) }
     val colouring = colorPanel && !editing
+    val timelineEditorOpen = film && !colouring && (editing || pieces.isEmpty())
+    val highlightsOpen = film && !editing && pieces.isNotEmpty()
     // Paused with the colour panel open: the frame as shot, coloured by the same steps in our own view — every change
     // shows at once and in full (the player draws nothing new while paused).
     val stillAt = remember(player) { longArrayOf(0) }
@@ -975,7 +1003,7 @@ private fun VideoPreview(
     }
     val stillSteps = remember(player) { listOfNotNull<ColorStep>(liveLut, matrix, sharpen, filmLook, stripes) }
     // No swiping to the next file while the timeline or the colour sliders own the gestures.
-    LaunchedEffect(editing, colouring) { onLock(editing || colouring) }
+    LaunchedEffect(timelineEditorOpen, colouring) { onLock(timelineEditorOpen || colouring) }
     // A video panel open (timeline or film strip): the viewer hides the full-screen button, which would sit on it.
     LaunchedEffect(film, editing) { onOverlay(film || editing) }
     LaunchedEffect(colouring) {
@@ -999,22 +1027,39 @@ private fun VideoPreview(
         redraw++
     }
     var current by remember(file.uri) { mutableIntStateOf(-1) }
-    LaunchedEffect(player, film, editing, pieces) {
-        if (!film || editing || pieces.isEmpty()) return@LaunchedEffect
-        current = -1
-        player.seekTo(pieces[0].startMs)
-        player.play()
+    var initialSelectionPending by remember(file.uri) { mutableStateOf(initialEditAt != null) }
+    LaunchedEffect(pieces, editing) {
+        if (!editing || !initialSelectionPending || initialEditAt == null) return@LaunchedEffect
+        val match = pieces.indexOfFirst { initialEditAt >= it.startMs && initialEditAt < it.endMs!! }
+        if (match >= 0) {
+            current = match
+            initialSelectionPending = false
+        }
+    }
+    var filmPos by remember(player) { mutableLongStateOf(player.currentPosition) }
+    var filmScrubbing by remember(player, highlightsOpen) { mutableStateOf(false) }
+    fun seekInFilm(at: Long) {
+        player.pause()
+        filmPos = at
+        player.seekTo(at)
+    }
+    LaunchedEffect(player, active, highlightsOpen, pieces) {
+        if (!active || !highlightsOpen) return@LaunchedEffect
         while (true) {
-            val pos = player.currentPosition
-            val i = pieces.indexOfFirst { pos < it.endMs!! }
-            if (i < 0) {
-                // Past the last piece: back to the first, stopped (the play button runs the strip again).
-                player.pause()
-                player.seekTo(pieces[0].startMs)
-                current = 0
-            } else {
-                if (pos < pieces[i].startMs - SKIP_SLACK_MS) player.seekTo(pieces[i].startMs)
-                current = i
+            if (!filmScrubbing) {
+                val pos = player.currentPosition
+                val i = pieces.indexOfFirst { pos < it.endMs!! }
+                if (player.playWhenReady && i < 0) {
+                    seekInFilm(pieces.first().startMs)
+                    current = 0
+                } else if (player.playWhenReady && pos < pieces[i].startMs - SKIP_SLACK_MS) {
+                    player.seekTo(pieces[i].startMs)
+                    filmPos = pieces[i].startMs
+                    current = i
+                } else {
+                    filmPos = pos
+                    current = i.takeIf { it >= 0 && pos >= pieces[it].startMs } ?: -1
+                }
             }
             delay(40)
         }
@@ -1035,6 +1080,7 @@ private fun VideoPreview(
     LaunchedEffect(editing) { if (editing && keys == null) keys = vm.keyFrames(file) }
     /** An edit: the pieces in effect come back; [focusMs] picks the piece to keep selected. */
     fun commit(new: List<Highlight>?, focusMs: Long?) {
+        initialSelectionPending = false
         val now = onEdit(new)
         current = focusMs?.let { f -> now.indexOfFirst { f >= it.startMs && f < it.endMs!! } } ?: -1
     }
@@ -1069,8 +1115,16 @@ private fun VideoPreview(
         // Setting the colour: the video keeps the upper part of the screen whatever the panel shows; the panel scrolls.
         Box(
             (if (colouring) Modifier.fillMaxHeight(0.45f).statusBarsPadding() else Modifier.weight(1f)).fillMaxWidth().pointerInput(file.uri) {
+                val timeBarBounds = android.graphics.Rect()
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    val view = playerView[0]
+                    val timeBar = view?.findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress)
+                    if (view != null && timeBar?.isShown == true) {
+                        timeBar.getDrawingRect(timeBarBounds)
+                        view.offsetDescendantRectToMyCoords(timeBar, timeBarBounds)
+                        if (timeBarBounds.contains(down.position.x.toInt(), down.position.y.toInt())) return@awaitEachGesture
+                    }
                     do {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val fingers = event.changes.count { it.pressed }
@@ -1106,14 +1160,19 @@ private fun VideoPreview(
                         }
                     },
                     update = { view ->
+                        playerView[0] = view
                         // The player is made again when the colour effects start or stop: the view must follow it.
                         if (view.player !== player) view.player = player
+                        view.useController = !timelineEditorOpen && !(highlightsOpen && !colouring)
                         view.setExtraAdGroupMarkers(pieces.map { it.startMs }.toLongArray(), BooleanArray(pieces.size))
                         // Only the picture zooms, not the player's controls.
                         view.videoSurfaceView?.apply { scaleX = zoom; scaleY = zoom; translationX = shift.x; translationY = shift.y }
                     },
                     // The old view lets go of the player, so only the new one gets its pictures.
-                    onRelease = { it.player = null },
+                    onRelease = {
+                        if (playerView[0] === it) playerView[0] = null
+                        it.player = null
+                    },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -1162,7 +1221,14 @@ private fun VideoPreview(
                 // Shown without marks too: pieces can be added by hand in the strip.
                 FilterChip(
                     selected = film,
-                    onClick = { film = !film; if (!film) editing = false },
+                    onClick = {
+                        film = !film
+                        if (!film) editing = false
+                        else if (pieces.isNotEmpty()) {
+                            player.seekTo(pieces.first().startMs)
+                            player.play()
+                        }
+                    },
                     label = { Text(if (film) tr("Отмеченное", "Highlights only") else "${pieces.size}") },
                     leadingIcon = { Icon(Icons.Filled.Flag, tr("Отметки", "Highlights"), tint = MARK_COLOR) },
                     colors = chipColors,
@@ -1203,18 +1269,47 @@ private fun VideoPreview(
                 onReset = { saved = null; vm.saveLook(file, null) },
             )
         } else if (film) {
-            if (pieces.isNotEmpty() && !editing) {
+            if (highlightsOpen) {
+                Column(Modifier.fillMaxWidth().background(Color.Black)) {
+                    EditorPlaybackControls(
+                        position = { filmPos },
+                        durationMs = durationMs,
+                        playing = !paused,
+                        pieces = pieces,
+                        onPlayPause = {
+                            if (!paused) player.pause()
+                            else {
+                                val next = pieces.firstOrNull { filmPos < it.endMs!! } ?: pieces.first()
+                                if (filmPos !in next.startMs until next.endMs!!) player.seekTo(next.startMs)
+                                player.play()
+                            }
+                        },
+                        onScrub = {
+                            if (!filmScrubbing) player.pause()
+                            filmScrubbing = true
+                            filmPos = it
+                        },
+                        onScrubFinished = {
+                            if (filmScrubbing) seekInFilm(filmPos)
+                            filmScrubbing = false
+                        },
+                        onJump = ::seekInFilm,
+                    )
+                }
                 FilmStrip(pieces, frames, current) { i ->
                     current = i
                     player.seekTo(pieces[i].startMs)
-                    if (!editing) player.play()
+                    player.play()
                 }
             }
-            if (editing || pieces.isEmpty()) {
+            if (timelineEditorOpen) {
                 TimelineEditor(
-                    vm, file, player, pieces, current, durationMs, edited, keys,
-                    onSelect = { current = it },
+                    vm, file, player, paused, pieces, current, durationMs, edited, keys,
+                    onSelect = { initialSelectionPending = false; current = it },
                     onChange = { i, piece -> commit(pieces.toMutableList().also { it[i] = piece }, piece.startMs) },
+                    onSplit = { at ->
+                        Highlights.splitAt(pieces, current, at)?.let { commit(it, at) }
+                    },
                     onAdd = { at ->
                         // Not on top of another piece: into the free gap there (Highlights.pieceAt).
                         val added = Highlights.pieceAt(pieces, at, durationMs.takeIf { it > 0 })
@@ -1229,7 +1324,7 @@ private fun VideoPreview(
                     },
                     onDelete = { i -> commit(pieces.filterIndexed { j, _ -> j != i }, null) },
                     onReset = { commit(null, null) },
-                    onDone = { editing = false },
+                    onDone = { initialSelectionPending = false; editing = false; player.pause() },
                 )
             } else {
                 Row(
@@ -1658,6 +1753,7 @@ private fun TimelineEditor(
     vm: CameraController,
     file: CameraFile,
     player: ExoPlayer,
+    paused: Boolean,
     pieces: List<Highlight>,
     current: Int,
     durationMs: Long,
@@ -1665,6 +1761,7 @@ private fun TimelineEditor(
     keys: KeyFrames?,
     onSelect: (Int) -> Unit,
     onChange: (Int, Highlight) -> Unit,
+    onSplit: (Long) -> Unit,
     onAdd: (Long) -> Unit,
     onDelete: (Int) -> Unit,
     onReset: () -> Unit,
@@ -1686,12 +1783,23 @@ private fun TimelineEditor(
     // While the strip is being dragged (and a moment after) it leads and the player follows; otherwise the strip
     // follows the playing video.
     var touchedAt by remember { mutableLongStateOf(0L) }
+    var scrubbing by remember(player) { mutableStateOf(false) }
+    var stripGesture by remember { mutableStateOf(false) }
     var drag by remember { mutableStateOf<Highlight?>(null) } // the selected piece while a handle is dragged
+    var deleting by remember(file.uri) { mutableStateOf<Highlight?>(null) }
     LaunchedEffect(player) {
         while (true) {
-            if (drag == null && android.os.SystemClock.uptimeMillis() - touchedAt > 400) pos = player.currentPosition
+            if (!scrubbing && !stripGesture && drag == null && android.os.SystemClock.uptimeMillis() - touchedAt > 400) {
+                pos = player.currentPosition
+            }
             delay(30)
         }
+    }
+    fun seek(at: Long) {
+        player.pause()
+        pos = at
+        touchedAt = android.os.SystemClock.uptimeMillis()
+        player.seekTo(at)
     }
     val shown = if (drag != null && current in pieces.indices) pieces.toMutableList().also { it[current] = drag!! } else pieces
     val latestShown by rememberUpdatedState(shown)
@@ -1711,6 +1819,29 @@ private fun TimelineEditor(
     }
 
     Column(Modifier.fillMaxWidth().background(Color.Black).navigationBarsPadding().padding(vertical = 6.dp)) {
+        EditorPlaybackControls(
+            position = { pos },
+            durationMs = durationMs,
+            playing = !paused && (durationMs <= 0 || pos < durationMs),
+            pieces = shown,
+            onPlayPause = {
+                if (!paused && (durationMs <= 0 || pos < durationMs)) player.pause()
+                else {
+                    if (player.playbackState == Player.STATE_ENDED || (durationMs > 0 && pos >= durationMs)) seek(0L)
+                    player.play()
+                }
+            },
+            onScrub = {
+                if (!scrubbing) player.pause()
+                scrubbing = true
+                pos = it
+            },
+            onScrubFinished = {
+                if (scrubbing) seek(pos)
+                scrubbing = false
+            },
+            onJump = ::seek,
+        )
         // Where the playhead is, and the selected piece.
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             val sel = shown.getOrNull(current)
@@ -1740,15 +1871,42 @@ private fun TimelineEditor(
                         latestSelect(latestShown.indexOfFirst { ms >= it.startMs && ms < it.endMs!! })
                     }
                 }
-                .pointerInput(widthPx, duration) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        if (pxPerMs <= 0f) return@detectTransformGestures
-                        pxPerMs = (pxPerMs * zoom).coerceIn(minPpm, maxPpm)
-                        if (pan.x != 0f) {
-                            pos = (pos - (pan.x / pxPerMs).toLong()).coerceIn(0L, duration)
-                            touchedAt = android.os.SystemClock.uptimeMillis()
-                            player.pause()
-                            player.seekTo(pos)
+                .pointerInput(player, widthPx, duration) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        var pinching = false
+                        var scrolling = false
+                        var stripPosition = pos.toDouble()
+                        try {
+                            do {
+                                val initial = awaitPointerEvent(PointerEventPass.Initial)
+                                if (initial.changes.count { it.pressed } >= 2) pinching = true
+                                if (pinching) {
+                                    stripGesture = true
+                                    pxPerMs = (pxPerMs * initial.calculateZoom()).coerceIn(minPpm, maxPpm)
+                                    initial.changes.forEach { it.consume() }
+                                } else {
+                                    val event = awaitPointerEvent(PointerEventPass.Main)
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (!change.pressed || change.isConsumed || pxPerMs <= 0f) continue
+                                    val distance = change.position.x - down.position.x
+                                    val dx = if (scrolling) change.position.x - change.previousPosition.x
+                                    else if (abs(distance) > viewConfiguration.touchSlop) {
+                                        scrolling = true
+                                        stripGesture = true
+                                        stripPosition = pos.toDouble()
+                                        player.pause()
+                                        distance - viewConfiguration.touchSlop * if (distance > 0f) 1f else -1f
+                                    } else continue
+                                    change.consume()
+                                    stripPosition = (stripPosition - dx / pxPerMs).coerceIn(0.0, duration.toDouble())
+                                    pos = stripPosition.roundToLong()
+                                    player.seekTo(pos)
+                                }
+                            } while (initial.changes.any { it.pressed })
+                        } finally {
+                            if (scrolling) touchedAt = android.os.SystemClock.uptimeMillis()
+                            stripGesture = false
                         }
                     }
                 },
@@ -1855,18 +2013,136 @@ private fun TimelineEditor(
                 }
             }
         }
+        val targets = Highlights.cursorTargets(pieces, current, pos, durationMs.takeIf { it > 0 })
+        val commandColors = androidx.compose.material3.ButtonDefaults.textButtonColors(
+            contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.38f),
+        )
         Row(
             Modifier.padding(horizontal = 8.dp).horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton({ onAdd(pos) }) { Text(tr("+ Кусок", "+ Piece"), color = Color.White) }
-            if (current in pieces.indices) TextButton({ onDelete(current) }) { Text(tr("Удалить", "Delete"), color = Color.White) }
+            TextButton({ onSplit(pos) }, enabled = targets.split != null, colors = commandColors) {
+                Text(tr("Разделить", "Split"))
+            }
+            TextButton({ onAdd(pos) }, enabled = targets.canAdd, colors = commandColors) {
+                Text(tr("+ Кусок", "+ Piece"))
+            }
+            TextButton(
+                onClick = {
+                    targets.start?.let { i -> onChange(i, pieces[i].copy(startMs = pos)) }
+                },
+                enabled = targets.start != null,
+                colors = commandColors,
+            ) { Text(tr("Начать тут", "Start here")) }
+            TextButton(
+                onClick = {
+                    targets.end?.let { i -> onChange(i, pieces[i].copy(endMs = pos)) }
+                },
+                enabled = targets.end != null,
+                colors = commandColors,
+            ) { Text(tr("Закончить тут", "End here")) }
+            if (current in pieces.indices) TextButton({ deleting = pieces[current] }) { Text(tr("Удалить", "Delete"), color = Color.White) }
             if (edited) TextButton(onReset) { Text(tr("Как на камере", "As on camera"), color = Color.White) }
         }
+    }
+    deleting?.let { piece ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text(tr("Удалить кусок?", "Delete the clip?")) },
+            confirmButton = {
+                TextButton({
+                    val index = pieces.indexOf(piece)
+                    if (index >= 0) onDelete(index)
+                    deleting = null
+                }) { Text(tr("Удалить", "Delete")) }
+            },
+            dismissButton = { TextButton({ deleting = null }) { Text(tr("Отмена", "Cancel")) } },
+        )
     }
 }
 
 private enum class Edge { START, END }
+
+@Composable
+@kotlin.OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+private fun EditorPlaybackControls(
+    position: () -> Long,
+    durationMs: Long,
+    playing: Boolean,
+    pieces: List<Highlight>,
+    onPlayPause: () -> Unit,
+    onScrub: (Long) -> Unit,
+    onScrubFinished: () -> Unit,
+    onJump: (Long) -> Unit,
+) {
+    val pos = position()
+    val duration = durationMs.coerceAtLeast(1L)
+    val enabled = durationMs > 0L
+    val points = remember(pieces, duration) { Highlights.navigationPoints(pieces, duration) }
+    val previous = points.lastOrNull { it < pos }
+    val next = points.firstOrNull { it > pos }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onPlayPause) {
+            Icon(
+                if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                if (playing) tr("Пауза", "Pause") else tr("Воспроизвести", "Play"),
+                tint = Color.White,
+            )
+        }
+        Slider(
+            value = pos.coerceIn(0L, duration).toFloat(),
+            onValueChange = { onScrub(it.roundToLong()) },
+            onValueChangeFinished = onScrubFinished,
+            valueRange = 0f..duration.toFloat(),
+            enabled = enabled,
+            modifier = Modifier.weight(1f),
+            thumb = { Box(Modifier.size(14.dp).background(Color.White, CircleShape)) },
+            track = { EditorSeekTrack(pos, duration, pieces) },
+        )
+        Text(
+            "${clock(pos)} / ${clock(durationMs)}",
+            Modifier.padding(start = 10.dp),
+            color = Color.White,
+            fontSize = 12.sp,
+            maxLines = 1,
+        )
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        val colors = androidx.compose.material3.IconButtonDefaults.iconButtonColors(
+            contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.38f),
+        )
+        IconButton({ onJump(0L) }, enabled = enabled && pos > 0L, colors = colors) {
+            Icon(Icons.Filled.SkipPrevious, tr("В начало файла", "Go to start of file"))
+        }
+        IconButton({ previous?.let(onJump) }, enabled = enabled && previous != null, colors = colors) {
+            Icon(Icons.Filled.KeyboardArrowLeft, tr("К предыдущей границе", "Go to previous boundary"))
+        }
+        IconButton({ next?.let(onJump) }, enabled = enabled && next != null, colors = colors) {
+            Icon(Icons.Filled.KeyboardArrowRight, tr("К следующей границе", "Go to next boundary"))
+        }
+        IconButton({ onJump(durationMs) }, enabled = enabled && pos < durationMs, colors = colors) {
+            Icon(Icons.Filled.SkipNext, tr("В конец файла", "Go to end of file"))
+        }
+    }
+}
+
+@Composable
+private fun EditorSeekTrack(pos: Long, duration: Long, pieces: List<Highlight>) {
+    Canvas(Modifier.fillMaxWidth().height(6.dp)) {
+        fun x(ms: Long): Float = size.width * (ms.coerceIn(0L, duration).toFloat() / duration)
+        val corner = CornerRadius(size.height / 2f)
+        drawRoundRect(Color(0xFF454545), cornerRadius = corner)
+        drawRoundRect(Color.White, size = Size(x(pos), size.height), cornerRadius = corner)
+        for (piece in pieces) {
+            val left = x(piece.startMs)
+            val right = x(piece.endMs ?: continue)
+            if (right <= left) continue
+            drawRect(Color(0xFFFFD54F), Offset(left, 0f), Size(right - left, size.height))
+            // Keep the shared edge visible when two ranges touch.
+            drawLine(Color(0xFF805B00), Offset(left, 0f), Offset(left, size.height), strokeWidth = 1.dp.toPx())
+        }
+    }
+}
 
 /** A frame fills its tile, cropped to the tile's shape. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCover(img: ImageBitmap, left: Float, top: Float, w: Float, h: Float) {

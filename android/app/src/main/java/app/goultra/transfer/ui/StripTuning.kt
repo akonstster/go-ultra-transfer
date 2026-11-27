@@ -43,7 +43,7 @@ internal val PART_SPRING = spring<Float>(dampingRatio = 0.85f, stiffness = 420f)
 
 /** The timeline's video track, the music track under it, and the joint drawn between two pieces. */
 internal val TIMELINE_VIDEO_H = 56.dp
-internal val TIMELINE_MUSIC_H = 44.dp
+internal val TIMELINE_MUSIC_H = 88.dp
 internal val TIMELINE_JOINT = 2.dp
 
 /** Room at either end of the timeline, so the first and the last moment are not glued to the screen's edge. */
@@ -57,12 +57,6 @@ internal const val TIMELINE_FOLLOW_SHARE = 1f / 3f
 
 /** How long after a touch the timeline stops following the clock, ms. */
 internal const val TIMELINE_FOLLOW_PAUSE_MS = 1500L
-
-/** Every fourth beat opens a bar: a thicker line, the same count as on the music track. */
-internal const val TIMELINE_BAR_EVERY = 4
-
-/** The music's offset may not come closer to the track's end than this, ms: a sliver of a track is no use. */
-internal const val TIMELINE_OFFSET_TAIL_MS = 1000L
 
 /** The strip gathering when a card is taken and spreading back when it is let go of. */
 internal val ZOOM_SPRING = spring<Float>(dampingRatio = 1f, stiffness = 260f)

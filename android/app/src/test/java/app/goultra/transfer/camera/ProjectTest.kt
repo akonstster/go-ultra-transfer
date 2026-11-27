@@ -1,6 +1,7 @@
 package app.goultra.transfer.camera
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -12,6 +13,31 @@ import java.nio.file.Files
  * unknown value written by a newer build must not crash an older one.
  */
 class ProjectTest {
+    @Test
+    fun `drop edits preserve the main accent and survive a project round trip`() {
+        val source = ProjectMusic("song", lengthMs = 9_000, drops = listOf(2_000L, 6_000L), activeDropMs = 6_000)
+        val added = source.addedDrop(4_000)
+        assertEquals(6_000L, added.activeDropMs)
+        assertEquals(added, added.movedDrop(6_000, 4_000))
+        assertEquals(added, added.movedDrop(6_000, 9_000))
+        val edited = added.movedDrop(6_000, 6_010).removedDrop(2_000)
+        assertEquals(listOf(4_000L, 6_010L), edited.drops)
+        assertEquals(6_010L, edited.activeDropMs)
+        assertTrue(edited.dropsEdited)
+        val project = Project("drops", "Drop editor", audioClips = listOf(ProjectAudioClip("clip", edited)))
+        assertEquals(project, Project.decode(Project.encode(project)))
+        assertEquals(4_000L, edited.removedDrop(6_010).activeDropMs)
+        assertEquals(4_000L, edited.primaryDrop(4_000).activeDropMs)
+        assertNull(edited.removedDrop(6_010).removedDrop(4_000).activeDropMs)
+        val cleared = source.clearedDrops().copy(
+            analysisMode = AudioAnalysisMode.SPEECH,
+            detectedMode = AudioAnalysisMode.SPEECH,
+        )
+        assertTrue(cleared.drops.isEmpty())
+        assertNull(cleared.activeDropMs)
+        assertTrue(cleared.dropsEdited)
+        assertEquals(cleared, ProjectMusic.from(cleared.toJson()))
+    }
     private fun sample() = Project(
         id = "1762400000000-00ab",
         name = "Тест",
@@ -27,11 +53,21 @@ class ProjectTest {
             ProjectClip(file = "VID_20261105_193759_162.mp4", fromMs = 0, toMs = 12_000),
             ProjectClip(file = "VID_20261105_201500_180.mp4", fromMs = 10_000, toMs = 12_000, atMs = 45_000),
         ),
-        music = ProjectMusic(
-            uri = "content://media/external/audio/media/1", name = "track.mp3",
-            offsetMs = 3_000, volume = 0.8, videoVolume = 0.5, beats = listOf(0L, 500L, 1_000L), dropMs = 32_000,
-            lengthMs = 180_000,
+        audioClips = listOf(
+            ProjectAudioClip(
+                "audio-1",
+                ProjectMusic(
+                    uri = "content://media/external/audio/media/1", name = "track.mp3",
+                    beats = listOf(0L, 500L, 1_000L), drops = listOf(8_000L, 32_000L),
+                    activeDropMs = 32_000L, lengthMs = 180_000, dropVersion = 4,
+                ),
+                startMs = 15_000, fromMs = 3_000, toMs = 50_000, volume = 0.75,
+            ),
+            ProjectAudioClip("audio-2", ProjectMusic("content://audio/2", lengthMs = 20_000), startMs = 60_000),
         ),
+        clickVolume = 0.3,
+        musicVolume = 0.8,
+        videoVolume = 0.5,
         previous = listOf(ProjectClip(file = "VID_20261105_211421_165.mp4", fromMs = 1_200, toMs = 4_000)),
     )
 
@@ -43,12 +79,34 @@ class ProjectTest {
     }
 
     @Test
-    fun `an older project's ducking flag reads as the video's level under the music`() {
-        fun music(json: String) = ProjectMusic.from(org.json.JSONObject(json))!!.videoVolume
-        assertEquals(ProjectMusic.UNDER_MUSIC, music("""{"uri":"u","duck":true}"""), 0.0)
-        assertEquals(1.0, music("""{"uri":"u","duck":false}"""), 0.0)
-        assertEquals(ProjectMusic.UNDER_MUSIC, music("""{"uri":"u"}"""), 0.0)
-        assertEquals(0.6, music("""{"uri":"u","video":0.6,"duck":false}"""), 0.0) // the slider wins
+    fun `the mix survives removing a track, a restart and adding another`() {
+        val mixed = sample().copy(musicVolume = 0.27, videoVolume = 0.83)
+        val gone = mixed.copy(audioClips = emptyList())
+        assertTrue(gone.audioClips.isEmpty())
+        assertEquals(0.27, gone.musicVolume, 0.0)
+        assertEquals(0.83, gone.videoVolume, 0.0)
+        // A restart is nothing but JSON: the levels are kept apart from the track, so they come back with it.
+        val afterRestart = Project.decode(Project.encode(gone))!!
+        val added = afterRestart.copy(audioClips = listOf(ProjectAudioClip("new", ProjectMusic("content://audio/3"))))
+        assertEquals(0.27, added.musicVolume, 0.0)
+        assertEquals(0.83, added.videoVolume, 0.0)
+        assertEquals("the new track gets its own grid", emptyList<Long>(), added.audioClips.single().source.beats)
+        assertEquals("and its own drops", emptyList<Long>(), added.audioClips.single().source.drops)
+        // The mix belongs to one project only: a new project starts from the defaults, not from the neighbour's sliders.
+        val other = Project(id = "1-0002", name = "Другой")
+        assertEquals(1.0, other.musicVolume, 0.0)
+        assertEquals(ProjectMusic.UNDER_MUSIC, other.videoVolume, 0.0)
+    }
+
+    @Test
+    fun `zero is a real level and is kept too`() {
+        val silent = sample().copy(musicVolume = 0.0, videoVolume = 0.0)
+        val back = Project.decode(Project.encode(silent.copy(audioClips = emptyList())))!!
+        assertEquals(0.0, back.musicVolume, 0.0)
+        assertEquals(0.0, back.videoVolume, 0.0)
+        val added = back.copy(audioClips = listOf(ProjectAudioClip("new", ProjectMusic("content://audio/3"))))
+        assertEquals(0.0, added.musicVolume, 0.0)
+        assertEquals(0.0, added.videoVolume, 0.0)
     }
 
     @Test
@@ -58,7 +116,7 @@ class ProjectTest {
         assertEquals(Scenario.CUSTOM, p!!.scenario)
         assertEquals(Dynamics.EVEN, p.dynamics)
         assertTrue(p.clips.isEmpty())
-        assertNull(p.music)
+        assertTrue(p.audioClips.isEmpty())
         assertNull(p.previous)
     }
 
@@ -112,13 +170,14 @@ class ProjectTest {
     }
 
     @Test
-    fun `the clips of an edited file follow its new pieces`() {
-        val p = sample()
+    fun `manual clips of an edited file follow its new pieces`() {
+        // No piece here came from the auto montage: these are ordinary live links.
+        val p = sample().copy(clips = sample().clips.map { it.copy(auto = false) })
         // The first file was edited in the film strip: one piece, in other words.
         val edited = mapOf("VID_20261105_211421_165.mp4" to listOf(Highlight(2_000, 5_000)))
         val next = p.resynced(edited)
         assertEquals(listOf(2_000L, 5_000L), listOf(next.clips[0].fromMs, next.clips[0].toMs))
-        assertTrue(next.clips[0].auto)                          // still the auto montage's piece
+        assertFalse(next.clips[0].auto)
         assertEquals(p.clips[1], next.clips[1])                 // the other file's clips keep their place
         assertEquals(3, next.clips.size)
         // The pieces are what the project takes of that file now: nothing reads as «gone from the file».
@@ -130,8 +189,70 @@ class ProjectTest {
     }
 
     @Test
+    fun `an auto montage is not silently collapsed by a source edit`() {
+        val p = sample()
+        val edited = mapOf("VID_20261105_211421_165.mp4" to listOf(Highlight(2_000, 5_000)))
+        val next = p.resynced(edited)
+        // The cut stays as it was made; the range the source lost is reported as stale, not rewritten behind the cut.
+        assertEquals(p.clips, next.clips)
+        assertTrue(next.clips[0].auto)
+        assertEquals(listOf("VID_20261105_211421_165.mp4"), next.staleClips(edited).map { it.file })
+    }
+
+    @Test
+    fun `the auto montage keeps one undo snapshot`() {
+        val p = sample()
+        val cut = listOf(
+            ProjectClip("a.mp4", 0, 2_000, auto = true),
+            ProjectClip("a.mp4", 2_000, 4_000, auto = true),
+        )
+        val auto = p.autoMontaged(cut)
+        assertEquals(p.clips, auto.previous)
+        assertEquals(cut, auto.clips)
+        // A hand edit after the montage invalidates the snapshot: undo must not throw that work away.
+        assertEquals(null, auto.editedByHand().previous)
+        assertEquals(auto.clips, auto.editedByHand().clips)
+        // The snapshot survives JSON, and undo restores exactly the pieces before the cut.
+        val back = Project.decode(Project.encode(auto))!!
+        assertEquals(auto.previous, back.previous)
+        assertEquals(p.clips, back.undoAutoMontage().clips)
+        assertNull(back.undoAutoMontage().previous)
+        // Nothing to undo is the project itself, not an empty timeline.
+        val noUndo = p.copy(previous = null)
+        assertEquals(noUndo, noUndo.undoAutoMontage())
+    }
+
+    @Test
+    fun `a rebuilt auto montage keeps the original pieces as its one undo`() {
+        val original = Project(
+            id = "1", name = "Повтор",
+            clips = listOf(
+                ProjectClip("a.mp4", 0, 30_000),
+                ProjectClip("b.mp4", 0, 30_000),
+            ),
+        )
+        val auto1 = original.autoMontaged(
+            listOf(ProjectClip("a.mp4", 0, 5_000, auto = true), ProjectClip("b.mp4", 0, 5_000, auto = true)),
+        )
+        // The second run is built from the original takes, not from the first run's small pieces.
+        assertEquals(original.clips, auto1.montageBase())
+        val auto2 = auto1.autoMontaged(
+            listOf(ProjectClip("b.mp4", 0, 8_000, auto = true), ProjectClip("a.mp4", 10_000, 18_000, auto = true)),
+        )
+        assertEquals(original.clips, auto2.montageBase())
+        assertEquals(original.clips, auto2.previous)
+        assertEquals(original.clips, auto2.undoAutoMontage().clips)
+        assertNull(auto2.undoAutoMontage().previous)
+        // And the snapshot survives a save and load just as it did before.
+        val back = Project.decode(Project.encode(auto2))!!
+        assertEquals(original.clips, back.montageBase())
+        assertEquals(original.clips, back.undoAutoMontage().clips)
+    }
+
+    @Test
     fun `a clip taken out by hand does not come back with an edit`() {
-        val p = sample().copy(clips = sample().clips + ProjectClip("VID_20261105_211421_165.mp4", 6_000, 7_000))
+        val base = sample().copy(clips = sample().clips.map { it.copy(auto = false) })
+        val p = base.copy(clips = base.clips + ProjectClip("VID_20261105_211421_165.mp4", 6_000, 7_000))
         val one = p.without(p.clips[3])                         // the second piece of the first file, dropped
         assertEquals(3, one.clips.size)
         val next = one.resynced(
