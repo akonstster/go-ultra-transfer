@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GO Ultra Transfer — Android app for the Insta360 GO Ultra</title>
-<meta name="description" content="Open-source Android app for the Insta360 GO Ultra: wakes the camera over Bluetooth, downloads files, cuts clips without downloading them whole, film-look colour on the fly. Under 5 MB — no account, no ads, no cloud. An experimental alpha can also pull files off other Insta360 cameras (X3/X4/X5, ONE, Ace).">
+<meta name="description" content="Open-source Android app for the Insta360 GO Ultra. Connect over Bluetooth, download files, edit clips, and synchronise multicam projects by sound. No account, ads, or cloud.">
 <meta name="theme-color" content="#2B3A4E">
 <style>
   :root { --bg:#0f141b; --card:#18202b; --text:#e8edf3; --muted:#9aa7b6; --accent:#f2c94c; --link:#7cc4ff; }
@@ -84,14 +84,20 @@
     </div>
     <div class="card">
       <h3 data-l="en">Tiny next to the official app</h3><h3 data-l="ru">Крошечный рядом с официальным</h3>
-      <p data-l="en">The whole app is under 5 MB — the official one is about 1.5 GB (sizes approximate). No account, no ads, no cloud; Google Play Services not required.</p>
-      <p data-l="ru">Всё приложение — меньше 5 МБ, у официального — примерно 1,5 ГБ (цифры примерные). Без аккаунта, рекламы и облака; сервисы Google не нужны.</p>
+      <p data-l="en">The APK is about 6 MB. No account, ads, cloud, or Google Play Services required.</p>
+      <p data-l="ru">APK занимает около 6 МБ. Без аккаунта, рекламы, облака и сервисов Google Play.</p>
     </div>
   </div>
 
   <h2 data-l="en">What it does</h2>
   <h2 data-l="ru">Что умеет</h2>
   <div class="grid">
+    <div class="card">
+      <h3 data-l="en">Projects and multicam in 0.17</h3><h3 data-l="ru">Проекты и мультикам в 0.17</h3>
+      <p data-l="en">Edit video and multiple audio clips on a timeline, cut to the beat, and synchronise camera angles against a reference track. When different parts require different offsets, you can place them separately or keep the whole recording.</p>
+      <p data-l="ru">Монтируйте видео и несколько аудиоклипов на таймлайне, режьте по биту и синхронизируйте ракурсы с основным звуком. Если разным участкам нужны разные сдвиги, можно расставить их отдельно или сохранить запись целиком.</p>
+      <p><a href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.17">v0.17</a></p>
+    </div>
     <div class="card">
       <h3 data-l="en">One-button connection</h3><h3 data-l="ru">Подключение одной кнопкой</h3>
       <p data-l="en">Wakes the camera over Bluetooth — even a switched-off one — and joins its Wi-Fi by itself.</p>
@@ -127,18 +133,6 @@
   <h2 data-l="en">Alpha: other Insta360 cameras</h2>
   <h2 data-l="ru">Альфа: другие камеры Insta360</h2>
   <div class="card alpha">
-    <p data-l="en"><strong>Stable and alpha.</strong> The big button above is the stable build (branch
-      <code>main</code>). The alpha (branch <code>universal</code>, pre-releases) is where new features are made and
-      tried first: support for other cameras, and now <strong>Projects</strong> — a montage put together from pieces of
-      the camera's files without downloading them, with a preview, cards dragged into order, photos and work with the
-      camera away, music with its beat, and saving it as one video. Projects arrived in
-      <a href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.17-alpha5">v0.17-alpha5</a>; finished features move to the stable build.</p>
-    <p data-l="ru"><strong>Стабильная и альфа.</strong> Большая кнопка выше — стабильная сборка (ветка
-      <code>main</code>). Альфа (ветка <code>universal</code>, pre-release) — то место, где новое делается и
-      проверяется первым: поддержка других камер, а теперь и <strong>Проекты</strong> — монтаж из кусков файлов камеры
-      без их скачивания, с предпросмотром, перетаскиванием карточек, фото, музыкой с битом, работой без камеры и сохранением в одно
-      видео. Проекты вышли в <a href="https://github.com/akonstster/go-ultra-transfer/releases/tag/v0.17-alpha5">v0.17-alpha5</a>;
-      готовое переходит в стабильную сборку.</p>
     <p data-l="en"><strong>Experimental.</strong> The <code>universal</code> build can also pull files off other
       Insta360 cameras — the ones this app was not built around. The camera's Wi-Fi is joined by hand: switch the camera
       on, connect to its <code>…OSC</code> access point in the phone's Wi-Fi settings (the password is usually
